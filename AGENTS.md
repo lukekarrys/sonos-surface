@@ -2,28 +2,30 @@
 
 ## Project Structure & Module Organization
 
-This workspace is an initial scaffold containing an empty `README.md`. No source code, tests, assets, or dependency manifests exist yet. Use `README.md` for the project overview and setup instructions; use `AGENTS.md` for contributor guidance.
+`sonos-surface` is a personal, single-household ESP32-S3 Sonos project. This repository currently contains specifications, not firmware. Read [product scope](docs/product.md), [intents and NFC format](docs/intent.md), [policies](docs/policy.md), and [planning and execution](docs/planner-executor.md) before changing behavior.
 
-When implementation begins, choose a layout appropriate to the stack and document it here. Suggested directories are `src/` for application code, `tests/` for tests, and `assets/` for static resources. These are proposed conventions, not existing paths.
+Future code must separate the portable core from device inputs/UI and Sonos transport. Both hardware targets share intent, policy, planner, executor, and AppState contracts. Do not import hardware, display, or network SDKs into the pure intent/policy/planning layers. Directory names and implementation language remain undecided.
 
 ## Build, Test, and Development Commands
 
-No build, test, or local development commands are currently configured. Do not assume commands such as `npm test` or `npm run build` are available.
-
-When adding tooling, provide reproducible commands for installation, local development, testing, and production builds in `README.md`. Commit the relevant manifests and lockfiles alongside that documentation.
+No build, test, or development commands are configured. Add small macOS tests for portable logic, then integrate both available boards early; do not require a complete simulator first. When introducing tooling, document exact setup and verification commands in `README.md`; commit manifests and lockfiles together. Do not claim unconfigured commands have passed.
 
 ## Coding Style & Naming Conventions
 
-No programming language, formatter, or linter has been selected. Match the conventions of the chosen stack and configure formatting and linting when introducing source code. Specify indentation in the formatter configuration rather than relying on editor defaults.
+No formatter or linter is selected. Configure indentation and naming with the chosen stack. Use descriptive Markdown headings, relative links, and valid JSON examples. Keep wire-format names consistent with the specifications.
 
-For Markdown, use descriptive headings, fenced code blocks for commands, and repository-relative paths. Keep filenames descriptive and naming consistent within each module.
+Treat omitted intent fields as preservation, retain policy provenance, and express operation dependencies explicitly. Never encode Sonos ordering or sleeps in cards. Keep grouping, generic scripting, and unrelated Sonos management out of scope.
 
 ## Testing Guidelines
 
-No test framework or coverage threshold exists yet. Introduce tests with executable behavior, document the test command, and select a consistent naming pattern supported by the framework. Cover new behavior and regression cases for bug fixes. Report what was verified and identify checks that could not run.
+No framework or coverage threshold exists. Use the acceptance cases in the specifications as behavioral fixtures, including omission, explicit `false`, policy precedence, partial failure, uncertain retries, and stale state. Separate deterministic Mac tests from real-speaker tests; report which ran.
 
 ## Commit & Pull Request Guidelines
 
-This checkout has no Git metadata, so existing commit conventions cannot be verified. Until conventions are established, use concise, imperative subjects such as `Add development setup instructions` and keep commits focused.
+History currently contains only `init`; no established convention exists. Use focused commits with imperative subjects such as `Specify intent preservation semantics`.
 
-Pull requests should explain the change, its purpose, and validation performed. Link relevant issues and include screenshots when changing a visible interface. Update this guide as the actual structure and tooling take shape.
+PRs should explain behavior, validation, and unresolved risks; link issues when available and include screenshots for UI changes. Update affected specifications together. Keep household credentials and personal configuration out of commits.
+
+## Agent Working Style
+
+Resolve reversible engineering choices autonomously. Involve the human for meaningful hardware tests or choices that materially change user-visible semantics, persisted formats, or architecture. Label deliberate contracts, reference evidence, and experimental assumptions separately. Prefer small working slices on both boards; measure Sonos/NFC behavior before adding abstractions. Stay within the current task's authorized scope.
