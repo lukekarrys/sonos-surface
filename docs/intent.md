@@ -2,11 +2,11 @@
 
 ## Contract
 
-Current slice: source + explicit play, standalone play/pause, and shuffle are
-implemented. Source with omitted transport/source + pause, volume, repeat,
-next, writer mode, and required extensions reject before mutation. These are
-temporary capability limits; the broader v1 semantics below remain the contract.
-See [hardware evidence](hardware.md) for supported NFC types and validation status.
+Current milestone implements source, play/pause/next/previous, absolute/relative
+volume, shuffle, and repeat through shared planning and Sonos boundaries.
+Source-only and source + pause capture and preserve playing/non-playing state.
+Seeking, writer mode, and required extensions remain unsupported. See
+[hardware evidence](hardware.md) for physical validation and limitations.
 
 A MusicIntent declares requested state and, optionally, one transport command.
 It is not a sequence of Sonos calls. NFC, touch/buttons, and resolved voice MUST
@@ -42,7 +42,7 @@ validation. Parsing and policy resolution MUST have no Sonos side effects.
 | Intent field | V1 value | Meaning |
 | --- | --- | --- |
 | `source` | Object with exactly `service: "apple-music"` and `url` string | Replace/select the queue for an album, playlist, or track; select a direct radio source for a station |
-| `transport` | `"play"`, `"pause"`, or `"next"` | Start/resume, become non-playing, or advance once |
+| `transport` | `"play"`, `"pause"`, `"next"`, or `"previous"` | Start/resume, become non-playing, or advance/rewind once |
 | `volume` | Exactly one of `{ "set": N }` or `{ "delta": N }` | Absolute level or relative adjustment |
 | `shuffle` | Boolean | Requested shuffle state, independent of repeat |
 | `repeat` | `"off"`, `"all"`, or `"one"` | Requested repeat state, independent of shuffle |
@@ -75,7 +75,7 @@ Omission preserves final state where changing another property has side effects:
   them. When Sonos exposes one combined play mode, the planner must read and
   carry forward the omitted component. Source-change side effects may require
   restoring preserved mode or mute; do not otherwise reassert omitted volume.
-- `next` is an imperative exception: exactly one advance attempt with the
+- `next`/`previous` are imperative exceptions: exactly one native skip attempt with the
   speaker's native end-of-queue behavior. It MUST NOT be combined with `source`
   or repeat/shuffle changes in v1; combining it with volume is allowed. Do not
   invent a replay fallback at the queue boundary. Its exact paused-state behavior

@@ -1,9 +1,9 @@
 {
   "wifi_ssid": "YOUR_2_4_GHZ_WIFI",
   "wifi_password": "YOUR_WIFI_PASSWORD",
-  "sonos_ip": "192.168.1.100",
-  "sonos_uid": "RINCON_REPLACE_WITH_DISCOVERED_ID",
+  "sonos_ip": "",
+  "sonos_uid": "",
   "source_url": "https://music.apple.com/us/album/REPLACE_WITH_KNOWN_SOURCE/123456789",
-  "playlist_shuffle_room": "",
-  "apple_region": "52231"
+  "apple_region": "52231",
+  "playlist_shuffle_rooms": {}
 }

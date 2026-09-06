@@ -153,13 +153,19 @@ Result normalizeAppleUrl(const std::string& input, Source& source) {
 }
 
 Result validateIntent(const MusicIntent& intent) {
-  if (!intent.source && !intent.transport && !intent.shuffle.has_value()) return Result::fail("Empty intent");
-  if (intent.transport && *intent.transport != TransportCommand::Play && *intent.transport != TransportCommand::Pause)
+  if (!intent.source && !intent.transport && !intent.shuffle.has_value() && !intent.repeat && !intent.volume) return Result::fail("Empty intent");
+  if (intent.transport && *intent.transport != TransportCommand::Play && *intent.transport != TransportCommand::Pause &&
+      *intent.transport != TransportCommand::Next && *intent.transport != TransportCommand::Previous)
     return Result::fail("Unsupported transport");
+  if (intent.volume && (intent.volume->value > 100 || intent.volume->value < (intent.volume->relative ? -100 : 0)))
+    return Result::fail("Invalid volume range");
+  if (intent.repeat && *intent.repeat != Repeat::Off && *intent.repeat != Repeat::All && *intent.repeat != Repeat::One)
+    return Result::fail("Invalid repeat");
+  if ((intent.transport == TransportCommand::Next || intent.transport == TransportCommand::Previous) &&
+      (intent.source || intent.shuffle.has_value() || intent.repeat)) return Result::fail("Next/previous cannot combine with source or mode");
   if (intent.source) {
-    if (intent.source->kind == SourceKind::Station && intent.shuffle.has_value())
-      return Result::fail("Shuffle is unsupported for stations");
-    if (intent.transport != TransportCommand::Play) return Result::fail("This slice requires explicit transport=play with source");
+    if (intent.source->kind == SourceKind::Station && (intent.shuffle.has_value() || intent.repeat))
+      return Result::fail("Shuffle/repeat are unsupported for stations");
     Source normalized;
     auto r = normalizeAppleUrl(intent.source->url, normalized);
     if (!r.ok) return r;
@@ -203,8 +209,8 @@ Result parseIntent(const std::string& payload, MusicIntent& output) {
     if (root.contains("requires") && (!root["requires"].is_array() || !root["requires"].empty()))
       return Result::fail("Required extensions are unsupported by this slice");
     const auto& fields = root["intent"];
-    if (!keys(fields, {"source", "transport", "shuffle"}))
-      return Result::fail("Unsupported intent field (volume/repeat/next are not implemented)");
+    if (!keys(fields, {"source", "transport", "shuffle", "repeat", "volume"}))
+      return Result::fail("Unsupported intent field");
     if (fields.contains("source")) {
       const auto& s = fields["source"];
       if (!keys(s, {"service", "url"}) || !s.contains("service") || s["service"] != "apple-music" ||
@@ -217,7 +223,22 @@ Result parseIntent(const std::string& payload, MusicIntent& output) {
     if (fields.contains("transport")) {
       if (fields["transport"] == "play") intent.transport = TransportCommand::Play;
       else if (fields["transport"] == "pause") intent.transport = TransportCommand::Pause;
-      else return Result::fail("Only play/pause transport is implemented");
+      else if (fields["transport"] == "next") intent.transport = TransportCommand::Next;
+      else if (fields["transport"] == "previous") intent.transport = TransportCommand::Previous;
+      else return Result::fail("Unsupported transport");
+    }
+    if (fields.contains("repeat")) {
+      if (fields["repeat"] == "off") intent.repeat = Repeat::Off;
+      else if (fields["repeat"] == "all") intent.repeat = Repeat::All;
+      else if (fields["repeat"] == "one") intent.repeat = Repeat::One;
+      else return Result::fail("repeat must be off/all/one");
+    }
+    if (fields.contains("volume")) {
+      const auto& v = fields["volume"];
+      if (!keys(v, {"set", "delta"}) || v.size() != 1) return Result::fail("volume requires exactly one set/delta");
+      const auto& n = v.begin().value();
+      if (!n.is_number_integer() || n < -100 || n > 100) return Result::fail("Invalid volume integer");
+      intent.volume = Volume{v.contains("delta"), n.get<int>()};
     }
     if (fields.contains("shuffle")) {
       if (!fields["shuffle"].is_boolean()) return Result::fail("shuffle must be true or false");
@@ -230,11 +251,11 @@ Result parseIntent(const std::string& payload, MusicIntent& output) {
 }
 
 ResolvedIntent resolvePolicy(const MusicIntent& intent, const PolicyContext& context) {
-  ResolvedIntent result{intent, intent.shuffle.has_value() ? "explicit" : "preserve", context.revision};
+  ResolvedIntent result{intent, intent.shuffle.has_value() ? "explicit" : "preserve", context.revision, context.targetId};
   if (!intent.shuffle.has_value() && intent.source) {
-    if (intent.source->kind == SourceKind::Playlist && !context.playlistShuffleRoom.empty() &&
-        context.targetId == context.playlistShuffleRoom) {
-      result.intent.shuffle = true;
+    const auto roomRule = context.playlistShuffleRooms.find(context.targetId);
+    if (intent.source->kind == SourceKind::Playlist && roomRule != context.playlistShuffleRooms.end()) {
+      result.intent.shuffle = roomRule->second;
       result.shuffleOrigin = "playlist-room-shuffle";
     } else if (intent.source->kind == SourceKind::Album) {
       result.intent.shuffle = false;
@@ -297,6 +318,10 @@ const char* operationName(Operation op) {
     case Operation::ApplyMode: return "ApplyMode";
     case Operation::Play: return "Play";
     case Operation::Pause: return "Pause";
+    case Operation::Next: return "Next";
+    case Operation::Previous: return "Previous";
+    case Operation::SetVolume: return "SetVolume";
+    case Operation::RestoreTransport: return "RestoreTransport";
   }
   return "Unknown";
 }
@@ -305,12 +330,22 @@ Result makePlan(const ResolvedIntent& resolved, Plan& plan) {
   if (!valid.ok) return valid;
   plan = {resolved, {}};
   if (resolved.intent.source) {
-    if (resolved.intent.source->kind == SourceKind::Station) plan.operations = {Operation::SelectStation};
+    if (resolved.intent.source->kind == SourceKind::Station) {
+      if (resolved.intent.transport != TransportCommand::Play) plan.operations.push_back(Operation::Stop);
+      plan.operations.push_back(Operation::SelectStation);
+    }
     else plan.operations = {Operation::Stop, Operation::ClearQueue, Operation::AddSource,
                        Operation::SelectQueue, Operation::ApplyMode};
-  } else if (resolved.intent.shuffle.has_value()) plan.operations.push_back(Operation::ApplyMode);
-  if (resolved.intent.transport)
-    plan.operations.push_back(*resolved.intent.transport == TransportCommand::Play ? Operation::Play : Operation::Pause);
+  } else if (resolved.intent.shuffle.has_value() || resolved.intent.repeat) plan.operations.push_back(Operation::ApplyMode);
+  if (resolved.intent.volume) plan.operations.push_back(Operation::SetVolume);
+  if (resolved.intent.transport) {
+    switch (*resolved.intent.transport) {
+      case TransportCommand::Play: plan.operations.push_back(Operation::Play); break;
+      case TransportCommand::Pause: plan.operations.push_back(Operation::Pause); break;
+      case TransportCommand::Next: plan.operations.push_back(Operation::Next); break;
+      case TransportCommand::Previous: plan.operations.push_back(Operation::Previous); break;
+    }
+  } else if (resolved.intent.source) plan.operations.push_back(Operation::RestoreTransport);
   return {};
 }
 
@@ -321,19 +356,33 @@ Result Application::refresh() {
   if (busy_) return Result::fail("Busy");
   auto next = state_.observed;
   auto result = transport_.refresh(next);
-  if (result.ok) state_.observed = std::move(next);
-  else { state_.observed.stale = true; state_.detail = "Refresh: " + result.error; }
+  if (result.ok) {
+    state_.observed = std::move(next);
+    state_.refreshError.clear();
+  } else {
+    state_.observed.stale = true;
+    state_.refreshError = result.error;
+  }
   publish();
   return result;
 }
 Result Application::submit(const std::string& payload) {
   if (busy_) return Result::fail("Busy");
   if (state_.recoveryRequired) return Result::fail("Uncertain previous effect; inspect speaker and reboot before a deliberate retry");
-  ++state_.requestId;
   MusicIntent intent;
   auto result = parseIntent(payload, intent);
+  if (!result.ok) {
+    state_.status = "failed"; state_.detail = result.error; publish(); return result;
+  }
+  return submit(resolvePolicy(intent, context_));
+}
+Result Application::submit(const ResolvedIntent& accepted) {
+  if (busy_) return Result::fail("Busy");
+  if (state_.recoveryRequired) return Result::fail("Uncertain previous effect; inspect speaker and reboot before a deliberate retry");
+  if (accepted.targetId != context_.targetId) return Result::fail("Accepted target differs from executor target");
+  ++state_.requestId;
   Plan plan;
-  if (result.ok) result = makePlan(resolvePolicy(intent, context_), plan);
+  auto result = makePlan(accepted, plan);
   if (!result.ok) {
     state_.status = "failed";
     state_.detail = result.error;
@@ -363,8 +412,16 @@ Result Application::submit(const std::string& payload) {
   }
   if (!result.ok) {
     PlaybackState next = state_.observed;
-    if (transport_.refresh(next).ok) state_.observed = std::move(next);
-    else state_.observed.stale = true;
+    const auto refreshed = transport_.refresh(next);
+    if (refreshed.ok) {
+      state_.observed = std::move(next);
+      state_.refreshError.clear();
+    } else {
+      state_.observed.stale = true;
+      state_.refreshError = refreshed.error;
+    }
+  } else {
+    state_.refreshError.clear();
   }
   state_.recoveryRequired = result.uncertain;
   state_.status = result.ok ? "succeeded" : result.uncertain ? "uncertain" : completed ? "partial" : "failed";

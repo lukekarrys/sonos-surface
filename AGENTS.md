@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-`sonos-surface` is a personal, single-household ESP32-S3 Sonos project. Read [product scope](docs/product.md), [intents](docs/intent.md), [policies](docs/policy.md), [execution](docs/planner-executor.md), and [hardware evidence](docs/hardware.md) before changing behavior. The first two-board slice is demonstrated: M5 NFC playback and calibrated Waveshare center-button Pause/Play are owner-confirmed, with independent state reads on both. The V2 fit is specific to this unit; diagnostics remain raw. Boot issues have workarounds, not a confirmed fix.
+`sonos-surface` is a personal, single-household ESP32-S3 Sonos project. Read [product scope](docs/product.md), [intents](docs/intent.md), [policies](docs/policy.md), [execution](docs/planner-executor.md), and [hardware evidence](docs/hardware.md) before changing behavior. The first two-board slice is demonstrated: M5 NFC playback and calibrated Waveshare center-button Pause/Play are owner-confirmed, with independent state reads on both. The V2 fit is stored per device in surface/touch NVS; diagnostics remain raw. Stick uses explicit target initialization. Native USB/early-boot power-cycle limitations remain; see the latest hardware-hardening evidence.
 
 `libraries/SurfaceCore/src/` owns portable intent, policy, planning, execution, and AppState. `SurfaceSonos/src/` owns SOAP/Apple metadata behind `LocalHttp`. `SurfaceDevice/src/` contains the ESP32 runtime and separate board adapters. `firmware/sonos_surface/` is the shared entry point; `tests/` and `scripts/` contain validation/tooling. Keep hardware/network SDKs out of portable layers.
 

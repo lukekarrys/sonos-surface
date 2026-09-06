@@ -9,10 +9,11 @@ observations and experimental assumptions. These documents specify the first
 safe vertical slice and its extension points, not a complete Sonos library.
 
 Implementation progress and measured evidence live in [hardware.md](hardware.md).
-The current slice uses polling rather than subscriptions and rejects unsupported
-v1 capabilities explicitly. Both device playback paths now have physical evidence:
+Playback state uses polling; topology notifications invalidate the selectable-room list.
+Unsupported explicit v1 capabilities reject before mutation. Both device playback paths now have physical evidence:
 M5 NFC playback and calibrated Waveshare button control are owner-confirmed.
-Boot reliability and calibration portability remain limitations. See
+Calibration is now device-local NVS data; native USB/cold-boot recovery and physical
+validation of the hardened adapters remain limitations. See
 [README](../README.md) for reproducible commands.
 
 ## Available hardware and scope
@@ -149,3 +150,23 @@ and side effects, shuffle/repeat preservation, no unintended autoplay while
 non-playing, older-speaker latency, safe concurrency, subscription renewal/loss,
 snapshot races, and interference from other controllers. Encode measured facts
 in the adapter rather than assumptions in MusicIntent.
+
+## Stick room and policy milestone
+
+The current focus is M5StickS3 + NFC. SSDP/bootstrap discovery and fresh topology
+produce a bounded list of independent players, with stable UUID, current name/IP,
+coordinator/group, and eligibility. Grouped/bonded/invisible players are unavailable;
+there is no coordinator fallback or grouping management. Refresh at boot,
+reconnect, topology notifications, and every ten seconds. Missing topology fails
+closed. A double-click cycles eligible UUIDs without changing playback.
+
+The device stores its last explicit selection separately from household config.
+Boot restores it if eligible; otherwise reports unavailability and selects the
+lexicographically first eligible UUID. Subsequent invalidation keeps the selected
+identity and rejects new commands, with explicit cycling available for recovery.
+Each accepted request binds that identity and runtime policy before execution.
+Changing a display name or address cannot change policy identity or authorization.
+
+The `playlist_shuffle_rooms` UUID-to-boolean map is persisted runtime configuration,
+not a compile-time policy. Room discovery and selection grant no mutation rights.
+Only a separately enabled, explicitly UUID-bound Office test image may mutate.

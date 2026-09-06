@@ -24,7 +24,9 @@ struct FakeSonos : SonosTransport {
   std::vector<Operation> calls;
   unsigned prepares = 0, reads = 0;
   std::optional<Operation> failAt;
+  bool failRefresh = false;
   Result refresh(PlaybackState& state) override {
+    if (failRefresh) { state.title = "Incomplete read"; return Result::fail("speaker unavailable"); }
     ++reads; state.known = true; state.stale = false; state.playback = "PLAYING"; state.title = "Already playing";
     return {};
   }
@@ -50,6 +52,7 @@ struct StationHttp : LocalHttp {
     if (name == "GetPositionInfo") return reply("<r><TrackMetaData></TrackMetaData></r>");
     if (name == "GetTransportSettings") return reply("<r><PlayMode>SHUFFLE</PlayMode></r>");
     if (name == "GetMediaInfo") return reply("<r><CurrentURI>" + xmlEscape(uri) + "</CurrentURI></r>");
+    if (name == "GetVolume") return reply("<CurrentVolume>20</CurrentVolume>");
     if (name == "GetMute") return reply("<r><CurrentMute>0</CurrentMute></r>");
     if (name == "GetZoneGroupState") return reply("<r><ZoneGroupState>" + xmlEscape(
       "<ZoneGroups><ZoneGroup Coordinator=\"RINCON_TEST\"><ZoneGroupMember UUID=\"RINCON_TEST\"/></ZoneGroup></ZoneGroups>") + "</ZoneGroupState></r>");
@@ -67,19 +70,21 @@ struct StationHttp : LocalHttp {
   void pollWait(uint32_t ms) override { clock += ms; }
 };
 
+#include "milestone_tests.h"
+
 int main() {
-  unsigned cases = 0;
+  unsigned cases = milestoneTests();
   auto stationIntent = parsed(station + "?ls=1");
   assert(station.size() == 92 && stationIntent.source->kind == SourceKind::Station &&
          stationIntent.source->url == station && stationIntent.transport == TransportCommand::Play); ++cases;
-  assert(!resolvePolicy(stationIntent, {"room", "room", 1}).intent.shuffle.has_value()); ++cases;
+  assert(!resolvePolicy(stationIntent, {"room", {{"room", true}}, 1}).intent.shuffle.has_value()); ++cases;
   Plan stationPlan;
-  assert(makePlan(resolvePolicy(stationIntent, {"room", "room", 1}), stationPlan).ok);
+  assert(makePlan(resolvePolicy(stationIntent, {"room", {{"room", true}}, 1}), stationPlan).ok);
   assert((stationPlan.operations == std::vector<Operation>{Operation::SelectStation, Operation::Play})); ++cases;
   assert(parsed(card({{"source", {{"service", "apple-music"}, {"url", station}}}, {"transport", "play"}})).source->kind == SourceKind::Station); ++cases;
   for (bool shuffle : {false, true}) {
     FakeSonos transport;
-    Application application(transport, {"room", "room", 1});
+    Application application(transport, {"room", {{"room", true}}, 1});
     assert(!application.submit(card({{"source", {{"service", "apple-music"}, {"url", station}}},
                                     {"transport", "play"}, {"shuffle", shuffle}})).ok && transport.prepares == 0); ++cases;
   }
@@ -94,7 +99,7 @@ int main() {
   }
   StationHttp stationHttp;
   DirectSonos stationTransport(stationHttp, {"RINCON_TEST", "52231"});
-  Application stationApp(stationTransport, {"RINCON_TEST", "RINCON_TEST", 1});
+  Application stationApp(stationTransport, {"RINCON_TEST", {{"RINCON_TEST", true}}, 1});
   auto stationResult = stationApp.submit(station);
   if (!stationResult.ok) std::cerr << "Station test: " << stationResult.error << '\n';
   assert(stationResult.ok && stationApp.state().observed.uri == stationUri);
@@ -104,7 +109,7 @@ int main() {
   StationHttp wrongStation;
   wrongStation.wrongStation = true;
   DirectSonos wrongTransport(wrongStation, {"RINCON_TEST", "52231"});
-  Application wrongApp(wrongTransport, {"RINCON_TEST", "", 1});
+  Application wrongApp(wrongTransport, {"RINCON_TEST", {}, 1});
   assert(!wrongApp.submit(station).ok && wrongApp.state().recoveryRequired); ++cases;
   for (const auto* action : {"Play", "Pause", "Next", "Previous", "Seek", "SetVolume", "SetPlayMode",
                              "SetAVTransportURI", "RemoveAllTracksFromQueue", "AddURIToQueue", "BecomeCoordinatorOfStandaloneGroup"}) {
@@ -129,29 +134,50 @@ int main() {
   auto explicitFalse = parsed(card({{"source", {{"service", "apple-music"}, {"url", album}}},
                                     {"transport", "play"}, {"shuffle", false}}));
   assert(explicitFalse.shuffle.has_value() && !*explicitFalse.shuffle); ++cases;
-  assert(resolvePolicy(legacy, {"room", "room", 1}).intent.shuffle == false); ++cases;
+  assert(resolvePolicy(legacy, {"room", {{"room", true}}, 1}).intent.shuffle == false); ++cases;
   auto explicitTrue = explicitFalse; explicitTrue.shuffle = true;
-  auto resolved = resolvePolicy(explicitTrue, {"room", "room", 1});
+  auto resolved = resolvePolicy(explicitTrue, {"room", {{"room", true}}, 1});
   assert(resolved.intent.shuffle == true && resolved.shuffleOrigin == "explicit"); ++cases;
   auto pl = parsed(playlist);
-  assert(resolvePolicy(pl, {"room", "room", 1}).intent.shuffle == true); ++cases;
-  assert(!resolvePolicy(pl, {"other", "room", 1}).intent.shuffle.has_value()); ++cases;
+  assert(resolvePolicy(pl, {"room", {{"room", true}}, 1}).intent.shuffle == true); ++cases;
+  assert(!resolvePolicy(pl, {"other", {{"room", true}}, 1}).intent.shuffle.has_value()); ++cases;
   pl.shuffle = false;
-  assert(resolvePolicy(pl, {"room", "room", 1}).intent.shuffle == false); ++cases;
+  assert(resolvePolicy(pl, {"room", {{"room", true}}, 1}).intent.shuffle == false); ++cases;
   auto track = parsed(album + "?i=111");
-  assert(!resolvePolicy(track, {"room", "room", 1}).intent.shuffle.has_value()); ++cases;
-  assert(!resolvePolicy(parsed(card({{"transport", "pause"}})), {"room", "room", 1}).intent.shuffle); ++cases;
+  assert(!resolvePolicy(track, {"room", {{"room", true}}, 1}).intent.shuffle.has_value()); ++cases;
+  assert(!resolvePolicy(parsed(card({{"transport", "pause"}})), {"room", {{"room", true}}, 1}).intent.shuffle); ++cases;
   FakeSonos fake;
-  Application app(fake, {"room", "room", 1});
+  Application app(fake, {"room", {{"room", true}}, 1});
   assert(app.refresh().ok && app.state().observed.title == "Already playing" && fake.calls.empty()); ++cases;
+  // Network recovery clears observation errors without losing command outcomes
+  // or publishing a partially read snapshot. No command is replayed on recovery.
+  for (const auto& payload : {std::string(), card({{"transport", "pause"}}), std::string("invalid intent")}) {
+    FakeSonos recovering;
+    AppState published;
+    Application recoveryApp(recovering, {"room", {{"room", true}}, 1}, [&](const AppState& state) { published = state; });
+    assert(recoveryApp.refresh().ok);
+    if (!payload.empty()) recoveryApp.submit(payload);
+    const auto before = recoveryApp.state();
+    const auto calls = recovering.calls;
+    recovering.failRefresh = true;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+      assert(!recoveryApp.refresh().ok);
+      assert(published.observed.stale && published.observed.title == before.observed.title);
+      assert(published.refreshError == "speaker unavailable" && published.detail == before.detail);
+    }
+    recovering.failRefresh = false;
+    assert(recoveryApp.refresh().ok && published.refreshError.empty() && !published.observed.stale);
+    assert(published.status == before.status && published.detail == before.detail && published.requestId == before.requestId);
+    assert(recovering.calls == calls); ++cases;
+  }
   assert(app.submit(album).ok);
   assert((fake.calls == std::vector<Operation>{Operation::Stop, Operation::ClearQueue, Operation::AddSource,
           Operation::SelectQueue, Operation::ApplyMode, Operation::Play})); ++cases;
   fake.calls.clear();
   assert(app.submit(card({{"transport", "pause"}})).ok && fake.calls == std::vector<Operation>{Operation::Pause}); ++cases;
   for (const Json& unsupported : std::vector<Json>{
-      {{"transport", "play"}, {"volume", {{"set", 25}}}}, {{"repeat", "off"}}, {{"transport", "next"}},
-      {{"source", {{"service", "apple-music"}, {"url", album}}}}, {{"shuffle", 0}}, {{"shuffle", nullptr}},
+      {{"volume", {{"set", 101}}}}, {{"repeat", "invalid"}}, {{"transport", "toggle"}},
+      {{"source", {{"service", "apple-music"}, {"url", album}}}, {"transport", "next"}}, {{"shuffle", 0}}, {{"shuffle", nullptr}},
       {{"transport", "play"}, {"volum", 25}}, Json::object()}) {
     unsigned before = fake.prepares;
     assert(!app.submit(card(unsupported)).ok && fake.prepares == before); ++cases;
@@ -186,8 +212,8 @@ int main() {
     auto oldIntent = parsed(oldText);
     assert(oldIntent.source->url == url && oldIntent.transport == TransportCommand::Play && !oldIntent.shuffle.has_value());
     FakeSonos oldTransport, newTransport;
-    Application oldApp(oldTransport, {scenario.second, "room", 1});
-    Application newApp(newTransport, {scenario.second, "room", 1});
+    Application oldApp(oldTransport, {scenario.second, {{"room", true}}, 1});
+    Application newApp(newTransport, {scenario.second, {{"room", true}}, 1});
     assert(oldApp.submit(oldText).ok && newApp.submit(newText).ok);
     assert(oldTransport.calls == newTransport.calls && oldTransport.calls.back() == Operation::Play);
     assert(oldApp.state().shuffleOrigin == newApp.state().shuffleOrigin); ++cases;
@@ -205,7 +231,7 @@ int main() {
       auto intent = parsed(decoded);
       assert(intent.transport == TransportCommand::Play && !intent.shuffle.has_value());
       FakeSonos uriTransport, textTransport;
-      Application uriApp(uriTransport, {"room", "room", 1}), textApp(textTransport, {"room", "room", 1});
+      Application uriApp(uriTransport, {"room", {{"room", true}}, 1}), textApp(textTransport, {"room", {{"room", true}}, 1});
       assert(uriApp.submit(decoded).ok && textApp.submit(url).ok);
       assert(uriTransport.calls == textTransport.calls && uriApp.state().shuffleOrigin == textApp.state().shuffleOrigin);
       ++cases;
@@ -234,7 +260,7 @@ int main() {
     assert(decodeNdefRecord(1, type, reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size(), decoded).ok);
     assert(decoded == householdUrl);
     FakeSonos transport;
-    Application application(transport, {"office", "", 1});
+    Application application(transport, {"office", {}, 1});
     assert(application.submit(decoded).ok && transport.calls.back() == Operation::Play);
     assert(application.state().shuffleOrigin == "preserve"); ++cases;
   }
@@ -254,9 +280,15 @@ int main() {
   assert(!decodeNdefRecord(1, "", nullptr, 94, payload).ok); ++cases;
   FakeSonos failure;
   failure.failAt = Operation::AddSource;
-  Application failed(failure, {"room", "", 1});
+  Application failed(failure, {"room", {}, 1});
   assert(!failed.submit(album).ok && failed.state().status == "uncertain");
   assert(failure.calls.size() == 3 && failure.calls.back() == Operation::AddSource);
+  const auto uncertainDetail = failed.state().detail;
+  failure.failRefresh = true;
+  assert(!failed.refresh().ok && failed.state().refreshError == "speaker unavailable");
+  failure.failRefresh = false;
+  assert(failed.refresh().ok && failed.state().refreshError.empty());
+  assert(failed.state().status == "uncertain" && failed.state().detail == uncertainDetail && failed.state().recoveryRequired); ++cases;
   assert(!failed.submit(album).ok && failure.calls.size() == 3); ++cases;
   std::string mode;
   assert(modeWithShuffle("REPEAT_ALL", true, mode).ok && mode == "SHUFFLE"); ++cases;

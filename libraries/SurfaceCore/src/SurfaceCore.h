@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <functional>
 #include <optional>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -15,7 +16,9 @@ struct Result {
   }
 };
 enum class SourceKind { Album, Playlist, Track, Station };
-enum class TransportCommand { Play, Pause };
+enum class TransportCommand { Play, Pause, Next, Previous };
+enum class Repeat { Off, All, One };
+struct Volume { bool relative = false; int value = 0; };
 struct Source {
   std::string url, storefront, catalogId;
   SourceKind kind = SourceKind::Album;
@@ -24,27 +27,47 @@ struct MusicIntent {
   std::optional<Source> source;
   std::optional<TransportCommand> transport;
   std::optional<bool> shuffle;
+  std::optional<Repeat> repeat;
+  std::optional<Volume> volume;
 };
+using PlaylistShuffleRooms = std::map<std::string, bool>;
 struct PolicyContext {
   std::string targetId;
-  std::string playlistShuffleRoom;
+  PlaylistShuffleRooms playlistShuffleRooms;
   uint32_t revision = 1;
 };
 struct ResolvedIntent {
   MusicIntent intent;
   std::string shuffleOrigin; // explicit, albums-in-order, playlist-room-shuffle, preserve
   uint32_t policyRevision = 1;
+  std::string targetId;
 };
 Result normalizeAppleUrl(const std::string& input, Source& source);
 Result parseIntent(const std::string& text, MusicIntent& intent);
 Result validateIntent(const MusicIntent& intent);
 ResolvedIntent resolvePolicy(const MusicIntent& intent, const PolicyContext& context);
+std::string describeIntent(const MusicIntent& input, const ResolvedIntent& resolved);
+
+struct Room {
+  std::string id, name, address, coordinator, group;
+  bool eligible = false;
+};
+class RoomSelection {
+public:
+  std::vector<Room> rooms;
+  std::string selectedId, preferredId, warning;
+  bool initialized = false;
+  void update(std::vector<Room> discovered);
+  const Room* selected() const;
+  bool cycle();
+};
+
 Result decodeNdefText(const uint8_t* data, size_t size, std::string& text);
 Result decodeNdefUri(const uint8_t* data, size_t size, std::string& url);
 Result decodeNdefRecord(uint8_t tnf, const std::string& type, const uint8_t* data, size_t size, std::string& text);
 
 // Conservative serial schedule: each operation depends on completion of its predecessor.
-enum class Operation { Stop, ClearQueue, AddSource, SelectQueue, SelectStation, ApplyMode, Play, Pause };
+enum class Operation { Stop, ClearQueue, AddSource, SelectQueue, SelectStation, ApplyMode, SetVolume, RestoreTransport, Play, Pause, Next, Previous };
 const char* operationName(Operation operation);
 struct Plan { ResolvedIntent resolved; std::vector<Operation> operations; };
 Result makePlan(const ResolvedIntent& intent, Plan& plan);
@@ -53,10 +76,13 @@ struct PlaybackState {
   bool stale = true;
   std::string targetId, room, playback, title, artist, mode, uri;
   uint64_t observedAtMs = 0;
+  std::optional<int> volume;
+  std::string track;
 };
 struct AppState {
   PlaybackState observed;
   std::string status = "idle", detail, shuffleOrigin;
+  std::string refreshError; // Observation failures do not replace command outcomes.
   uint64_t requestId = 0;
   bool recoveryRequired = false;
 };
@@ -73,6 +99,7 @@ public:
   using Changed = std::function<void(const AppState&)>;
   Application(SonosTransport& transport, PolicyContext context, Changed changed = {});
   Result submit(const std::string& payload);
+  Result submit(const ResolvedIntent& accepted);
   Result refresh();
   const AppState& state() const { return state_; }
 private:

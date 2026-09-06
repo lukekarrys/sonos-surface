@@ -2,8 +2,10 @@
 
 ## Purpose and boundaries
 
-The first slice implements the two required rules below, with the playlist room
-configured over USB. A general configuration/rule editor is not implemented.
+The Stick milestone implements the two required rules below. The playlist rule
+uses the UUID-to-boolean `playlist_shuffle_rooms` map in the existing USB/NVS runtime configuration; changing
+it does not require rebuilding or flashing. Matching uses the accepted selected
+UUID, never the displayed name or current address. A general configuration/rule editor is not implemented.
 Policy rule-set revision is currently fixed at 1; runtime configuration revision
 tracking remains a later extension alongside policy editing.
 
@@ -61,8 +63,8 @@ Rule IDs are unique nonempty strings, and defaults contain only boolean
 `shuffle`. Reject unknown keys, wrong versions/types, and duplicate keys rather
 than partially applying a malformed configuration.
 
-The household album rule above is the initial required default. The playlist
-rule becomes active once the family configures its real target; the placeholder
+The household album rule above is the initial required default. Each playlist
+room rule becomes active once the family configures its real target; the placeholder
 MUST NOT select a room by inference. Users may subsequently edit/remove rules
 through configuration. “Household” applies to every eligible target known to
 that controller; it does not imply Sonos grouping or automatic config sync.
@@ -149,3 +151,30 @@ Additional required tests:
   repeat as a side effect of deriving shuffle.
 - Repeated resolution of identical inputs/context/revision is identical and
   does not modify the input. Resolution is input-origin independent.
+
+## Runtime diagnostics
+
+Each accepted NFC/USB intent logs selected room and bound UUID, normalized source
+kind, recognized explicit input fields, shuffle input/resolution/origin, preserved
+fields, and planned effects. Adapter logs include fresh mode/volume baselines,
+frozen absolute volume, operation timing, and final observed playback/mode/volume.
+Arbitrary optional extension values and configuration credentials are not logged.
+The two fixed rule shapes are deliberately small; the general example rule-array
+format above is a specification seam, not an accepted runtime configuration format.
+
+## Multiple playlist rooms in runtime configuration
+
+`playlist_shuffle_rooms` is an object whose keys are stable `RINCON_` player
+UUIDs and whose values are booleans. Up to 32 entries are accepted. A matching
+entry derives its boolean only for an incoming playlist with shuffle omitted;
+an unlisted target preserves shuffle. A false entry is a policy default of false,
+not a disabled rule. Explicit intent wins, and the household album default is
+unchanged. Diagnostics retain `playlist-room-shuffle` provenance and the bound UUID
+identifies the matching entry. The accepted request copies the resolved value.
+
+The old singular `playlist_shuffle_room` string is accepted for existing NVS and
+imports: a nonempty UUID becomes one true entry; an empty string becomes an empty
+map. New examples and local configuration use the plural key. Both keys together,
+invalid identities, nonboolean values, duplicate keys, and oversized maps reject
+without replacing the saved configuration. This map remains controller-local
+runtime policy, independent of discovery, selection, and mutation authorization.

@@ -105,7 +105,7 @@ Result appleSourceItem(const Source& source, const std::string& region, AppleSou
     region + "_X_#Svc" + region + "-0-Token</desc></item></DIDL-Lite>";
   return {};
 }
-Result modeWithShuffle(const std::string& current, std::optional<bool> shuffle, std::string& mode) {
+Result combineMode(const std::string& current, std::optional<bool> shuffle, std::optional<Repeat> requestedRepeat, std::string& mode) {
   int repeat;
   bool oldShuffle;
   if (current == "NORMAL") { repeat = 0; oldShuffle = false; }
@@ -115,10 +115,58 @@ Result modeWithShuffle(const std::string& current, std::optional<bool> shuffle, 
   else if (current == "SHUFFLE") { repeat = 1; oldShuffle = true; }
   else if (current == "SHUFFLE_REPEAT_ONE") { repeat = 2; oldShuffle = true; }
   else return Result::fail("Unknown play mode: " + current);
+  if (requestedRepeat) repeat = static_cast<int>(*requestedRepeat);
+  if (repeat < 0 || repeat > 2) return Result::fail("Invalid repeat");
   const char* normal[] = {"NORMAL", "REPEAT_ALL", "REPEAT_ONE"};
   const char* shuffled[] = {"SHUFFLE_NOREPEAT", "SHUFFLE", "SHUFFLE_REPEAT_ONE"};
   mode = shuffle.value_or(oldShuffle) ? shuffled[repeat] : normal[repeat];
   return {};
+}
+
+Result modeWithShuffle(const std::string& current, std::optional<bool> shuffle, std::string& mode) {
+  return combineMode(current, shuffle, std::nullopt, mode);
+}
+bool mutationAuthorized(bool enabled, const std::string& target, const std::string& verifiedName,
+                        const std::string& authorizedId, const std::string& authorizedName) {
+  return enabled && !authorizedId.empty() && !authorizedName.empty() &&
+         target == authorizedId && verifiedName == authorizedName;
+}
+Result parseTopology(const std::string& xml, std::vector<Room>& rooms) {
+  tinyxml2::XMLDocument doc;
+  if (xml.size() > 65536 || doc.Parse(xml.c_str()) != tinyxml2::XML_SUCCESS) return Result::fail("Invalid topology XML");
+  auto groups = find(&doc, "ZoneGroups");
+  if (!groups) return Result::fail("Missing group topology");
+  std::vector<Room> next;
+  auto attr = [](tinyxml2::XMLElement* e, const char* key) { auto p = e->Attribute(key); return std::string(p ? p : ""); };
+  for (auto group = groups->FirstChildElement("ZoneGroup"); group; group = group->NextSiblingElement("ZoneGroup")) {
+    unsigned count = 0;
+    for (auto m = group->FirstChildElement("ZoneGroupMember"); m; m = m->NextSiblingElement("ZoneGroupMember")) ++count;
+    for (auto m = group->FirstChildElement("ZoneGroupMember"); m; m = m->NextSiblingElement("ZoneGroupMember")) {
+      Room room;
+      room.id = attr(m, "UUID"); room.name = attr(m, "ZoneName");
+      room.coordinator = attr(group, "Coordinator"); room.group = attr(group, "ID");
+      const auto location = attr(m, "Location");
+      const auto end = location.find(":1400/");
+      if (location.rfind("http://", 0) == 0 && end != std::string::npos) room.address = location.substr(7, end - 7);
+      room.eligible = count == 1 && room.coordinator == room.id && attr(m, "Invisible") != "1" &&
+                      !m->FirstChildElement("Satellite") && attr(m, "ChannelMapSet").empty() &&
+                      attr(m, "HTSatChanMapSet").empty();
+      if (room.id.rfind("RINCON_", 0) != 0) return Result::fail("Missing topology identity");
+      for (const auto& old : next) if (old.id == room.id) return Result::fail("Duplicate topology identity");
+      if (next.size() >= 32) return Result::fail("Household exceeds 32 players");
+      next.push_back(std::move(room));
+    }
+  }
+  if (next.empty()) return Result::fail("Empty topology");
+  rooms = std::move(next);
+  return {};
+}
+Result DirectSonos::discover(std::vector<Room>& rooms) {
+  auto r = identity();
+  if (!r.ok) return r;
+  std::string body;
+  if (!(r = soap("ZoneGroupTopology", "GetZoneGroupState", "", body)).ok) return r;
+  return parseTopology(value(body, "ZoneGroupState"), rooms);
 }
 
 DirectSonos::DirectSonos(LocalHttp& http, SonosConfig config, Log log)
@@ -164,45 +212,36 @@ Result DirectSonos::ungrouped() {
   std::string body;
   auto r = soap("ZoneGroupTopology", "GetZoneGroupState", "", body);
   if (!r.ok) return r;
-  auto topology = value(body, "ZoneGroupState");
-  tinyxml2::XMLDocument doc;
-  if (doc.Parse(topology.c_str()) != tinyxml2::XML_SUCCESS) return Result::fail("Cannot validate grouping");
-  auto groups = find(&doc, "ZoneGroups");
-  if (!groups) return Result::fail("Missing group topology");
-  for (auto group = groups->FirstChildElement("ZoneGroup"); group; group = group->NextSiblingElement("ZoneGroup")) {
-    unsigned count = 0;
-    bool contains = false;
-    for (auto member = group->FirstChildElement("ZoneGroupMember"); member; member = member->NextSiblingElement("ZoneGroupMember")) {
-      ++count;
-      const char* uuid = member->Attribute("UUID");
-      contains = contains || (uuid && id_ == uuid);
-    }
-    if (contains) {
-      const char* coordinator = group->Attribute("Coordinator");
-      return count == 1 && coordinator && id_ == coordinator ? Result{} : Result::fail("Grouped target is unsupported");
-    }
-  }
+  std::vector<Room> rooms;
+  if (!(r = parseTopology(value(body, "ZoneGroupState"), rooms)).ok) return r;
+  for (const auto& room : rooms) if (room.id == id_)
+    return room.eligible ? Result{} : Result::fail("Grouped/bonded target is unsupported");
   return Result::fail("Target missing from group topology");
 }
 Result DirectSonos::refresh(PlaybackState& state) {
   auto r = identity();
   if (!r.ok) return r;
-  std::string transport, position, settings, media;
+  std::string transport, position, settings, media, volume;
   if (!(r = soap(AV, "GetTransportInfo", instance, transport)).ok ||
       !(r = soap(AV, "GetPositionInfo", instance, position)).ok ||
       !(r = soap(AV, "GetTransportSettings", instance, settings)).ok ||
-      !(r = soap(AV, "GetMediaInfo", instance, media)).ok) return r;
+      !(r = soap(AV, "GetMediaInfo", instance, media)).ok ||
+      !(r = soap(RC, "GetVolume", instance + "<Channel>Master</Channel>", volume)).ok) return r;
   PlaybackState next;
   next.targetId = id_; next.room = room_;
   next.playback = value(transport, "CurrentTransportState");
   next.mode = value(settings, "PlayMode");
   next.uri = value(media, "CurrentURI");
+  next.track = value(position, "Track");
+  const auto level = value(volume, "CurrentVolume");
+  if (!number(level) || level.size() > 3 || std::atoi(level.c_str()) > 100) return Result::fail("Unknown volume");
+  next.volume = std::atoi(level.c_str());
   auto metadata = value(position, "TrackMetaData");
   next.title = value(metadata, "title"); next.artist = value(metadata, "creator");
   if (next.playback.empty() || next.mode.empty()) return Result::fail("Incomplete playback state");
   next.known = true; next.stale = false; next.observedAtMs = http_.nowMs();
   state = std::move(next);
-  if (log_) log_("state=" + state.playback + " mode=" + state.mode + " title=" + state.title);
+  if (log_) log_("state=" + state.playback + " mode=" + state.mode + " volume=" + std::to_string(*state.volume) + " track=" + state.track + " title=" + state.title);
   return {};
 }
 Result DirectSonos::readMute(std::string& mute) {
@@ -213,20 +252,34 @@ Result DirectSonos::readMute(std::string& mute) {
   return mute == "0" || mute == "1" ? Result{} : Result::fail("Unknown mute state");
 }
 Result DirectSonos::prepare(const ResolvedIntent& intent) {
+  prepared_ = false; advanceDispatched_ = false;
   deadline_ = http_.nowMs() + 60000;
   if (config_.targetId.empty()) return Result::fail("Configure sonos_uid before controlling a speaker");
   auto r = validateIntent(intent.intent);
   if (!r.ok) return r;
+  if (!intent.targetId.empty() && intent.targetId != config_.targetId) return Result::fail("Bound target mismatch");
   intent_ = intent;
+  desiredMode_.clear(); preservedMute_.clear();
   if (intent.intent.source && !(r = appleSourceItem(*intent.intent.source, config_.appleRegion, item_)).ok) return r;
   PlaybackState state;
   if (!(r = refresh(state)).ok || !(r = ungrouped()).ok) return r;
-  if (!intent.intent.source && intent.intent.shuffle.has_value() && state.uri.rfind("x-sonosapi-radio:", 0) == 0)
-    return Result::fail("Shuffle is unsupported for the current station");
-  if ((intent.intent.source && intent.intent.source->kind != SourceKind::Station) || intent.intent.shuffle.has_value()) {
-    if (!(r = modeWithShuffle(state.mode, intent.intent.shuffle, desiredMode_)).ok) return r;
+  if (!intent.intent.source && (intent.intent.shuffle.has_value() || intent.intent.repeat) && state.uri.rfind("x-sonosapi-radio:", 0) == 0)
+    return Result::fail("Shuffle/repeat are unsupported for the current station");
+  if ((intent.intent.source && intent.intent.source->kind != SourceKind::Station) || intent.intent.shuffle.has_value() || intent.intent.repeat) {
+    if (!(r = combineMode(state.mode, intent.intent.shuffle, intent.intent.repeat, desiredMode_)).ok) return r;
   }
   if (intent.intent.source && !(r = readMute(preservedMute_)).ok) return r;
+  if (intent.intent.source && !intent.intent.transport && state.playback != "PLAYING" &&
+      state.playback != "PAUSED_PLAYBACK" && state.playback != "STOPPED" && state.playback != "NO_MEDIA_PRESENT")
+    return Result::fail("Cannot preserve transitional/unknown transport");
+  desiredPlaying_ = intent.intent.transport == TransportCommand::Play ||
+                    (!intent.intent.transport && state.playback == "PLAYING");
+  baselineVolume_ = *state.volume;
+  desiredVolume_ = intent.intent.volume ? std::clamp(intent.intent.volume->value +
+      (intent.intent.volume->relative ? baselineVolume_ : 0), 0, 100) : -1;
+  if (log_) log_("baseline volume=" + std::to_string(baselineVolume_) + " frozen-volume=" +
+      std::to_string(desiredVolume_) + " mode=" + desiredMode_ + " source-end-playing=" + std::to_string(desiredPlaying_));
+  prepared_ = true;
   return {};
 }
 Result DirectSonos::queueCount(unsigned& count) {
@@ -252,7 +305,10 @@ Result DirectSonos::waitQueue(bool empty) {
   return Result::fail("Queue readiness timeout", true);
 }
 Result DirectSonos::execute(Operation op) {
+  if (!prepared_) return Result::fail("Request not prepared");
   if (http_.nowMs() >= deadline_) return Result::fail("Request budget exhausted");
+  auto identityResult = identity();
+  if (!identityResult.ok) return identityResult;
   auto group = ungrouped();
   if (!group.ok) return group;
   if (http_.nowMs() >= deadline_) return Result::fail("Request budget exhausted during group check");
@@ -289,6 +345,18 @@ Result DirectSonos::execute(Operation op) {
       }
       return {};
     }
+    case Operation::SetVolume:
+      if (desiredVolume_ < 0) return Result::fail("Volume was not prepared");
+      if (desiredVolume_ == baselineVolume_) return {};
+      return soap(RC, "SetVolume", instance + "<Channel>Master</Channel>" +
+                  element("DesiredVolume", std::to_string(desiredVolume_)), body, true);
+    case Operation::Next:
+    case Operation::Previous:
+      if (advanceDispatched_) return Result::fail("Advance already attempted; never resend", true);
+      advanceDispatched_ = true;
+      return soap(AV, op == Operation::Next ? "Next" : "Previous", instance, body, true);
+    case Operation::RestoreTransport:
+      return execute(desiredPlaying_ ? Operation::Play : Operation::Pause);
     case Operation::Play: return soap(AV, "Play", instance + "<Speed>1</Speed>", body, true);
     case Operation::Pause:
       if (!(r = soap(AV, "GetTransportInfo", instance, body)).ok) return r;
@@ -307,8 +375,12 @@ Result DirectSonos::verify(const ResolvedIntent& intent, PlaybackState& state) {
     if (intent.intent.transport == TransportCommand::Play) matches = state.playback == "PLAYING";
     else if (intent.intent.transport == TransportCommand::Pause)
       matches = state.playback == "PAUSED_PLAYBACK" || state.playback == "STOPPED" || state.playback == "NO_MEDIA_PRESENT";
-    if ((intent.intent.source && intent.intent.source->kind != SourceKind::Station) || intent.intent.shuffle.has_value())
+    if ((intent.intent.source && intent.intent.source->kind != SourceKind::Station) || intent.intent.shuffle.has_value() || intent.intent.repeat)
       matches = matches && state.mode == desiredMode_;
+    if (intent.intent.source && !intent.intent.transport)
+      matches = matches && (desiredPlaying_ ? state.playback == "PLAYING" :
+          state.playback == "STOPPED" || state.playback == "PAUSED_PLAYBACK" || state.playback == "NO_MEDIA_PRESENT");
+    matches = matches && state.volume == (desiredVolume_ >= 0 ? desiredVolume_ : baselineVolume_);
     if (intent.intent.source) {
       const auto expectedUri = intent.intent.source->kind == SourceKind::Station ? item_.uri : "x-rincon-queue:" + id_ + "#0";
       matches = matches && state.uri == expectedUri;

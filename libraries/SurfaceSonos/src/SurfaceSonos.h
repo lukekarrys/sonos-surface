@@ -16,12 +16,17 @@ struct SonosConfig { std::string targetId, appleRegion = "52231"; };
 struct AppleSourceItem { std::string uri, metadata; };
 std::string xmlEscape(const std::string& value);
 Result appleSourceItem(const Source& source, const std::string& region, AppleSourceItem& item);
+Result parseTopology(const std::string& xml, std::vector<Room>& rooms);
+bool mutationAuthorized(bool enabled, const std::string& target, const std::string& verifiedName,
+                        const std::string& authorizedId, const std::string& authorizedName);
+Result combineMode(const std::string& current, std::optional<bool> shuffle, std::optional<Repeat> repeat, std::string& mode);
 Result modeWithShuffle(const std::string& current, std::optional<bool> shuffle, std::string& mode);
 
 class DirectSonos : public SonosTransport {
 public:
   using Log = std::function<void(const std::string&)>;
   DirectSonos(LocalHttp& http, SonosConfig config, Log log = {});
+  Result discover(std::vector<Room>& rooms);
   Result refresh(PlaybackState& state) override;
   Result prepare(const ResolvedIntent& intent) override;
   Result execute(Operation operation) override;
@@ -41,5 +46,8 @@ private:
   AppleSourceItem item_;
   ResolvedIntent intent_;
   uint64_t deadline_ = 0;
+  int desiredVolume_ = -1, baselineVolume_ = -1;
+  bool desiredPlaying_ = false;
+  bool prepared_ = false, advanceDispatched_ = false;
 };
 } // namespace surface

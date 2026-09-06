@@ -3,7 +3,7 @@
 ## Deliberate boundaries
 
 The current slice uses a serial typed operation list, one worker, bounded
-readiness polling, and no mutation retries. Subscriptions, deduplication,
+readiness polling, and no mutation retries. Playback subscriptions, deduplication,
 cancellation, and richer recovery are deferred. [Hardware notes](hardware.md)
 record exact limits and evidence; the reliability contract below describes the
 direction of implementation, not features already proven on the boards.
@@ -44,8 +44,8 @@ Station + play uses SelectStation (SetAVTransportURI with station metadata) →
 Play. It does not clear/add/select a queue or set shuffle/repeat. Verify the
 station URI and playing state, plus preserved mute; a generic PLAYING result on
 a different source is insufficient. Reject explicit unsupported mode fields
-before selection. The initial station path, like other sources in this slice,
-requires explicit play. The stored queue remains available for later queue use.
+before selection. Station source + omitted transport/pause prepares non-playing transport with Stop
+before selection. Explicit source + play retains the established station path. The stored queue remains available for later queue use.
 
 Illustrative queue source + play + volume plan:
 
@@ -147,6 +147,12 @@ UI pending/requested values remain separate from observed AppState. Report usefu
 consequences, for example “Volume set; queue insertion failed.” A successful
 command is not a promise against a later external change.
 
+In the current implementation, `AppState.refreshError` holds the latest failed
+observation read separately from command `status`/`detail`. Successful refresh,
+verification, or reconciliation clears that observation error. A failed refresh
+retains the last snapshot as stale. Refresh recovery never clears an uncertain
+command's recovery requirement or replays that command.
+
 ## Events and reconciliation
 
 Commands cause changes; subscriptions promptly update AppState; polling repairs
@@ -183,3 +189,30 @@ and an event arriving during a snapshot. Add failure cases as operations are
 introduced. Use an injected clock instead of real sleeps. Passing fake tests
 does not prove hardware/protocol behavior, and a complete simulator is not a
 prerequisite for the first device slice.
+
+## Stick milestone execution contracts
+
+Acceptance parses/validates input and freezes a resolved intent with target UUID
+and policy revision before handing it to the worker. A per-UUID application retains
+uncertainty even after cycling away and back. The worker checks fresh discovery
+against that bound UUID; it never substitutes the current selection. Input during
+work (including room gestures) returns busy; one accepted request runs at a time.
+
+Relative volume is captured once in adapter preflight and sent as SetVolume with
+frozen absolute arguments; zero/clamped-no-change deltas do not write. There are
+still no automatic mutation retries. Next/previous are single native commands;
+a positive SOAP response plus fresh state is their completion evidence, not a
+claim that the track index must change at a boundary. Uncertain dispatch blocks
+further requests for that target. Source omission plans no queue operations.
+Source replacement with omitted transport restores its preflight playing category.
+
+Topology subscriptions invalidate the list only; a new full snapshot determines
+eligibility. Polling repairs missed events. Identity and independence are rechecked
+before every operation, and the HTTP boundary independently verifies the compiled
+Office UUID/name authorization. These checks reduce external-controller races;
+they cannot make topology changes atomic with a SOAP dispatch.
+
+Topology event subscription/renewal follows the HTTP GENA messages in the
+[UPnP Device Architecture, section 4](https://openconnectivity.org/upnp-specs/UPnP-arch-DeviceArchitecture-v2.0-20200417.pdf).
+The device honors the granted subscription duration and periodically retries a
+failed subscription; events invalidate snapshots rather than installing state.
