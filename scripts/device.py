@@ -17,15 +17,10 @@ parser.add_argument('--port')
 parser.add_argument('--seconds', type=float, default=0, help='Bound monitor duration (0 = until Ctrl-C)')
 parser.add_argument('--download-mode', action='store_true', help='reset only: serial already shows waiting for download')
 parser.add_argument('--touch-diagnostic', action='store_true',
-                    help='Waveshare coordinate display; always read-only, touch actions disabled')
-parser.add_argument('--allow-sonos-mutations', action='store_true',
-                    help='Explicit playback-test build; current authorization is Office only')
-parser.add_argument('--mutation-target', help='Explicitly authorized stable UUID; playback builds only (currently Office)')
+                    help='Waveshare coordinate display; touch actions disabled (set runtime read_only=true)')
 args = parser.parse_args()
-if args.allow_sonos_mutations and (not args.mutation_target or not args.mutation_target.startswith('RINCON_') or not args.mutation_target.replace('_', '').isalnum()):
-    parser.error('--allow-sonos-mutations requires --mutation-target with the verified Office UUID')
-if args.touch_diagnostic and (args.board != 'waveshare' or args.allow_sonos_mutations):
-    parser.error('--touch-diagnostic requires waveshare without --allow-sonos-mutations')
+if args.touch_diagnostic and args.board != 'waveshare':
+    parser.error('--touch-diagnostic requires waveshare')
 if args.action != 'build' and not args.port:
     parser.error('--port is required for USB commands')
 if args.download_mode and args.action != 'reset':
@@ -33,15 +28,12 @@ if args.download_mode and args.action != 'reset':
 fqbn = 'esp32:esp32:esp32s3:USBMode=hwcdc,CDCOnBoot=cdc,PSRAM=opi,UploadSpeed=460800,'
 fqbn += 'FlashSize=8M,PartitionScheme=default_8MB' if args.board == 'stick' else 'FlashSize=16M,PartitionScheme=app3M_fat9M_16MB'
 base = ['arduino-cli', '--config-file', str(ROOT / '.deps/arduino-cli.yaml')]
-build = ROOT / '.build' / (args.board + ('-touch' if args.touch_diagnostic else
-                         '-playback' if args.allow_sonos_mutations else '-readonly'))
+build = ROOT / '.build' / (args.board + ('-touch' if args.touch_diagnostic else '-runtime'))
 sketch = ROOT / 'firmware/sonos_surface'
 if args.action == 'build':
     command = base + ['compile', '--fqbn', fqbn, '--libraries', str(ROOT / 'libraries'),
                       '--build-path', str(build), '--warnings', 'default',
                       '--build-property', 'compiler.cpp.extra_flags=-std=gnu++17 -DSURFACE_' + args.board.upper() +
-                      ' -DSURFACE_ALLOW_SONOS_MUTATIONS=' + str(int(args.allow_sonos_mutations)) +
-                      ' -DSURFACE_MUTATION_TARGET=' + (args.mutation_target or 'NONE') +
                       ' -DSURFACE_TOUCH_DIAGNOSTIC=' + str(int(args.touch_diagnostic)),
                       str(sketch)]
 elif args.action == 'flash':
@@ -50,10 +42,8 @@ elif args.action == 'flash':
     # Keep Arduino's pinned upload recipe, overriding reset and native USB baud.
     options = json.loads((build / 'build.options.json').read_text())
     properties = options.get('customBuildProperties', '').replace(',', ' ').split()
-    expected = ['-DSURFACE_ALLOW_SONOS_MUTATIONS=' + str(int(args.allow_sonos_mutations)),
-                '-DSURFACE_MUTATION_TARGET=' + (args.mutation_target or 'NONE')]
-    if any(flag not in properties for flag in expected):
-        parser.error('Built image safety/target flags differ; rebuild this exact variant before flashing')
+    if '-DSURFACE_' + args.board.upper() not in properties:
+        parser.error('Built image board differs; rebuild before flashing')
     hardware = Path(options['hardwareFolders'].split(',')[0])
     platform = hardware / 'esp32/hardware/esp32/3.3.11/platform.txt'
     prefix = 'tools.esptool_py.upload.pattern_args='

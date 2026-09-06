@@ -1,9 +1,16 @@
 {
   "wifi_ssid": "YOUR_2_4_GHZ_WIFI",
   "wifi_password": "YOUR_WIFI_PASSWORD",
-  "sonos_ip": "",
-  "sonos_uid": "",
   "source_url": "https://music.apple.com/us/album/REPLACE_WITH_KNOWN_SOURCE/123456789",
   "apple_region": "52231",
-  "playlist_shuffle_rooms": {}
+  "read_only": true,
+  "rooms": [
+    "office",
+    "living-room",
+    "kitchen",
+    "bedroom"
+  ],
+  "playlist_shuffle_rooms": {
+    "bedroom": true
+  }
 }

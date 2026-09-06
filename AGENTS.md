@@ -28,6 +28,11 @@ PRs should explain behavior, validation, and unresolved risks; link issues when 
 
 ## Agent Working Style
 
-The owner now authorizes real Sonos mutations ONLY for Office (verify its room name and stable UUID before use). All other speakers remain read-only. M5/Waveshare flashing and non-Sonos hardware testing are authorized. Firmware defaults to an HTTP-boundary mutation guard; keep that default and bind playback tests explicitly to Office.
+Device runtime `read_only=true` blocks all Sonos mutations at HTTP dispatch;
+`read_only=false` permits requested mutations only for configured, eligible rooms.
+Room and playlist policy configuration use display IDs resolved from current names;
+accepted requests freeze UUID and policy. M5/Waveshare flashing and non-Sonos tests
+are authorized. Keep autonomous tests read-only; do not turn an existing true flag
+false to complete testing. Stop for physical gestures or intentional live playback tests.
 
 Resolve reversible engineering choices autonomously. Involve the human for meaningful hardware tests or choices that materially change user-visible semantics, persisted formats, or architecture. Label deliberate contracts, reference evidence, and experimental assumptions separately. Prefer small working slices on both boards; measure Sonos/NFC behavior before adding abstractions. Stay within the current task's authorized scope.

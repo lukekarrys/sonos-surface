@@ -7,7 +7,6 @@
 #include <Preferences.h>
 #include <WiFi.h>
 #include <WiFiUdp.h>
-#include <tinyxml2.h>
 #include <map>
 #include <set>
 #include <esp_timer.h>
@@ -15,21 +14,15 @@
 #include <atomic>
 #include <memory>
 
-#ifndef SURFACE_ALLOW_SONOS_MUTATIONS
-#define SURFACE_ALLOW_SONOS_MUTATIONS 0
-#endif
-#ifndef SURFACE_MUTATION_TARGET
-#define SURFACE_MUTATION_TARGET NONE
-#endif
-#define SURFACE_STRINGIFY_INNER(x) #x
-#define SURFACE_STRINGIFY(x) SURFACE_STRINGIFY_INNER(x)
-
 namespace surface::device {
 namespace {
 using Json = nlohmann::json;
 struct Config {
   std::string ssid, password, host, uid, source, appleRegion = "52231";
   PlaylistShuffleRooms playlistRooms;
+  bool readOnly = true;
+  uint32_t revision = 1;
+  std::vector<std::string> rooms;
 } config;
 Preferences preferences;
 SemaphoreHandle_t stateMutex;
@@ -39,8 +32,15 @@ AppState sharedState;
 RoomSelection selection;
 std::string savedPreference;
 std::string notice, serialLine;
+bool transientNotice = false;
 bool serialOverflow = false;
-struct Job { bool refresh; bool cycle = false; ResolvedIntent accepted; };
+struct Job {
+  bool refresh;
+  bool cycle = false;
+  ResolvedIntent accepted;
+  std::optional<PolicyContext> toggleContext = std::nullopt;
+  const std::string& targetId() const { return toggleContext ? toggleContext->targetId : accepted.targetId; }
+};
 void log(const std::string& message) { Serial.printf("[%lu] %s\n", millis(), message.c_str()); }
 void publish(const AppState& state) {
   xSemaphoreTake(stateMutex, portMAX_DELAY);
@@ -52,24 +52,26 @@ void publish(const AppState& state) {
 }
 bool parseConfig(const std::string& text, Config& output) {
   bool duplicate = false;
-  std::set<std::string> configKeys;
+  std::vector<std::set<std::string>> configKeys;
   auto json = Json::parse(text, [&](int, Json::parse_event_t event, Json& value) {
-    if (event == Json::parse_event_t::key && !configKeys.insert(value.get<std::string>()).second) duplicate = true;
+    if (event == Json::parse_event_t::object_start) configKeys.emplace_back();
+    if (event == Json::parse_event_t::key && !configKeys.back().insert(value.get<std::string>()).second) duplicate = true;
+    if (event == Json::parse_event_t::object_end) configKeys.pop_back();
     return true;
   }, false);
   if (duplicate) return false;
-  if (!json.is_object() || json.size() > 7) return false;
+  if (!json.is_object() || json.size() > 10) return false;
   for (auto it = json.begin(); it != json.end(); ++it) {
     const auto& k = it.key();
-    if (k != "playlist_shuffle_rooms" && !it.value().is_string()) return false;
+    if (k != "playlist_shuffle_rooms" && k != "read_only" && k != "rooms" && !it.value().is_string()) return false;
     if (k != "wifi_ssid" && k != "wifi_password" && k != "sonos_ip" && k != "sonos_uid" &&
-        k != "source_url" && k != "playlist_shuffle_room" && k != "playlist_shuffle_rooms" && k != "apple_region") return false;
+        k != "read_only" && k != "rooms" && k != "source_url" && k != "playlist_shuffle_room" && k != "playlist_shuffle_rooms" && k != "apple_region") return false;
   }
   Config c;
   c.ssid = json.value("wifi_ssid", ""); c.password = json.value("wifi_password", "");
   c.host = json.value("sonos_ip", ""); c.uid = json.value("sonos_uid", "");
   c.source = json.value("source_url", "");
-  if (!parsePlaylistPolicy(json, c.playlistRooms)) return false;
+  if (!parsePlaylistPolicy(json, c.playlistRooms) || !parseDeviceRooms(json, c.readOnly, c.rooms)) return false;
   c.appleRegion = json.value("apple_region", "52231");
   IPAddress address;
   if (c.ssid.size() > 32 || c.password.size() > 63 || (!c.host.empty() && !address.fromString(c.host.c_str())) ||
@@ -80,40 +82,18 @@ bool parseConfig(const std::string& text, Config& output) {
   output = std::move(c);
   return true;
 }
-class EspHttp final : public LocalHttp {
+class EspHttp final : public GuardedHttp {
 public:
-  std::string host, target;
-  HttpResponse request(const std::string& path, const std::string& action, const std::string& body) override {
-    if (!isReadOnlySonosAction(action) && !SURFACE_ALLOW_SONOS_MUTATIONS) {
-      log("READ_ONLY_BLOCKED " + action);
-      return {0, "", "Read-only firmware: command not sent", true};
-    }
+  std::string host;
+  EspHttp() { readOnly = config.readOnly; }
+protected:
+  HttpResponse blocked(const std::string& reason, const std::string& action) override {
+    log(reason + " " + action);
+    return {0, "", reason, true};
+  }
+  HttpResponse dispatch(const std::string& path, const std::string& action, const std::string& body) override {
     if (WiFi.status() != WL_CONNECTED) return {0, "", "WiFi disconnected", true};
     if (host.empty()) return {0, "", "No discovered address", true};
-    if (!isReadOnlySonosAction(action)) {
-      // Independently verify the destination at the HTTP boundary. Selection and
-      // policy configuration never expand the explicitly compiled authorization.
-      auto identity = request("/xml/device_description.xml", "", "");
-      tinyxml2::XMLDocument doc;
-      std::string uid, room;
-      if (identity.status == 200 && doc.Parse(identity.body.c_str()) == tinyxml2::XML_SUCCESS) {
-        std::function<void(tinyxml2::XMLNode*)> visit = [&](tinyxml2::XMLNode* node) {
-          for (auto e = node->FirstChildElement(); e; e = e->NextSiblingElement()) {
-            const std::string name = e->Name();
-            if (name == "UDN" && e->GetText()) uid = e->GetText();
-            if (name == "roomName" && e->GetText()) room = e->GetText();
-            visit(e);
-          }
-        };
-        visit(&doc);
-      }
-      if (uid.rfind("uuid:", 0) == 0) uid.erase(0, 5);
-      if (uid != target || !mutationAuthorized(SURFACE_ALLOW_SONOS_MUTATIONS, uid, room,
-            SURFACE_STRINGIFY(SURFACE_MUTATION_TARGET), "Office")) {
-        log("AUTHORIZATION_BLOCKED target=" + target + " room=" + room);
-        return {0, "", "Target is not authorized for mutations", true};
-      }
-    }
     HTTPClient http;
     const std::string url = "http://" + host + ":1400" + path;
     http.setConnectTimeout(3000);
@@ -183,7 +163,7 @@ struct Session {
   DirectSonos sonos;
   Application app;
   explicit Session(const Room& room) : sonos(http, {room.id, config.appleRegion}, log),
-      app(sonos, {room.id, config.playlistRooms, 1}, publish) { http.host = room.address; http.target = room.id; }
+      app(sonos, {room.id, {}, 1}, publish) { http.host = room.address; http.target = room.id; }
 };
 // GENA notifications only invalidate topology; all target decisions use a fresh
 // full snapshot. No remote event can directly issue a playback command.
@@ -271,31 +251,41 @@ void worker(void*) {
       }
     }
     events.ensure(discovered.ok ? bootstrap : "");
-    // Fail closed on topology failures. Keep selected identity, never redirect it.
+    // Serial backpressure must never hold the UI's state lock: button polling
+    // needs to observe both releases in a double-click even without a monitor.
+    if (discovered.ok) for (const auto& room : rooms)
+      log("discovered room=" + room.name + " roomDisplayId=" + room.displayId + " uuid=" + room.id +
+          " eligible=" + std::to_string(room.eligible));
     xSemaphoreTake(stateMutex, portMAX_DELAY);
     if (discovered.ok) selection.update(std::move(rooms));
     else {
-      for (auto& room : selection.rooms) room.eligible = false;
+      selection.rooms.clear();
+      selection.resolvedPlaylistRules.clear();
       selection.warning = "Topology unavailable; mutations blocked";
     }
     if (job->cycle && discovered.ok) selection.cycle();
     const Room* selected = selection.selected();
     Room selectedRoom = selected ? *selected : Room{};
     std::string warning = selection.warning;
-    if (job->cycle && selected && selected->eligible) {
-      savedPreference = selection.preferredId;
-      if (!preferences.putString("preferred-room", savedPreference.c_str())) log("Preferred room save failed");
-    }
-    for (const auto& room : selection.rooms)
-      log("room=" + room.name + " uuid=" + room.id + " ip=" + room.address + " group=" + room.group +
-          " coordinator=" + room.coordinator + " selectable=" + std::to_string(room.eligible));
+    const bool savePreference = job->cycle && selected && selected->eligible;
+    if (savePreference) savedPreference = selection.preferredId;
+    const auto selectableRooms = selection.rooms;
+    const auto problems = selection.problems;
+    const auto resolvedRules = selection.resolvedPlaylistRules;
     const bool changedTarget = sharedState.observed.targetId != selectedRoom.id;
     Room target = selectedRoom;
     if (!job->refresh) {
       target = {};
-      for (const auto& room : selection.rooms) if (room.id == job->accepted.targetId) target = room;
+      for (const auto& room : selection.rooms) if (room.id == job->targetId()) target = room;
     }
     xSemaphoreGive(stateMutex);
+    if (savePreference && !preferences.putString("preferred-id", savedPreference.c_str())) log("Preferred room save failed");
+    for (const auto& problem : problems) log("CONFIG_WARNING " + problem);
+    for (const auto& rule : resolvedRules)
+      log("resolved playlist policy uuid=" + rule.first + " shuffle=" + std::to_string(rule.second));
+    for (const auto& room : selectableRooms)
+      log("room=" + room.name + " roomDisplayId=" + room.displayId + " uuid=" + room.id + " ip=" + room.address + " group=" + room.group +
+          " coordinator=" + room.coordinator + " selectable=" + std::to_string(room.eligible));
     if (job->refresh && !selectedRoom.id.empty()) log("selected=" + selectedRoom.name + " uuid=" + selectedRoom.id + " " + warning);
     if (!discovered.ok || !target.eligible || target.address.empty()) {
       AppState unavailable;
@@ -306,6 +296,7 @@ void worker(void*) {
       auto& session = sessions[target.id];
       if (!session) session = std::make_unique<Session>(target);
       session->http.host = target.address;
+      session->http.targetAllowed = target.eligible;
       if (job->refresh) {
         if (changedTarget || job->cycle) {
           AppState loading; loading.observed.room = target.name; loading.observed.targetId = target.id;
@@ -313,7 +304,7 @@ void worker(void*) {
         }
         session->app.refresh();
       } else {
-        auto result = session->app.submit(job->accepted);
+        auto result = job->toggleContext ? session->app.submitToggle(*job->toggleContext) : session->app.submit(job->accepted);
         if (!result.ok) log("command rejected/result: " + result.error);
       }
     }
@@ -321,8 +312,17 @@ void worker(void*) {
     busy.store(false);
   }
 }
-void submit(const std::string& payload, bool refresh = false, bool cycle = false) {
-  if (busy.exchange(true)) { notice = "Busy; try again after result"; return; }
+void submit(const std::string& payload, bool refresh = false, bool cycle = false, bool announce = true) {
+  const std::string input = cycle ? "room-next" : refresh ? "refresh" : "intent";
+  if (busy.exchange(true)) {
+    if (announce) {
+      notice = "Busy; input ignored"; transientNotice = true;
+      log("input=" + input + " rejected: worker busy");
+    }
+    return;
+  }
+  if (announce) log("input=" + input + " accepted");
+  if (announce) transientNotice = false;
   auto job = new Job{refresh, cycle, {}};
   if (!refresh) {
     MusicIntent intent;
@@ -331,8 +331,8 @@ void submit(const std::string& payload, bool refresh = false, bool cycle = false
     const auto* room = selection.selected();
     if (result.ok && (!room || !room->eligible)) result = Result::fail("Selected room unavailable; refresh targets");
     if (result.ok) {
-      job->accepted = resolvePolicy(intent, {room->id, config.playlistRooms, 1});
-      log("accepted room=" + room->name + " " + describeIntent(intent, job->accepted));
+      job->accepted = resolvePolicy(intent, {room->id, selection.resolvedPlaylistRules, config.revision});
+      log("accepted room=" + room->name + " roomDisplayId=" + room->displayId + " " + describeIntent(intent, job->accepted));
       Plan plan;
       result = makePlan(job->accepted, plan);
       std::string effects;
@@ -344,7 +344,32 @@ void submit(const std::string& payload, bool refresh = false, bool cycle = false
   }
   if (!jobs || xQueueSend(jobs, &job, 0) != pdTRUE) {
     delete job; busy.store(false); notice = "Worker unavailable";
-  } else notice = cycle ? "Switching room (read only)" : refresh ? "Refreshing rooms/state" : "Intent accepted";
+  } else if (announce) {
+    notice = cycle ? "Switching room" : refresh ? "Refreshing rooms/state" : "Intent accepted";
+    transientNotice = true;
+  }
+}
+void submitToggle() {
+  if (busy.exchange(true)) {
+    notice = "Busy; input ignored"; transientNotice = true;
+    log("input=toggle rejected: worker busy"); return;
+  }
+  auto job = new Job{false, false, {}};
+  xSemaphoreTake(stateMutex, portMAX_DELAY);
+  const auto* selected = selection.selected();
+  const Room room = selected ? *selected : Room{};
+  if (room.eligible) job->toggleContext = PolicyContext{room.id, selection.resolvedPlaylistRules, config.revision};
+  xSemaphoreGive(stateMutex);
+  if (!job->toggleContext) {
+    delete job; busy.store(false);
+    notice = "Selected room unavailable; refresh targets"; transientNotice = false;
+    log("input=toggle rejected: " + notice); return;
+  }
+  log("toggle requested room=" + room.name + " roomDisplayId=" + room.displayId + " uuid=" + room.id +
+      " policyRevision=" + std::to_string(job->toggleContext->revision));
+  if (!jobs || xQueueSend(jobs, &job, 0) != pdTRUE) {
+    delete job; busy.store(false); notice = "Worker unavailable"; transientNotice = false;
+  } else { notice = "Reading play/pause state"; transientNotice = true; }
 }
 std::string command(const char* transport) {
   return Json{{"format", "sonos-surface"}, {"version", 1}, {"intent", {{"transport", transport}}}}.dump();
@@ -359,20 +384,31 @@ void handle(const std::string& line) {
     Config next;
     const auto text = line.substr(7);
     if (!parseConfig(text, next)) { log("CONFIG_INVALID (values omitted from log)"); return; }
+    if (config.revision == UINT32_MAX || !preferences.putUInt("config-rev", config.revision + 1)) { log("CONFIG_SAVE_FAILED revision"); return; }
     if (!preferences.putString("config", text.c_str())) { log("CONFIG_SAVE_FAILED"); return; }
     log("CONFIG_SAVED rebooting (credentials not logged)");
     Serial.flush();
     ESP.restart();
+  } else if (line == "read-only true" || line == "read-only false") {
+    if (busy.load()) { log("CONFIG_BUSY"); return; }
+    auto stored = Json::parse(preferences.getString("config", "{}").c_str(), nullptr, false);
+    if (!stored.is_object()) { log("CONFIG_INVALID; upload config first"); return; }
+    stored["read_only"] = line == "read-only true";
+    handle("config " + stored.dump());
+  } else if (line == "config-status") {
+    log("device-config " + Json{{"read_only", config.readOnly}, {"rooms", config.rooms},
+        {"playlist_shuffle_rooms", config.playlistRooms}}.dump());
   } else if (line == "rooms" || line == "room-next") submit("", true, line == "room-next");
   else if (line == "status") submit("", true);
   else if (line == "play") submit(command("play"));
   else if (line == "pause") submit(command("pause"));
+  else if (line == "toggle") submitToggle();
   else if (line == "next" || line == "previous") submit(command(line.c_str()));
   else if (line == "source") {
     if (config.source.empty()) notice = "Configure source_url first";
     else submit(config.source);
   } else if (!line.empty() && (line[0] == '{' || line.compare(0, 8, "https://") == 0)) submit(line);
-  else log("Commands: rooms | room-next | status | play | pause | next | previous | source | config {JSON} | intent JSON");
+  else log("Commands: rooms | room-next | status | play | pause | toggle | next | previous | source | config-status | read-only true/false | config {JSON} | intent JSON");
 }
 } // namespace
 
@@ -389,13 +425,16 @@ void begin() {
   if (!stateMutex || !jobs) { log("FATAL worker allocation"); return; }
   const bool boardReady = boardBegin(notice);
   log("sonos-surface checkpoint firmware; " + notice);
-  log("mutation-authorized-uuid=" SURFACE_STRINGIFY(SURFACE_MUTATION_TARGET) " required-name=Office");
-  log(SURFACE_ALLOW_SONOS_MUTATIONS ? "SONOS_MODE=PLAYBACK_ENABLED" : "SONOS_MODE=READ_ONLY (all mutations blocked before HTTP)");
   Serial.printf("[board] adapter ready=%d heap=%u psram=%u\n", boardReady, ESP.getFreeHeap(), ESP.getPsramSize());
   if (!preferences.begin("surface", false)) log("NVS open failed; USB saves unavailable");
   auto stored = preferences.getString("config", "{}");
   if (!parseConfig(stored.c_str(), config)) log("Stored config invalid; USB config required");
-  savedPreference = preferences.getString("preferred-room", config.uid.c_str()).c_str();
+  config.revision = preferences.getUInt("config-rev", 1);
+  log(config.readOnly ? "SONOS_MODE=READ_ONLY (runtime; all mutations blocked before HTTP)" : "SONOS_MODE=CONTROL (configured eligible rooms)");
+  handle("config-status");
+  savedPreference = preferences.getString("preferred-id", "").c_str();
+  selection.allowedIds = config.rooms;
+  selection.playlistRules = config.playlistRooms;
   selection.preferredId = savedPreference;
   log("speaker-ip=" + config.host + " uid=" + config.uid);
   if (!config.ssid.empty()) {
@@ -428,6 +467,7 @@ void loop() {
     case Input::Source: handle("source"); break;
     case Input::Play: handle("play"); break;
     case Input::Pause: handle("pause"); break;
+    case Input::Toggle: submitToggle(); break;
     case Input::RoomNext: handle("room-next"); break;
     case Input::Refresh: handle("status"); break;
     case Input::Payload: {
@@ -440,7 +480,7 @@ void loop() {
       } else { notice = r.error; log("NFC parse error: " + r.error); }
       break;
     }
-    case Input::Error: notice = event.text; log("Input error: " + notice); break;
+    case Input::Error: notice = event.text; transientNotice = false; log("Input error: " + notice); break;
     case Input::None: break;
   }
   static bool connected = false;
@@ -448,7 +488,7 @@ void loop() {
   const bool online = WiFi.status() == WL_CONNECTED;
   if (online && !connected) {
     log("WiFi connected ip=" + std::string(WiFi.localIP().toString().c_str()));
-    lastRefresh = millis(); submit("", true);
+    lastRefresh = millis(); submit("", true, false, false);
   } else if (!online && connected) {
     log("WiFi disconnected");
     xSemaphoreTake(stateMutex, portMAX_DELAY);
@@ -463,14 +503,15 @@ void loop() {
   }
   connected = online;
   if (online && !busy.load() && millis() - lastRefresh >= 10000) {
-    lastRefresh = millis(); submit("", true);
+    lastRefresh = millis(); submit("", true, false, false);
   }
   if (millis() - lastRender >= 100) {
     lastRender = millis();
     xSemaphoreTake(stateMutex, portMAX_DELAY);
     auto state = sharedState;
     xSemaphoreGive(stateMutex);
-    boardRender(state, std::string(online ? "WiFi OK | " : "WiFi offline | ") + notice);
+    if (transientNotice && !busy.load()) { notice = "Ready"; transientNotice = false; }
+    boardRender(state, std::string(config.readOnly ? "READ ONLY | " : "CONTROL | ") + std::string(online ? "WiFi OK | " : "WiFi offline | ") + notice);
   }
   if (millis() - lastHeartbeat >= 5000) {
     lastHeartbeat = millis();

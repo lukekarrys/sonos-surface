@@ -366,6 +366,30 @@ Result Application::refresh() {
   publish();
   return result;
 }
+Result Application::submitToggle(const PolicyContext& bound) {
+  if (busy_) return Result::fail("Busy");
+  if (state_.recoveryRequired) return Result::fail("Uncertain previous effect; inspect speaker before toggling");
+  auto reject = [&](const std::string& error) {
+    state_.status = "failed"; state_.detail = error; publish();
+    return Result::fail(error);
+  };
+  if (bound.targetId.empty() || bound.targetId != context_.targetId) return reject("Bound toggle target mismatch");
+  auto result = refresh();
+  if (!result.ok) return result;
+  const auto& current = state_.observed;
+  if (!current.known || current.stale || current.targetId != bound.targetId)
+    return reject("Cannot toggle without fresh state for bound room");
+  MusicIntent intent;
+  if (current.playback == "PLAYING") intent.transport = TransportCommand::Pause;
+  else if (current.playback == "PAUSED_PLAYBACK" || current.playback == "STOPPED") intent.transport = TransportCommand::Play;
+  else return reject("Cannot toggle playback state: " + current.playback);
+  state_.detail = "Toggle resolved: " + current.playback + " -> " +
+      (*intent.transport == TransportCommand::Play ? "play" : "pause") + " target=" + bound.targetId +
+      " policy-revision=" + std::to_string(bound.revision);
+  publish();
+  // Resolve once after normalization, then reuse ordinary planning/execution.
+  return submit(resolvePolicy(intent, bound));
+}
 Result Application::submit(const std::string& payload) {
   if (busy_) return Result::fail("Busy");
   if (state_.recoveryRequired) return Result::fail("Uncertain previous effect; inspect speaker and reboot before a deliberate retry");

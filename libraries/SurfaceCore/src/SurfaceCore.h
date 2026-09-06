@@ -51,11 +51,17 @@ std::string describeIntent(const MusicIntent& input, const ResolvedIntent& resol
 struct Room {
   std::string id, name, address, coordinator, group;
   bool eligible = false;
+  std::string displayId;
 };
+// ASCII only; unsupported non-ASCII names fail closed instead of transliteration.
+std::string roomDisplayId(const std::string& name);
+bool validRoomDisplayId(const std::string& id);
 class RoomSelection {
 public:
-  std::vector<Room> rooms;
-  std::string selectedId, preferredId, warning;
+  std::vector<Room> rooms; // Configured, uniquely resolved rooms only.
+  std::vector<std::string> allowedIds, problems;
+  PlaylistShuffleRooms playlistRules, resolvedPlaylistRules;
+  std::string selectedId, preferredId, warning; // Selected UUID; preferred display ID.
   bool initialized = false;
   void update(std::vector<Room> discovered);
   const Room* selected() const;
@@ -100,6 +106,9 @@ public:
   Application(SonosTransport& transport, PolicyContext context, Changed changed = {});
   Result submit(const std::string& payload);
   Result submit(const ResolvedIntent& accepted);
+  // UI gesture admission freezes context first; fresh state then produces one
+  // explicit Play/Pause intent. Toggle is never part of the card wire format.
+  Result submitToggle(const PolicyContext& bound);
   Result refresh();
   const AppState& state() const { return state_; }
 private:

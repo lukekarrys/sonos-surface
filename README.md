@@ -7,7 +7,7 @@ and direct Sonos adapter. No Node server is required.
 **Current milestone:** M5StickS3 discovers independent Sonos rooms, selects a room
 with A double-click, and resolves the same NFC intent against that room's UUID.
 The shared core supports source selection, play/pause/next/previous, absolute and
-relative volume, shuffle, and repeat. Read-only firmware remains the default.
+relative volume, shuffle, and repeat. Runtime `read_only` defaults true.
 See the [Stick manual test](docs/stick-milestone-test.md) and latest
 [hardware evidence](docs/hardware.md) for measured versus pending behavior.
 
@@ -19,12 +19,10 @@ Native USB reset/power-cycle limitations remain; see the hardening evidence belo
 See [hardware findings and limitations](docs/hardware.md). The product contracts
 remain in [docs/product.md](docs/product.md).
 
-**Current testing authorization:** real Sonos mutations are permitted only in
-**Office**. Verify its room name and stable UUID before playback testing; all
-other rooms remain read-only. Default firmware builds block every mutating Sonos
-request before HTTP dispatch, even if a card/button requests playback. Default boot logs show
-`SONOS_MODE=READ_ONLY`. Read-only and playback-enabled binaries use separate
-build directories so a default flash cannot select a playback build.
+Device `read_only=true` blocks all Sonos mutations at HTTP dispatch while retaining
+parsing, policy, plans, and state reads. Set it false deliberately to control a
+selected configured eligible room. `rooms` is the device's selectable-room universe
+for both reading and controlling. Both controls persist in NVS; no rebuild is needed.
 
 See [boot recovery and calibration](#boot-recovery-and-per-device-calibration) for the hardware-hardening workflow.
 
@@ -155,36 +153,37 @@ python3 -m venv .deps/venv
 .deps/venv/bin/python -m pip install pyserial==3.5
 ```
 
-Edit `.local/config.json`: set 2.4 GHz Wi-Fi credentials and optionally a known
-playable `source_url` for the USB Source command. No configured room list is
-required. `sonos_ip` is an optional discovery bootstrap hint; leave it empty to
-use SSDP. `sonos_uid` is an optional initial preferred UUID, retained for existing
-configurations. Neither field limits discovery. Current addresses and names come
-from live topology. A successful room gesture saves `surface/preferred-room`
-separately from `surface/config`; it takes precedence over the initial preference.
+Edit `.local/config.json`: set Wi-Fi credentials, optional playable `source_url`,
+`read_only`, and the explicit `rooms` list. Use current human room display IDs:
+`Office` → `office`, `Living Room` → `living-room`, `Kids' Room` → `kids-room`.
+Whitespace, hyphens, and underscores collapse to hyphens; ASCII punctuation is
+stripped. Non-ASCII names and empty IDs need repair, not guessed transliteration.
+See the [complete room contract](docs/product.md#stick-room-and-policy-milestone).
 
-`playlist_shuffle_rooms` is a **runtime map from stable UUID to boolean**.
-Add an entry for each room's playlist shuffle default:
+`playlist_shuffle_rooms` maps display IDs to boolean playlist defaults:
 
 ```json
 {
-  "playlist_shuffle_rooms": {
-    "RINCON_FIRST_ROOM_ID": true,
-    "RINCON_SECOND_ROOM_ID": true,
-    "RINCON_THIRD_ROOM_ID": false
-  }
+  "read_only": true,
+  "rooms": ["office", "living-room", "kitchen", "bedroom"],
+  "playlist_shuffle_rooms": {"bedroom": true}
 }
 ```
 
-An unlisted UUID preserves playlist shuffle; `{}` disables all room playlist
-rules. A `false` entry derives shuffle=false; remove the entry to preserve instead.
-Room names are not keys, and adding a policy grants no mutation authorization.
-Explicit card shuffle always wins. Albums still derive shuffle=false everywhere
-when omitted. Uploading changes persists the map in NVS and reboots; after the
-initial firmware upgrade for this format, policy edits require no build or flash.
-Old `playlist_shuffle_room` strings remain readable as one UUID mapped to true
-(or `{}` for an empty string). Do not provide both keys. Invalid UUIDs, non-boolean
-values, duplicate keys, or more than 32 entries reject the configuration atomically.
+Discovery resolves config IDs into UUIDs internally. Only configured, uniquely
+resolved, independently eligible rooms are selectable; new household rooms never
+join automatically. Missing/ambiguous/invalid IDs stay configured with serial and
+display warnings; valid rooms continue. Renames require updating configuration.
+A missing room reappears when eligible again. Policy entries do not enroll rooms.
+Albums derive shuffle=false everywhere; explicit shuffle always wins. Unlisted
+playlist rooms preserve shuffle; a false entry derives false.
+
+Upload config to persist and reboot. `sonos_ip` may remain as an optional SSDP
+bootstrap hint; `sonos_uid` is ignored for targeting. Old singular
+`playlist_shuffle_room` loads as one true entry, but UUID keys generate repair
+warnings and must be replaced with current display IDs. An omitted `rooms` list
+selects nothing; missing `read_only` defaults true. Old UUID preferences are ignored;
+new room switches persist a display ID in `surface/preferred-id`.
 
 `apple_region: "52231"` matches the reference
 default; it is a Sonos service identifier, not an Apple storefront country code.
@@ -209,21 +208,15 @@ On boot, expect Wi-Fi IP, speaker ID, SOAP timing logs, and an observed playback
 state even without presenting a card. State refreshes every ten seconds and
 after commands. Play music externally and confirm the display updates. Topology notifications trigger fresh discovery; playback state uses ten-second polling.
 
-Playback testing is currently authorized for **Office only**. Configure its
-verified UUID and IP before building/flashing a separate playback-enabled image.
-Playback builds also require `--mutation-target VERIFIED_OFFICE_UUID`. The HTTP
-boundary verifies both that UUID and the room name Office before each mutation.
-Selection and runtime policy settings cannot expand that authorization. Grouped,
-bonded, invisible, or unverifiable players are unavailable; no coordinator
-substitution or grouping mutation exists.
+Use `config-status` in the USB monitor to inspect room IDs, policy, and mode without
+credentials. Send `read-only true` to enter testing mode, or deliberately send
+`read-only false` to enable requested effects in configured eligible rooms. Both
+commands persist and reboot; no build/flash flags are needed. Update your private
+config file too so a later full upload preserves your intended mode.
 
-```sh
-python3 scripts/device.py build stick --allow-sonos-mutations --mutation-target VERIFIED_OFFICE_UUID
-.deps/venv/bin/python scripts/device.py flash stick --allow-sonos-mutations --mutation-target VERIFIED_OFFICE_UUID --port BOARD_PORT
-```
-
-Default builds will report `Read-only firmware: command not sent` instead.
-At a suitable existing Office speaker volume,
+Read-only requests report `READ_ONLY_BLOCKED: device read-only mode; command not sent`
+after logging accepted policy and planned effects. At a comfortable selected-room
+volume with read-only deliberately disabled,
 tap the music card: the request replaces
 the target queue and starts it. Volume is preserved. Expect pending operation
 names, queue-count observations, then a verified result. Send the operation log
@@ -243,8 +236,8 @@ python3 scripts/device.py build waveshare --touch-diagnostic
 
 This separate `.build/waveshare-touch` image shows one target at a time, raw
 coordinates, and a yellow crosshair while touching. Touch
-actions are disabled and Sonos is read-only; the flag cannot combine with
-`--allow-sonos-mutations`. Tap the white plus center and lift; it advances through
+actions are disabled. Set runtime `read_only=true` before diagnostics; USB intents
+still use the shared runtime guard. Tap the white plus center and lift; it advances through
 six targets at x=92/276 and y=140/270/406. Drags over 16 raw pixels request a retry.
 Capture `[calibration]` logs with expected, first-contact, last-contact, and release
 coordinates. The diagnostic does not apply calibration or save samples automatically; reboot to repeat.
@@ -268,13 +261,8 @@ arduino-cli board list
 .deps/venv/bin/python scripts/device.py monitor waveshare --port /dev/cu.usbmodem101
 ```
 
-These commands produce read-only firmware. For authorized Office playback:
-
-```sh
-python3 scripts/device.py build waveshare --allow-sonos-mutations --mutation-target VERIFIED_OFFICE_UUID
-.deps/venv/bin/python scripts/device.py flash waveshare --allow-sonos-mutations --mutation-target VERIFIED_OFFICE_UUID --port /dev/cu.usbmodem101
-.deps/venv/bin/python scripts/device.py monitor waveshare --port /dev/cu.usbmodem101
-```
+These commands use the same runtime room/mode configuration as Stick. Ensure the
+Waveshare config has `read_only=true` and an explicit room list during migration.
 
 **Observed recovery:** after flashing the playback image, monitoring once stopped
 at ROM `entry 0x403c88b8`, before application logs. Normal and USB-reset esptool
@@ -298,8 +286,8 @@ Confirm the serial revision matches the physical label. The screen has Source,
 Refresh, Play, and Pause buttons. Source submits the configured Apple Music URL
 through the same application path as NFC. Tap once per action and report touch
 coordinates, the operation log, visible state, and audible result. Begin with
-Refresh after boot recovery; test Source/Play/Pause only after confirming Office
-identity and `SONOS_MODE=PLAYBACK_ENABLED` in serial.
+Refresh after boot recovery; test Source/Play/Pause only after confirming the
+selected configured room and `SONOS_MODE=CONTROL` in serial.
 
 ## Boot recovery and per-device calibration
 
@@ -407,20 +395,30 @@ reject. Seeking, queue browsing, toggles, unknown fields, and required extension
 reject before mutation.
 
 USB commands (newline terminated): `rooms`, `room-next`, `status`, `source`,
-`play`, `pause`, `next`, `previous`, `reboot`, a bare Apple URL, or v1 intent JSON.
+`play`, `pause`, `toggle`, `next`, `previous`, `reboot`, a bare Apple URL, or v1 intent JSON.
 Settings controls use v1 JSON, for example:
 
 ```json
 {"format":"sonos-surface","version":1,"intent":{"volume":{"delta":-5},"repeat":"off"}}
 ```
 
-M5 A single-click refreshes, A double-click cycles the current eligible room list,
-and B pauses. Room cycling performs reads only. The list is sorted by stable UUID;
-boot restores the saved UUID when eligible, otherwise displays a warning and
-selects the first eligible UUID. If an active selection becomes unavailable, it
-stays bound and blocks commands until available again or explicitly switched.
+M5 A single-click refreshes, A double-click cycles configured eligible rooms,
+and B toggles play/pause from a fresh read of the room bound at the press.
+Unknown/transitioning playback rejects; toggle never changes the source, queue,
+volume, or mode. Cycling only changes targeting/state. Rooms sort by case-insensitive
+human name, then UUID. Boot restores the preferred display ID when available;
+otherwise a visible warning accompanies the first valid configured fallback.
+Selection invalidation uses the same fallback; accepted work remains bound to its
+original UUID and can fail but never follows that fallback.
 Input while the worker is busy is rejected; there is no hidden request queue.
 Accepted work freezes target and policy before the worker begins its reads.
+
+
+Button regression tests use the pinned M5Unified 0.2.21 button state machine.
+`setup.py --host-only` downloads just its portable source/license, without the
+Arduino SDK. The Stick defers NFC polling while an A gesture is pending and logs
+button edges, decided click counts, and maximum polling gaps. Completed manual
+work notices clear to Ready; background refreshes do not replace the idle notice.
 
 The existing Waveshare USB hardware diagnostics remain available:
 `touch-calibration`, `touch-calibration {JSON}`, `peripherals-retry`,
@@ -443,3 +441,8 @@ there is no editor to round-trip them yet.
 
 No generic workflow engine, queue editor, artwork, voice, or
 full retry/reconciliation framework is included in this slice.
+
+Diagnostics stream over USB serial; the device has no stored log history to
+retrieve after unplugging. Use a laptop and live `device.py monitor` capture for
+walk-around testing. NVS stores configuration, preference, and calibration, not
+a history of requests or topology events.

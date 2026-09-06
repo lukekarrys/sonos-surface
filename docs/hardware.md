@@ -2,14 +2,12 @@
 
 ## Implemented checkpoint scope
 
-Current owner instruction (2026-09-05): real Sonos mutations are authorized only
-for **Office**, after verifying its room name and stable UUID. All other rooms
-remain read-only. Firmware defaults to a strict read-only HTTP action allowlist; commands
-such as Play, Stop, SetPlayMode, ClearQueue, and AddSource are blocked before
-network dispatch. The Mac probe uses the same allowlist. A separate explicit
-build/flash flag can enable an Office playback test with its verified target
-configuration; the flag itself does not enforce a room-name allowlist.
-M5/Waveshare flashing and non-Sonos testing are authorized.
+Current contract (2026-09-06): persisted device `read_only=true` blocks all Sonos
+mutations at HTTP dispatch. With it false, the selected configured eligible room
+may receive requested effects. Room/policy config uses current display IDs,
+resolved to internal UUIDs. Autonomous testing keeps read-only enabled.
+Earlier build-mode references below record historical images and measurements;
+they are superseded by the runtime model and are not current setup instructions.
 
 Both board builds share `SurfaceCore` and `SurfaceSonos`; hardware/network SDKs
 are confined to `SurfaceDevice`. A serial plan encodes predecessor dependencies.
@@ -1038,7 +1036,7 @@ Exact commands and identity-reset JSON are in the [README](../README.md#boot-rec
 This section supersedes the initial slice's capability limits above. It does not
 retroactively change the earlier hardware observations.
 
-### Implemented contracts
+### Earlier implementation contracts (superseded by runtime room model below)
 
 - Live SSDP/bootstrap discovery feeds a bounded independent-player list from
   ZoneGroupTopology. UUID is identity; names and addresses are live observations.
@@ -1058,10 +1056,8 @@ retroactively change the earlier hardware observations.
   shuffle, play/pause/next/previous, and source transport preservation. Relative
   volume freezes a fresh absolute target; native skips are never automatically
   retried. The existing album/playlist/track/station NFC decoding paths remain.
-- Read-only remains the default HTTP boundary. Playback builds additionally
-  require an explicit authorized UUID and verify that UUID plus the name Office
-  before every mutation. Flash rejects stale builds with mismatched safety flags.
-  Discovery, target preference, and policy configuration cannot authorize a room.
+- This historical image used a compiled mutation guard. The runtime device mode
+  and configured room resolution below replace that implementation.
 - Topology subscriptions on port 1401 invalidate the list, with full refreshes
   at boot/reconnect, notification receipt, and ten-second polling. The publisher's
   granted lease bounds renewal. State reads remain polling-based. Group/identity
@@ -1110,7 +1106,7 @@ confirmation. Earlier audible NFC playback evidence remains historical. Native s
 volume/repeat changes, source + pause, and source-only transport preservation
 have protocol-fixture coverage but have not been mutated on real Sonos in this
 milestone. Office's observed volume was 100; choose a comfortable level before
-any audible playback test. Other rooms still require explicit UUID authorization.
+any audible playback test. Use the current runtime mode and room configuration below.
 Real grouping changes, IP/room renaming, subscription renewal/outage recovery,
 and fallback with an unavailable preferred room remain physical follow-ups.
 See the [manual checkpoint](stick-milestone-test.md).
@@ -1147,3 +1143,291 @@ See the [manual checkpoint](stick-milestone-test.md).
   rejection contract. Its later removal/retap produced the accepted Office
   request above. Exact hold timing, explicit-shuffle card input, and audible
   preservation/control behavior remain separate physical checks.
+
+### Earlier multiple playlist-room rules (wire identity superseded below)
+
+- At the time of this measurement, the canonical runtime setting was
+  `playlist_shuffle_rooms`, a map of stable Sonos UUIDs to boolean defaults.
+  Multiple rooms may independently derive true or false; omitted UUIDs preserve
+  shuffle. Explicit input and the household album default retain precedence.
+- The legacy singular string remains readable from existing NVS/imports as one
+  UUID mapped to true (or an empty map for the empty string). Supplying both keys
+  rejects. Values must be booleans and keys must be stable RINCON identities;
+  malformed/oversized maps reject without replacing the saved configuration.
+- All 247 portable behavioral checks and the existing touch/calibration checks
+  pass. Added multi-room true/false/preserve, explicit override, frozen resolution,
+  legacy conversion, and atomic invalid-config fixtures. Stick and Waveshare
+  read-only builds passed. Build evidence:
+  `.local/stick-policy-map-build.log`, `.local/waveshare-policy-map-build.log`.
+- Flashed the updated Stick read-only image with hash verification and application
+  readiness. Before replacing NVS config, the old singular setting still derived
+  playlist shuffle=true in Living Room. Uploaded the plural map retaining only
+  that existing rule; after the configuration reboot, the same URL again resolved
+  true with room-policy provenance. Both requests were blocked before queue
+  clearing. No Sonos mutations were dispatched and no additional room's policy
+  was enabled. Evidence: `.local/stick-policy-map-flash.log`,
+  `.local/stick-policy-map-legacy-check.log`, `.local/stick-policy-map-check.log`.
+  Multiple simultaneous entries are covered by host fixtures; only the owner's
+  existing Living Room rule is configured on the physical device.
+
+## Runtime room/configuration model: 2026-09-06
+
+### Deliberate contracts
+
+- Replaced normal build-mode authorization with persisted `read_only` (default
+  true) and an independent `rooms` display-ID list (default empty). The final
+  `GuardedHttp::request` boundary blocks every non-read action before dispatch
+  while read-only, including unknown future actions. Normal builds have no
+  room-specific compile flags. A private/protected dispatch implementation avoids
+  bypass through the concrete ESP transport API; the destination UUID is still
+  independently verified for permitted writes.
+- Both allowlist and playlist policy resolve current display IDs against the
+  entire discovered snapshot. Current names, canonical IDs, UUIDs, eligibility,
+  filtered selection, resolution warnings, and accepted policy/plans are logged.
+  Missing/invalid/colliding IDs never bind or fall back to historical UUIDs.
+  Valid rooms keep working; unavailable entries stay configured and reappear.
+- Selection sorts by case-insensitive name then UUID; A double-click and USB
+  `room-next` share the same path. Preferences now persist as display IDs in
+  `surface/preferred-id`. Accepted work retains its UUID and resolved policy even
+  when later selection, topology, or config changes. Config replacement increments
+  a local NVS revision and reboots; busy updates reject. `read-only true/false`
+  persists mode without a rebuild. Only shuffle provenance is modeled.
+
+### Measured software and Stick evidence
+
+- **324 portable behavioral checks** pass with address/undefined sanitizers,
+  plus touch/calibration suites. Coverage includes canonical IDs and invalid names,
+  collisions even with an ineligible duplicate, filtered cycling, group/missing
+  recovery, rename and replacement-UUID binding, malformed config warnings,
+  resolved policy maps, explicit precedence, and the actual shared dispatch gate.
+  All existing NFC parsing and shared Sonos protocol checks pass. The station
+  fixture now decodes XML ampersands in received URI arguments; no station
+  transport behavior was changed. Evidence: `.local/room-model-tests.log`.
+- Both normal runtime board builds passed (Stick 1,548,571 bytes; Waveshare
+  1,334,835 bytes). No Waveshare flash, calibration, or UI work was performed.
+  Evidence: `.local/room-model-{stick,waveshare}-build.log`.
+- First Stick flash/hash verification and application readiness passed. Its
+  pre-migration NVS had no room list and an old UUID playlist key: the new image
+  stayed `READ_ONLY`, selected nothing, and logged `ROOM CONFIG ERROR: set rooms`
+  plus `ROOM ID INVALID` for that key. This directly verifies safe legacy behavior,
+  rather than silently converting a UUID preference or discovering selectable rooms.
+  Evidence: `.local/room-model-stick-flash.log`.
+- The owner chose **Office, Living Room, Bedroom**. Kitchen is awaiting replacement
+  hardware; Ellie's Room is deliberately excluded. Saved private/device config
+  with `rooms: ["office", "living-room", "bedroom"]`, `read_only: true`, and the
+  existing `playlist_shuffle_rooms: {"living-room": true}`. Normal config contains
+  no Sonos UUID or IP. A private pre-migration backup is retained. Evidence:
+  `.local/room-model-configure.log` and `device-config` in the check log.
+- Full topology discovered `bedroom`, `ellies-room`, `living-room`, and `office`,
+  with corresponding internal UUIDs. USB cycling completed two rounds of
+  **Bedroom → Living Room → Office → Bedroom**; only those three ever became
+  selectable. Each selected room returned its independent playback/volume state.
+  Cycling did not dispatch any mutating action.
+- The USB matrix accepted 15 inputs across the three rooms: album, playlist,
+  explicit-false playlist, relative volume + repeat, and Next in each. Every input
+  logged its display ID, frozen UUID, policy revision 2, and static operation plan;
+  all 15 hit the read-only HTTP boundary. Albums derived false throughout. Playlist
+  shuffle derived true only in Living Room; Bedroom/Office preserved. Explicit
+  false won in all rooms. No mutating SOAP dispatch appeared in the capture.
+  Evidence: `.local/room-model-check.log`; the local checker also asserted the
+  allowlist/mode before sending any intents and audited all HTTP action logs.
+- USB `read-only true` saved and rebooted without a build, retained all three
+  display IDs and the policy map, and restored Office from its saved display ID.
+  `SONOS_MODE=READ_ONLY` and independent Office state reads resumed after boot.
+  The test never set mode false. Office remained paused, NORMAL, volume 100,
+  track 20; choose a comfortable physical output level before any audible test.
+
+- Final reviewed Stick image flashed with hash verification and application
+  readiness. A subsequent USB smoke check confirmed the persisted three display
+  IDs, `read_only=true`, Living Room policy, restored Office selection/state, and
+  an accepted Office playlist plan with preserve provenance blocked at Stop.
+  Evidence: `.local/room-model-stick-final-flash.log` and
+  `.local/room-model-final-smoke.log`. The Stick remains in read-only mode; no
+  monitor process is left holding its USB port.
+
+### Remaining physical checkpoint
+
+The new mode is included in the Stick display notice, but visible readability,
+physical A double-click reliability, and fresh NFC taps on this room-model image
+still require owner observation. Earlier NFC hardware evidence remains historical;
+USB policy checks are not physical card evidence. Intentional playback/volume/
+mode tests must begin only after the owner deliberately sets `read_only=false`.
+See the updated [three-room physical procedure](stick-milestone-test.md).
+
+The existing executor counts completed no-op operations: a stopped room can report
+`partial` when Stop required no write and the guard blocks the subsequent queue
+clear. The detail explicitly says `READ_ONLY_BLOCKED`; this is not evidence of a
+partial Sonos mutation. No effect occurred in these read-only checks. Real rename,
+grouping, and event-renewal/outage cases remain fixture-tested rather than newly
+measured on the household. No next feature milestone has started.
+
+## Stick double-click follow-up: 2026-09-06
+
+- The owner reported double-clicking alternated the display between Busy and
+  Refreshing rooms/state instead of completing the intended room switch. No
+  physical edge trace was captured from that image, so the exact missed/rejected
+  gesture remains unproven.
+- Code inspection found two concrete issues: manual work notices never expired,
+  and every background refresh replaced the notice; the worker also held the
+  UI's state mutex across serial diagnostics and an NVS preference save. USB
+  backpressure could therefore delay the main task's button sampling. M5's pinned
+  driver decides single/double counts after its 500ms release window; both press
+  and release edges must be sampled for correct classification.
+- Moved worker logging and preference writes outside the short shared-state lock.
+  Background refreshes no longer replace notices, and completed manual work/busy
+  notices return to Ready. Busy input still rejects without queued replay; its
+  accepted/rejected route is now explicit in serial. NFC polls defer while an A
+  gesture is pending, preserving the NFC presentation/removal latch on resumption.
+  Button edge/count and maximum polling-gap logs distinguish missed gestures
+  from a correct double-click rejected during actual work. The click thresholds,
+  Sonos requests, room configuration, and read-only boundary are unchanged.
+- All 324 core behavioral checks, touch/calibration checks, and new Stick button
+  checks passed. Timestamped raw edges drive the actual M5Unified 0.2.21 button
+  implementation and adapter mapping: double-clicks at several spacings emit one
+  RoomNext and zero Refresh events; single-click, hold, B pause, and NFC deferral
+  also pass. Host-only setup now downloads just the pinned portable button sources
+  and license; that isolated build/test also passed. Evidence:
+  `.local/stick-button-tests.log`, `.local/stick-button-host-setup.log`.
+- Both board builds passed. Verified saved `read_only=true` before flashing only
+  the Stick, then observed flash hash verification and application readiness.
+  Startup logged a 35ms maximum button polling gap. Evidence:
+  `.local/stick-button-before.log`, `.local/stick-button-build.log`,
+  `.local/stick-button-waveshare-build.log`, `.local/stick-button-flash.log`.
+- Physical gesture validation was pending at flash time; the owner-confirmed
+  retest below now establishes successful cycling. The original failure had no
+  edge trace, so its exact cause cannot be established retrospectively.
+- USB runtime follow-up passed: cycled the configured three-room list, submitted
+  two immediate RoomNext inputs and observed exactly one accepted/one busy
+  rejection, then restored the original Office preference. No mutating SOAP
+  action was dispatched. Captured maximum button-poll gaps were 21–25ms during
+  these reads. Evidence: `.local/stick-button-check.log`. A bounded 30-minute
+  physical capture was opened at `.local/stick-button-physical.log` for the retest.
+
+- **Owner-confirmed physical retest:** the owner reported “that worked.” The
+  corresponding capture shows three A double-clicks, each with two complete
+  press/release pairs and `decided clicks=2`, accepted at uptime 906636ms,
+  910124ms, and 913492ms. Selection progressed **Office → Bedroom → Living Room
+  → Office**, followed by independent successful state reads for each room.
+  Sample gaps at those button edges were 1–2ms. No single-click refresh or busy
+  rejection accompanied those three gestures, and no mutating SOAP request was
+  dispatched in that sequence. Evidence: `.local/stick-button-physical.log`.
+  This validates the corrected physical cycling path on the current image;
+  fresh NFC/policy and deliberate playback checks remain separate checkpoints.
+
+### Current-image physical NFC policy matrix
+
+- The owner completed the read-only card sequence. The same capture contains
+  five accepted physical presentations with successful NFC preparation/decoding
+  and removal events: Office playlist at 1003497ms and 1050822ms, Living Room
+  playlist at 1062562ms, Living Room album at 1073216ms, and Office album at
+  1080772ms. The two Office playlist presentations were separate removal/retap
+  cycles. Evidence: `.local/stick-button-physical.log`.
+- All requests used human display IDs in their accepted diagnostics and froze
+  the corresponding internal UUID plus policy revision 3. Office playlist
+  preserved omitted shuffle; Living Room playlist derived true from
+  `playlist-room-shuffle`; albums derived false from `albums-in-order` in both
+  rooms. Volume and repeat remained preserved. Each accepted input logged its
+  operation plan and reached `READ_ONLY_BLOCKED` at the first necessary write.
+- Office blocked Stop; the already-stopped Living Room blocked queue clearing.
+  Five guard dispatch blocks matched the five accepted presentations, with no
+  mutating SOAP HTTP action dispatched anywhere in this sequence. The owner
+  reported completion; logs establish physical NFC-to-policy/guard behavior,
+  not audible playback or observed Sonos shuffle changes.
+- This completes the current-image omitted-shuffle NFC policy matrix alongside
+  the confirmed physical room cycling. Explicit-shuffle cards, intentional live
+  playback/volume/mode behavior, and preservation during actual source changes
+  remain separate physical checks. Runtime read-only mode remains enabled.
+
+### Owner-enabled control mode
+
+- After the physical read-only matrix passed, the owner explicitly requested
+  `read_only=false`. Sent the runtime USB setting command and observed
+  `CONFIG_SAVED`, reboot into `SONOS_MODE=CONTROL`, and a post-boot config query
+  with false plus the same three display IDs and Living Room playlist rule.
+  Updated `.local/config.json` to match. No rebuild or flash was required.
+  Evidence: `.local/stick-enable-control.log`.
+- Office restored as the selected room and remained PAUSED_PLAYBACK, NORMAL,
+  volume 100, track 20 at the post-boot read. No playback test command was sent
+  during this configuration change. Restarted a bounded 30-minute serial capture
+  at `.local/stick-control-physical.log` for subsequent owner-driven tests.
+
+### Root player identity guard correction
+
+- The owner's first CONTROL-mode album and playlist taps were accepted for
+  Office at uptime 176568ms and 186423ms, then rejected before Stop dispatch with
+  `Destination UUID differs from accepted target`. Both the topology resolution
+  and adapter preflight had identified Office correctly. No mutation was sent
+  by either failed request. Evidence: `.local/stick-control-physical.log`.
+- A read-only GET of Office's device description confirmed a root ZonePlayer UDN
+  plus embedded MediaServer (`_MS`) and MediaRenderer (`_MR`) UDNs. The ESP guard's
+  recursive walk overwrote the root UUID with the last embedded UUID, creating
+  a false mismatch. Its earlier host fixtures lacked embedded devices and tested
+  only the mode/room gate, so they did not expose this separate ESP-only parser.
+- Replaced that walk with one portable root-ZonePlayer parser shared by adapter
+  identity reads and the final HTTP guard. It selects unique direct children of
+  the root device, supports XML name prefixes, rejects malformed/missing/duplicate
+  identity fields, and ignores embedded identities. The actual guard now performs
+  its fresh UUID read/comparison in the portable layer before calling ESP HTTP
+  dispatch. True destination mismatches still block and log expected/actual UUIDs;
+  mutable room names do not determine permission or retarget accepted work.
+- All **334 behavioral checks**, touch/calibration, and button suites pass with
+  sanitizers. Protocol fixtures now include root ZonePlayer plus embedded `_MS`
+  and `_MR` devices. The shared gate is exercised with matching root identity,
+  renamed room label, empty/wrong/embedded expected UUIDs, and read-only mode.
+  Parser fixtures cover namespace prefixes and invalid/duplicate root fields.
+  Evidence: `.local/stick-identity-tests.log`.
+- Office's actual captured XML was also passed through the same parser/guard in
+  a host-only program with simulated dispatch: the root matched; an expected
+  `_MR` UUID, read-only mode, and malformed identity each blocked before simulated
+  mutation. No sockets or live Sonos writes were used by this check. Evidence:
+  `.local/office-device-description.xml`, `.local/office-identity-check.log`.
+- Both board builds passed; flashed only the Stick with hash verification and
+  application readiness. Fresh Office reads succeeded with the corrected shared
+  parser and still reported paused playback. A post-flash config query verified
+  `read_only=false`, the same three display IDs, and Living Room playlist policy.
+  Evidence: `.local/stick-identity-build.log`,
+  `.local/stick-identity-waveshare-build.log`, `.local/stick-identity-flash.log`.
+  A 30-minute physical capture is running at `.local/stick-identity-physical.log`.
+  No live mutation was sent autonomously; the next owner card tap must confirm
+  actual playback beyond this corrected identity boundary.
+
+
+## Unplugged testing and Stick B toggle
+
+- The owner reported playback worked after the root-identity correction, then
+  walked around with the Stick unplugged and encountered busy/topology-refresh
+  glitches. There is no stored device log history: diagnostics go to USB serial;
+  NVS holds configuration/preference/calibration only. The owner explicitly chose
+  future laptop/live capture instead of adding on-device logging. No persistent
+  logging feature was added.
+- The existing capture ends after an accepted Office playlist and a successful
+  Stop HTTP 200, followed by `Brownout detector was triggered`, a ROM reset banner,
+  and host USB `Device not configured`. This proves the corrected guard allowed
+  the root player write and that a power dip/reset occurred near disconnection;
+  it does not record the later walk-around or establish the cause of those
+  glitches. Full playback success in that interval is owner-reported rather
+  than captured terminal verification. Evidence: `.local/stick-identity-physical.log`.
+- At the owner's request, B now toggles play/pause instead of always pausing.
+  Gesture admission freezes the selected UUID and policy context; a fresh read
+  normalizes playing to Pause and paused/stopped to Play. Invalid/transitioning/
+  no-media state rejects. The resolved explicit command follows the existing
+  application/planner/guard, preserving queue/source, volume, and modes. Busy
+  behavior is unchanged; USB `toggle` exposes the same path for diagnostics.
+- All **347 behavioral checks**, touch/calibration, and button tests pass with
+  sanitizers. New cases cover playback changing after the cached screen snapshot,
+  play/pause directions, stopped state, bound-target mismatch, unknown states,
+  read-only/unconfigured blocking, preservation, and uncertainty preventing a
+  second mutation. The M5 raw-edge test now verifies one Toggle event per B click.
+  Evidence: `.local/stick-toggle-tests.log`. Physical B pause/resume on the new
+  image remains pending; no autonomous playback test was requested or performed.
+- On reconnection before flashing, current RAM status showed request 13 succeeded
+  and Office paused on album track 1. This is a last-result/current-state snapshot,
+  not a retained timeline of the unplugged glitches. Evidence:
+  `.local/stick-toggle-before.log`.
+- Stick and Waveshare builds passed; only the Stick was flashed, with hash
+  verification and application readiness. Post-flash read-only inspection
+  confirmed the existing CONTROL setting and three configured room IDs. Evidence:
+  `.local/stick-toggle-build.log`, `.local/stick-toggle-waveshare-build.log`,
+  `.local/stick-toggle-flash.log`. A bounded 30-minute USB capture was started at
+  `.local/stick-toggle-physical.log` for an owner B pause/resume retest. The host
+  sent only a configuration query, with no toggle or other playback test command.

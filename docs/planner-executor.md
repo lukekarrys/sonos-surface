@@ -208,11 +208,22 @@ Source replacement with omitted transport restores its preflight playing categor
 
 Topology subscriptions invalidate the list only; a new full snapshot determines
 eligibility. Polling repairs missed events. Identity and independence are rechecked
-before every operation, and the HTTP boundary independently verifies the compiled
-Office UUID/name authorization. These checks reduce external-controller races;
+before every operation. The HTTP boundary independently enforces runtime read-only
+mode and configured target eligibility, then verifies the destination UUID. These checks reduce external-controller races;
 they cannot make topology changes atomic with a SOAP dispatch.
 
 Topology event subscription/renewal follows the HTTP GENA messages in the
 [UPnP Device Architecture, section 4](https://openconnectivity.org/upnp-specs/UPnP-arch-DeviceArchitecture-v2.0-20200417.pdf).
 The device honors the granted subscription duration and periodically retries a
 failed subscription; events invalidate snapshots rather than installing state.
+
+## Stick B play/pause gesture
+
+B (and USB `toggle`) first binds the selected configured UUID and copies policy
+context/revision. The worker refreshes that bound room, then normalizes PLAYING
+to explicit Pause or PAUSED_PLAYBACK/STOPPED to explicit Play. Unknown, stale,
+wrong-target, transitioning, or no-media observations reject without mutation.
+Policy resolves once after normalization using the captured context; the resulting
+explicit intent follows ordinary planning/execution and the HTTP mode/identity
+guard. No toggle field is added to MusicIntent or cards. Selection changes cannot
+retarget the admitted gesture; busy inputs still reject without queued replay.

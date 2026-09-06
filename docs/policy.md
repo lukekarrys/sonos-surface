@@ -1,180 +1,79 @@
 # Policy resolution specification
 
-## Purpose and boundaries
+## Runtime configuration and identity
 
-The Stick milestone implements the two required rules below. The playlist rule
-uses the UUID-to-boolean `playlist_shuffle_rooms` map in the existing USB/NVS runtime configuration; changing
-it does not require rebuilding or flashing. Matching uses the accepted selected
-UUID, never the displayed name or current address. A general configuration/rule editor is not implemented.
-Policy rule-set revision is currently fixed at 1; runtime configuration revision
-tracking remains a later extension alongside policy editing.
-
-Policies fill missing MusicIntent fields using trusted context. They MUST NOT
-overwrite explicit input, including `false`, zero, or an explicit value equal
-to current state. An unfilled field continues to mean preserve; the resolver
-MUST NOT replace absence with a Sonos snapshot value.
-These are deliberate application rules, not inherited Sonos or reference-server
-defaults; they can be tested independently of hardware.
-
-V1 policies only derive `shuffle`. No source, volume, repeat, transport, room
-routing, schedules, scripts, or dynamic expressions are configurable policy
-outputs yet. Extending this requires new examples and validation rules, not a
-generic rules language. Preservation reads and relative-volume calculations
-belong to planning, not policy.
-
-## Inputs, configuration, and precedence
-
-Resolution consumes an immutable normalized intent, a bound stable speaker ID,
-and a validated policy configuration revision. Source kind comes from the
-incoming URL normalizer, never a card-supplied hint or whatever is already
-playing. If the intent omits source, source-kind policies do not match.
-
-V1 configuration has this shape:
+The narrow shuffle model uses `playlist_shuffle_rooms` in USB/NVS config:
 
 ```json
 {
-  "version": 1,
-  "revision": 3,
-  "rules": [
-    {
-      "id": "albums-in-order",
-      "scope": "household",
-      "sourceKind": "album",
-      "defaults": { "shuffle": false }
-    },
-    {
-      "id": "playlist-room-shuffle",
-      "scope": "room",
-      "roomId": "speaker-example-room",
-      "sourceKind": "playlist",
-      "defaults": { "shuffle": true }
-    }
-  ]
+  "read_only": true,
+  "rooms": ["office", "living-room", "bedroom"],
+  "playlist_shuffle_rooms": {"living-room": true, "bedroom": false}
 }
 ```
 
-`revision` is a positive integer increased on local replacement; request logs
-also identify the controller/configuration, since revisions are not global.
-`roomId` is a stable target speaker ID, required for room scope and forbidden
-for household scope. `sourceKind` is exactly `album`, `playlist`, or `track`.
-Station intents receive no shuffle policy; station shuffle is unsupported, so
-`station` is not a valid selector in this shuffle-only configuration format.
-Rule IDs are unique nonempty strings, and defaults contain only boolean
-`shuffle`. Reject unknown keys, wrong versions/types, and duplicate keys rather
-than partially applying a malformed configuration.
+Keys are canonical room display IDs, using the single normalization contract in
+[product](product.md#stick-room-and-policy-milestone). At topology refresh, each
+configured policy ID must resolve to exactly one discovered UUID. Missing, invalid,
+or ambiguous IDs produce config warnings and do not install a runtime rule.
+Valid rules continue. A policy entry does not add a room to the device's selectable
+room list. A false rule derives false; omit the entry to preserve playlist shuffle.
+Up to 32 entries are supported. These settings are local to each physical device.
 
-The household album rule above is the initial required default. Each playlist
-room rule becomes active once the family configures its real target; the placeholder
-MUST NOT select a room by inference. Users may subsequently edit/remove rules
-through configuration. “Household” applies to every eligible target known to
-that controller; it does not imply Sonos grouping or automatic config sync.
+The policy resolver receives the selected UUID plus the resolved UUID-to-boolean
+map. It never compares mutable names at execution. A room rename invalidates the
+old config ID on the next topology refresh. Requests accepted before that refresh
+retain their original UUID and policy result; they never target a different room.
 
-Resolution order, independently for each supported output field:
+## Precedence and narrow provenance
 
-1. Retain an explicitly present intent field.
-2. Otherwise select a matching room rule.
-3. Otherwise select a matching household rule.
-4. Otherwise leave the field absent.
+Policies fill missing fields only. Explicit false is as authoritative as true.
+Only shuffle is derived; no generic policy expression engine or per-field origin
+framework is implemented. Preserve means absent, never a guessed snapshot value.
 
-Rule array order has no meaning. For each source kind and output field, allow
-at most one household rule and at most one rule per room. Reject equal-scope
-duplicates even when they assign the same value. Configuration changes are
-validated atomically; retain the previous valid revision on failure. Do not
-silently select the first rule or use arbitrary numeric priorities.
-
-## Deterministic algorithm and provenance
-
-Copy explicit fields and annotate their origin. Match rules once against the
-original context; fill eligible absent fields by the precedence above. Derived
-values MUST NOT trigger a second rule pass. Return a resolved intent with the
-same field semantics plus a separate explanation map, policy revision, and
-target context. Do not mutate the input or trust caller-supplied provenance.
-
-For a playlist without shuffle in the configured room, a diagnostic excerpt is:
-
-```json
-{
-  "resolvedFields": { "shuffle": true },
-  "provenance": {
-    "source": { "origin": "explicit" },
-    "shuffle": {
-      "origin": "policy",
-      "ruleId": "playlist-room-shuffle",
-      "scope": "room",
-      "configRevision": 3,
-      "reason": "Playlist requested in configured room"
-    }
-  },
-  "preservedFields": ["volume", "repeat", "transport"]
-}
-```
-
-This is an explanation excerpt, not a card or a second wire intent schema.
-The full resolved intent retains source and all other original properties.
-Provenance is recorded for each present top-level intent field. `volume` remains
-explicit when its relative target is later computed; the planner records that
-baseline calculation separately. Preserved fields have no fabricated value or
-policy origin. Explanations SHOULD identify applicable rules skipped because
-explicit input or a more-specific rule won.
-
-Freeze target, original intent, and policy revision when a request is accepted;
-resolve exactly once. Queued work retains that revision when configuration is
-edited. Transport retries MUST NOT re-resolve under new policy or reclassify
-the source. A policy preview is not a guarantee of future preservation values,
-which are read at execution; the UI must show the revision and target used.
-
-## Acceptance matrix
-
-Assume the two example rules and no others. “Preserve” means absent in the
-resolved intent, regardless of the currently observed value.
-
-| Incoming source | Explicit shuffle | Target | Resolved shuffle / origin |
+| Incoming source | Explicit shuffle | Room rule | Result / shuffle origin |
 | --- | --- | --- | --- |
-| Album | absent | Any room | `false`, household policy |
-| Album | `true` | Any room | `true`, explicit |
-| Album | `false` | Any room | `false`, explicit |
-| Playlist | absent | Configured playlist room | `true`, room policy |
-| Playlist | absent | Another room | Preserve |
-| Playlist | `false` | Configured playlist room | `false`, explicit |
-| Track from album URL with `i` | absent | Any room | Preserve |
-| No source; volume/pause only | absent | Room currently playing album | Preserve |
+| Album | absent | Any | false / `albums-in-order` (household) |
+| Playlist | absent | true | true / `playlist-room-shuffle` (room) |
+| Playlist | absent | false | false / `playlist-room-shuffle` (room) |
+| Playlist | absent | Missing | absent / `preserve` |
+| Any supported input | true or false | Any | explicit value / `explicit` |
+| Track, station, or no source | absent | Any | absent / `preserve` |
 
-Additional required tests:
+Explicit station shuffle/repeat is rejected as unsupported. Rules never set
+source, volume, repeat, transport, or target. If a second field later derives
+policy, refactor provenance then rather than adding another field-specific origin.
 
-- Add a household playlist `false` rule: the configured room still derives
-  `true`; other rooms derive `false`. Removing the room rule exposes the
-  household fallback.
-- Renaming a room changes no matches; changing the selected stable target does.
-- Permuting rule order changes neither values nor winning provenance.
-- Invalid duplicate rules reject the update and retain the old configuration.
-- Explicit `false` cannot be mistaken for absence; no rule sets transport or
-  repeat as a side effect of deriving shuffle.
-- Repeated resolution of identical inputs/context/revision is identical and
-  does not modify the input. Resolution is input-origin independent.
+## Acceptance, revision, and diagnostics
 
-## Runtime diagnostics
+Parse and validate the original intent; bind the current configured room's resolved
+UUID; resolve exactly once and freeze the result and configuration revision before
+handing work to the worker. NVS configuration replacement advances a persisted
+local revision. Busy updates reject. Retries/execution never re-resolve policy or
+reclassify source kind. A static plan preview cannot predict future preservation
+baselines, which preflight reads at execution.
 
-Each accepted NFC/USB intent logs selected room and bound UUID, normalized source
-kind, recognized explicit input fields, shuffle input/resolution/origin, preserved
-fields, and planned effects. Adapter logs include fresh mode/volume baselines,
-frozen absolute volume, operation timing, and final observed playback/mode/volume.
-Arbitrary optional extension values and configuration credentials are not logged.
-The two fixed rule shapes are deliberately small; the general example rule-array
-format above is a specification seam, not an accepted runtime configuration format.
+Logs include `room`, `roomDisplayId`, UUID, `policyRevision`, normalized `sourceKind`,
+recognized explicit fields, `shuffleInput`, `shuffleResolved`, `shuffleOrigin`,
+preserved fields, and planned operations. Adapter logs include fresh mode/volume
+baselines and operation results. Credentials and arbitrary extensions are omitted.
+Read-only mode runs this same parser/resolver/planner path, then blocks effects at
+HTTP dispatch with `READ_ONLY_BLOCKED`. It does not pretend playback succeeded.
 
-## Multiple playlist rooms in runtime configuration
+## Validation and migration
 
-`playlist_shuffle_rooms` is an object whose keys are stable `RINCON_` player
-UUIDs and whose values are booleans. Up to 32 entries are accepted. A matching
-entry derives its boolean only for an incoming playlist with shuffle omitted;
-an unlisted target preserves shuffle. A false entry is a policy default of false,
-not a disabled rule. Explicit intent wins, and the household album default is
-unchanged. Diagnostics retain `playlist-room-shuffle` provenance and the bound UUID
-identifies the matching entry. The accepted request copies the resolved value.
+Structural errors (wrong types, duplicate keys/room-list entries, oversized maps,
+both singular and plural policy keys) reject atomically and retain saved config.
+Malformed ID strings remain stored for actionable topology-resolution warnings;
+no invalid string ever binds a target. Unknown configuration keys reject.
 
-The old singular `playlist_shuffle_room` string is accepted for existing NVS and
-imports: a nonempty UUID becomes one true entry; an empty string becomes an empty
-map. New examples and local configuration use the plural key. Both keys together,
-invalid identities, nonboolean values, duplicate keys, and oversized maps reject
-without replacing the saved configuration. This map remains controller-local
-runtime policy, independent of discovery, selection, and mutation authorization.
+Legacy `playlist_shuffle_room` is readable as one true entry, or an empty map for
+an empty string. A canonical display ID works; an old UUID key is reported invalid
+and must be replaced by the current display ID. There is deliberately no UUID
+fallback or automatic name migration. Legacy `sonos_uid` and old saved UUID
+preferences cannot restore selection. Set `rooms` explicitly during migration;
+an omitted list targets nothing. Missing `read_only` defaults true.
+
+Tests cover precedence, explicit false, resolved identity, collision/rename handling,
+config replacement, frozen acceptance, and the real dispatch guard. Hardware
+observations and pending physical checks live in [hardware](hardware.md).

@@ -11,7 +11,8 @@ LIBS = DEPS / 'arduino/libraries'
 CONFIG = DEPS / 'arduino-cli.yaml'
 CORE = 'esp32:esp32@3.3.11'
 INDEX = 'https://espressif.github.io/arduino-esp32/package_esp32_index.json'
-LIBRARIES = ['M5GFX@0.2.28', 'M5Unified@0.2.21',
+M5UNIFIED_VERSION = '0.2.21'
+LIBRARIES = ['M5GFX@0.2.28', 'M5Unified@' + M5UNIFIED_VERSION,
              'M5Utility@0.2.0', 'M5HAL@0.1.2', 'M5UnitUnified@0.5.5',
              'M5Unit-NFC@0.1.0', 'GFX Library for Arduino@1.6.7']
 
@@ -43,6 +44,11 @@ def setup(host_only=False):
     for filename in ['tinyxml2.h', 'tinyxml2.cpp', 'LICENSE.txt']:
         download('https://raw.githubusercontent.com/leethomason/tinyxml2/11.0.0/' + filename,
                  LIBS / 'SurfaceXml' / ('src/' + filename if filename != 'LICENSE.txt' else filename))
+    if host_only:
+        # Only the SDK-independent button state machine is needed by host tests.
+        for filename in ['src/utility/Button_Class.hpp', 'src/utility/Button_Class.cpp', 'LICENSE']:
+            download('https://raw.githubusercontent.com/m5stack/M5Unified/' + M5UNIFIED_VERSION + '/' + filename,
+                     DEPS / 'host/M5Buttons' / filename)
     if not host_only:
         run('arduino-cli', '--config-file', str(CONFIG), 'core', 'update-index', '--additional-urls', INDEX)
         run('arduino-cli', '--config-file', str(CONFIG), 'core', 'install', CORE, '--additional-urls', INDEX)

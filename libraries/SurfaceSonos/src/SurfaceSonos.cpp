@@ -45,6 +45,53 @@ std::string encodeId(const std::string& s) {
 }
 } // namespace
 
+Result parseSonosIdentity(const std::string& xml, std::string& id, std::string& room) {
+  tinyxml2::XMLDocument doc;
+  if (xml.size() > 65536 || doc.Parse(xml.c_str(), xml.size()) != tinyxml2::XML_SUCCESS)
+    return Result::fail("Invalid device description XML");
+  // Direct children only, with exactly one value at each identity-bearing level.
+  auto child = [](tinyxml2::XMLNode* parent, const char* name) -> tinyxml2::XMLElement* {
+    if (!parent) return nullptr;
+    tinyxml2::XMLElement* result = nullptr;
+    for (auto e = parent->FirstChildElement(); e; e = e->NextSiblingElement()) {
+      if (std::strcmp(localName(e->Name()), name) != 0) continue;
+      if (result) return nullptr;
+      result = e;
+    }
+    return result;
+  };
+  auto root = child(&doc, "root");
+  auto device = child(root, "device");
+  auto type = child(device, "deviceType");
+  auto udn = child(device, "UDN");
+  auto name = child(device, "roomName");
+  if (!type || !type->GetText() || std::string(type->GetText()) != "urn:schemas-upnp-org:device:ZonePlayer:1" ||
+      !udn || !udn->GetText() || !name || !name->GetText())
+    return Result::fail("Missing/ambiguous root ZonePlayer identity");
+  std::string nextId = udn->GetText();
+  if (nextId.rfind("uuid:", 0) == 0) nextId.erase(0, 5);
+  if (nextId.size() <= 7 || nextId.size() > 64 || nextId.rfind("RINCON_", 0) != 0 ||
+      nextId.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_") != std::string::npos)
+    return Result::fail("Not a recognized Sonos player UUID");
+  id = std::move(nextId); room = name->GetText();
+  return {};
+}
+HttpResponse GuardedHttp::request(const std::string& path, const std::string& action, const std::string& body) {
+  if (!isReadOnlySonosAction(action)) {
+    if (readOnly) return blocked("READ_ONLY_BLOCKED: device read-only mode; command not sent", action);
+    if (!targetAllowed) return blocked("ROOM_BLOCKED: target not configured/eligible", action);
+    auto identity = request("/xml/device_description.xml", "", "");
+    std::string actual, room;
+    auto parsed = parseSonosIdentity(identity.body, actual, room);
+    if (identity.status != 200 || !parsed.ok || target.empty() || actual != target) {
+      const auto reason = identity.status != 200 ? "Identity HTTP read failed" :
+          !parsed.ok ? parsed.error : "Destination UUID differs from accepted target";
+      return blocked("IDENTITY_BLOCKED: " + std::string(reason) + " expected=" + target + " actual=" + actual, action);
+    }
+  }
+  return dispatch(path, action, body);
+}
+
 bool isReadOnlySonosAction(const std::string& action) {
   if (action.empty()) return true; // HTTP GET device description.
   auto hash = action.rfind('#');
@@ -126,11 +173,6 @@ Result combineMode(const std::string& current, std::optional<bool> shuffle, std:
 Result modeWithShuffle(const std::string& current, std::optional<bool> shuffle, std::string& mode) {
   return combineMode(current, shuffle, std::nullopt, mode);
 }
-bool mutationAuthorized(bool enabled, const std::string& target, const std::string& verifiedName,
-                        const std::string& authorizedId, const std::string& authorizedName) {
-  return enabled && !authorizedId.empty() && !authorizedName.empty() &&
-         target == authorizedId && verifiedName == authorizedName;
-}
 Result parseTopology(const std::string& xml, std::vector<Room>& rooms) {
   tinyxml2::XMLDocument doc;
   if (xml.size() > 65536 || doc.Parse(xml.c_str()) != tinyxml2::XML_SUCCESS) return Result::fail("Invalid topology XML");
@@ -144,6 +186,7 @@ Result parseTopology(const std::string& xml, std::vector<Room>& rooms) {
     for (auto m = group->FirstChildElement("ZoneGroupMember"); m; m = m->NextSiblingElement("ZoneGroupMember")) {
       Room room;
       room.id = attr(m, "UUID"); room.name = attr(m, "ZoneName");
+      room.displayId = roomDisplayId(room.name);
       room.coordinator = attr(group, "Coordinator"); room.group = attr(group, "ID");
       const auto location = attr(m, "Location");
       const auto end = location.find(":1400/");
@@ -200,10 +243,8 @@ Result DirectSonos::soap(const char* service, const char* action, const std::str
 Result DirectSonos::identity() {
   auto reply = http_.request("/xml/device_description.xml", "", "");
   if (reply.status != 200) return Result::fail("Cannot fetch speaker identity: " + reply.error);
-  id_ = value(reply.body, "UDN");
-  if (id_.compare(0, 5, "uuid:") == 0) id_.erase(0, 5);
-  room_ = value(reply.body, "roomName");
-  if (id_.compare(0, 7, "RINCON_") != 0) return Result::fail("Not a recognized Sonos speaker");
+  auto parsed = parseSonosIdentity(reply.body, id_, room_);
+  if (!parsed.ok) return parsed;
   if (!config_.targetId.empty() && id_ != config_.targetId) return Result::fail("Speaker identity differs from configured target");
   if (log_) log_("target=" + id_ + " room=" + room_);
   return {};

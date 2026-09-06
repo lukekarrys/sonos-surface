@@ -3,37 +3,88 @@
 #include <surface_json.hpp>
 
 namespace surface {
+std::string roomDisplayId(const std::string& name) {
+  std::string id;
+  bool separator = false;
+  for (unsigned char c : name) {
+    if (c >= 127 || (c < 32 && c != '\t' && c != '\n' && c != '\r')) return "";
+    if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+    if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) {
+      if (separator && !id.empty()) id += '-';
+      id += c;
+      separator = false;
+    } else if (c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '-' || c == '_') {
+      separator = true;
+    } // Other ASCII punctuation is stripped, including apostrophes.
+  }
+  return id.size() <= 64 ? id : "";
+}
+bool validRoomDisplayId(const std::string& id) {
+  return !id.empty() && id == roomDisplayId(id);
+}
 const Room* RoomSelection::selected() const {
   for (const auto& room : rooms) if (room.id == selectedId) return &room;
   return nullptr;
 }
 void RoomSelection::update(std::vector<Room> discovered) {
-  std::sort(discovered.begin(), discovered.end(), [](const Room& a, const Room& b) { return a.id < b.id; });
-  rooms = std::move(discovered);
-  if (!initialized) {
-    selectedId = preferredId;
-    const auto* preferred = selected();
-    if (!preferred || !preferred->eligible) {
-      selectedId.clear();
-      for (const auto& room : rooms) if (room.eligible) { selectedId = room.id; break; }
-      warning = preferredId.empty() ? "" : "Preferred room unavailable; fallback selected";
+  rooms.clear(); problems.clear(); resolvedPlaylistRules.clear(); warning.clear();
+  for (auto& room : discovered) {
+    room.displayId = roomDisplayId(room.name);
+    if (room.displayId.empty()) problems.push_back("ROOM NAME INVALID: " + room.name + " uuid=" + room.id);
+  }
+  auto resolve = [&](const std::string& id) -> const Room* {
+    if (!validRoomDisplayId(id)) { problems.push_back("ROOM ID INVALID: " + id); return nullptr; }
+    const Room* match = nullptr;
+    for (const auto& room : discovered) if (room.displayId == id) {
+      if (match) {
+        problems.push_back("ROOM ID AMBIGUOUS: " + id + " (" + match->name + " / " + room.name + ")");
+        return nullptr;
+      }
+      match = &room;
     }
+    if (!match) problems.push_back("ROOM MISSING: " + id);
+    return match;
+  };
+  if (allowedIds.empty()) problems.push_back("ROOM CONFIG ERROR: set rooms");
+  for (const auto& id : allowedIds) {
+    const auto* room = resolve(id);
+    if (!room) continue;
+    if (!room->eligible || room->address.empty()) {
+      problems.push_back("ROOM UNAVAILABLE: " + id);
+      continue;
+    }
+    if (std::none_of(rooms.begin(), rooms.end(), [&](const Room& r) { return r.id == room->id; })) rooms.push_back(*room);
+  }
+  for (const auto& rule : playlistRules) {
+    const auto* room = resolve(rule.first);
+    if (room) resolvedPlaylistRules[room->id] = rule.second;
+  }
+  auto lower = [](std::string name) {
+    for (auto& c : name) if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+    return name;
+  };
+  std::sort(rooms.begin(), rooms.end(), [&](const Room& a, const Room& b) {
+    auto an = lower(a.name), bn = lower(b.name);
+    return an == bn ? a.id < b.id : an < bn;
+  });
+  // Config identity is always resolved anew. No saved UUID can survive a rename.
+  if (!initialized || !selected()) {
+    selectedId.clear();
+    for (const auto& room : rooms) if (room.displayId == preferredId) selectedId = room.id;
+    if (selectedId.empty() && !rooms.empty()) selectedId = rooms.front().id;
     initialized = !selectedId.empty();
   }
-  const auto* current = selected();
-  if (!current || !current->eligible) warning = "Selected room unavailable/grouped; choose a room";
-  else if (warning == "Selected room unavailable/grouped; choose a room" ||
-           warning == "Topology unavailable; mutations blocked") warning.clear();
+  if (!preferredId.empty() && std::none_of(rooms.begin(), rooms.end(), [&](const Room& r) { return r.displayId == preferredId; }))
+    problems.push_back("PREFERRED UNAVAILABLE: " + preferredId);
+  if (!problems.empty()) warning = problems.front();
 }
 bool RoomSelection::cycle() {
-  std::vector<std::string> ids;
-  for (const auto& room : rooms) if (room.eligible) ids.push_back(room.id);
-  if (ids.empty()) return false;
-  auto it = std::find(ids.begin(), ids.end(), selectedId);
-  selectedId = it == ids.end() || ++it == ids.end() ? ids.front() : *it;
-  preferredId = selectedId;
+  if (rooms.empty()) return false;
+  auto it = std::find_if(rooms.begin(), rooms.end(), [&](const Room& r) { return r.id == selectedId; });
+  if (it == rooms.end() || ++it == rooms.end()) it = rooms.begin();
+  selectedId = it->id;
+  preferredId = it->displayId;
   initialized = true;
-  warning.clear();
   return true;
 }
 std::string describeIntent(const MusicIntent& input, const ResolvedIntent& resolved) {

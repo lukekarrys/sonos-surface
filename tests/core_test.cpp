@@ -38,6 +38,15 @@ struct FakeSonos : SonosTransport {
   Result verify(const ResolvedIntent&, PlaybackState& state) override { return refresh(state); }
 };
 
+std::string deviceDescription(const std::string& id, const std::string& room) {
+  return "<root xmlns=\"urn:schemas-upnp-org:device-1-0\"><device>"
+      "<deviceType>urn:schemas-upnp-org:device:ZonePlayer:1</deviceType><UDN>uuid:" + id +
+      "</UDN><roomName>" + xmlEscape(room) + "</roomName><deviceList>"
+      "<device><deviceType>urn:schemas-upnp-org:device:MediaServer:1</deviceType><UDN>uuid:" + id + "_MS</UDN></device>"
+      "<device><deviceType>urn:schemas-upnp-org:device:MediaRenderer:1</deviceType><UDN>uuid:" + id + "_MR</UDN>"
+      "<roomName>Embedded label</roomName></device></deviceList></device></root>";
+}
+
 struct StationHttp : LocalHttp {
   std::vector<std::string> mutations;
   std::string selectedBody, playback = "STOPPED", uri = "x-rincon-queue:RINCON_TEST#0";
@@ -46,7 +55,7 @@ struct StationHttp : LocalHttp {
   HttpResponse request(const std::string&, const std::string& action, const std::string& body) override {
     const auto name = action.empty() ? "" : action.substr(action.find('#') + 1);
     if (!isReadOnlySonosAction(action)) mutations.push_back(name);
-    if (name.empty()) return {200, "<root><UDN>uuid:RINCON_TEST</UDN><roomName>Office</roomName></root>", ""};
+    if (name.empty()) return {200, deviceDescription("RINCON_TEST", "Office"), ""};
     auto reply = [&](const std::string& xml) { return HttpResponse{200, "<" + name + "Response>" + xml + "</" + name + "Response>", ""}; };
     if (name == "GetTransportInfo") return reply("<r><CurrentTransportState>" + playback + "</CurrentTransportState></r>");
     if (name == "GetPositionInfo") return reply("<r><TrackMetaData></TrackMetaData></r>");

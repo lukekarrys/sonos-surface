@@ -21,3 +21,14 @@ subprocess.run(['clang++', '-std=c++17', '-Wall', '-Wextra', '-Werror', '-g',
                 str(ROOT / 'tests/touch_test.cpp'), '-o', str(BUILD / 'touch_test')], check=True)
 subprocess.run([str(BUILD / 'touch_test')], check=True)
 subprocess.run(['python3', '-B', str(ROOT / 'tests/calibrate_test.py')], check=True)
+
+buttons = ROOT / '.deps/arduino/libraries/M5Unified/src'
+if not (buttons / 'utility/Button_Class.hpp').exists():
+    buttons = ROOT / '.deps/host/M5Buttons/src'
+subprocess.run(['clang++', '-std=c++17', '-Wall', '-Wextra', '-Werror', '-g',
+                '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
+                '-I' + str(ROOT / 'libraries/SurfaceDevice/src'),
+                '-I' + str(includes[0]), '-I' + str(buttons),
+                str(buttons / 'utility/Button_Class.cpp'),
+                str(ROOT / 'tests/stick_button_test.cpp'), '-o', str(BUILD / 'stick_button_test')], check=True)
+subprocess.run([str(BUILD / 'stick_button_test')], check=True)

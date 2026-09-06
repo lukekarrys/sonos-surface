@@ -4,6 +4,9 @@
 namespace surface {
 struct HttpResponse { int status = 0; std::string body, error; bool notSent = false; };
 bool isReadOnlySonosAction(const std::string& action);
+// Only the root ZonePlayer device defines the destination identity. Embedded
+// MediaRenderer/MediaServer devices have their own UDNs and must not overwrite it.
+Result parseSonosIdentity(const std::string& xml, std::string& id, std::string& room);
 class LocalHttp {
 public:
   virtual ~LocalHttp() = default;
@@ -12,13 +15,24 @@ public:
   virtual uint64_t nowMs() = 0;
   virtual void pollWait(uint32_t ms) = 0;
 };
+// Hard dispatch boundary shared by the device and protocol tests. Unknown SOAP
+// actions fail closed in read-only mode. Target permission comes from resolution.
+class GuardedHttp : public LocalHttp {
+public:
+  bool readOnly = true;
+  bool targetAllowed = false;
+  std::string target;
+  HttpResponse request(const std::string& path, const std::string& action,
+                       const std::string& body) final;
+protected:
+  virtual HttpResponse dispatch(const std::string& path, const std::string& action, const std::string& body) = 0;
+  virtual HttpResponse blocked(const std::string& reason, const std::string&) { return {0, "", reason, true}; }
+};
 struct SonosConfig { std::string targetId, appleRegion = "52231"; };
 struct AppleSourceItem { std::string uri, metadata; };
 std::string xmlEscape(const std::string& value);
 Result appleSourceItem(const Source& source, const std::string& region, AppleSourceItem& item);
 Result parseTopology(const std::string& xml, std::vector<Room>& rooms);
-bool mutationAuthorized(bool enabled, const std::string& target, const std::string& verifiedName,
-                        const std::string& authorizedId, const std::string& authorizedName);
 Result combineMode(const std::string& current, std::optional<bool> shuffle, std::optional<Repeat> repeat, std::string& mode);
 Result modeWithShuffle(const std::string& current, std::optional<bool> shuffle, std::string& mode);
 

@@ -4,6 +4,7 @@
 #include <M5UnitUnified.h>
 #include <M5UnitUnifiedNFC.h>
 #include "StickDisplay.h"
+#include "StickButtons.h"
 #include <Wire.h>
 
 namespace surface::device {
@@ -54,7 +55,21 @@ bool boardBegin(std::string& notice) {
 bool boardCommand(const std::string&) { return false; }
 
 BoardEvent boardPoll() {
+  static uint32_t lastButtons = 0, buttonReport = 0, maxButtonGap = 0;
+  const auto now = millis();
+  const auto gap = lastButtons ? now - lastButtons : 0;
+  maxButtonGap = std::max<uint32_t>(maxButtonGap, gap);
+  lastButtons = now;
   M5.update();
+  if (M5.BtnA.wasChangePressed())
+    Serial.printf("[button] A %s clicks=%u poll-gap-ms=%lu\n", M5.BtnA.isPressed() ? "pressed" : "released",
+                  M5.BtnA.getClickCount(), gap);
+  if (M5.BtnA.wasDecideClickCount())
+    Serial.printf("[button] A decided clicks=%u\n", M5.BtnA.getClickCount());
+  if (now - buttonReport >= 5000) {
+    Serial.printf("[button] max-poll-gap-ms=%lu\n", maxButtonGap);
+    maxButtonGap = 0; buttonReport = now;
+  }
   static uint32_t lastDisplayInit = 0;
   if (!displayReady && millis() - lastDisplayInit >= 5000) {
     lastDisplayInit = millis();
@@ -79,9 +94,11 @@ BoardEvent boardPoll() {
     Serial.printf("[nfc] init retry ready=%d\n", ready);
     if (ready) return {Input::Error, "NFC recovered: tap card"};
   }
-  if (M5.BtnA.wasDoubleClicked()) return {Input::RoomNext, ""};
-  if (M5.BtnA.wasSingleClicked()) return {Input::Refresh, ""};
-  if (M5.BtnB.wasClicked()) return {Input::Pause, ""};
+  const auto button = stickButtonInput(M5.BtnA, M5.BtnB);
+  if (button != Input::None) return {button, ""};
+  // Keep sampling an in-progress gesture; resume NFC without resetting its
+  // presentation latch once the click count is decided or the hold is released.
+  if (stickButtonPending(M5.BtnA, M5.BtnB)) return {};
   if (!ready || millis() - lastPoll < 200) return {};
   lastPoll = millis();
   units.update();
@@ -155,7 +172,7 @@ void boardRender(const AppState& state, const std::string& notice) {
   auto screen = std::string("sonos-surface / NFC\n") + notice + "\n" +
     (observed.known ? observed.room + ": " + observed.playback : "Playback: unknown") +
     (observed.stale ? " [stale]" : "") + "\n" + observed.title + "\n" +
-    state.status + ": " + detail + "\nA: refresh  B: pause";
+    state.status + ": " + detail + "\nA: refresh  B: play/pause";
   if (screen == lastScreen) return;
   lastScreen = screen;
   M5.Display.fillScreen(TFT_BLACK);
@@ -169,7 +186,7 @@ void boardRender(const AppState& state, const std::string& notice) {
   M5.Display.println(state.status.c_str());
   M5.Display.println(detail.substr(0, 100).c_str());
   M5.Display.setCursor(0, 124);
-  M5.Display.println("A:refresh AA:room B:pause");
+  M5.Display.println("A:refresh AA:room B:play/pause");
 }
 } // namespace surface::device
 #endif

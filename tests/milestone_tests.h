@@ -10,11 +10,13 @@ struct ControlHttp : LocalHttp {
   std::vector<std::pair<std::string, std::string>> writes;
   HttpResponse request(const std::string&, const std::string& action, const std::string& body) override {
     auto name = action.empty() ? "" : action.substr(action.find('#') + 1);
-    if (name.empty()) return {200, "<root><UDN>uuid:" + id + "</UDN><roomName>" + room + "</roomName></root>", ""};
+    if (name.empty()) return {200, deviceDescription(id, room), ""};
     auto reply = [&](std::string xml) { return HttpResponse{200, "<" + name + "Response>" + xml + "</" + name + "Response>", ""}; };
     auto field = [&](const std::string& key) {
       auto a = body.find("<" + key + ">") + key.size() + 2;
-      return body.substr(a, body.find("</" + key + ">", a) - a);
+      auto result = body.substr(a, body.find("</" + key + ">", a) - a);
+      for (auto pos = result.find("&amp;"); pos != std::string::npos; pos = result.find("&amp;", pos + 1)) result.replace(pos, 5, "&");
+      return result;
     };
     if (!isReadOnlySonosAction(action)) {
       writes.emplace_back(name, body);
@@ -75,6 +77,7 @@ unsigned milestoneTests() {
   assert(frozen.intent.shuffle == true && frozen.policyRevision == 2);
   assert(resolvePolicy(playlistInput, {"RINCON_A", rules, 3}).intent.shuffle == false); ++cases;
   using surface::device::parsePlaylistPolicy;
+  rules = {{"office", true}, {"living-room", false}};
   PlaylistShuffleRooms loaded;
   assert(parsePlaylistPolicy(Json{{"playlist_shuffle_rooms", rules}}, loaded) && loaded == rules); ++cases;
   assert(parsePlaylistPolicy(Json{{"playlist_shuffle_room", "RINCON_A"}}, loaded));
@@ -85,11 +88,11 @@ unsigned milestoneTests() {
   }
   for (const Json& invalid : std::vector<Json>{
       {{"playlist_shuffle_rooms", "RINCON_A"}}, {{"playlist_shuffle_rooms", Json::array({"RINCON_A"})}},
-      {{"playlist_shuffle_rooms", nullptr}}, {{"playlist_shuffle_rooms", {{"Living Room", true}}}},
+      {{"playlist_shuffle_rooms", nullptr}},
       {{"playlist_shuffle_rooms", {{"RINCON_A", "true"}}}}, {{"playlist_shuffle_rooms", {{"RINCON_A", 1}}}},
-      {{"playlist_shuffle_rooms", {{"RINCON_A", nullptr}}}}, {{"playlist_shuffle_rooms", {{"RINCON_", true}}}},
+      {{"playlist_shuffle_rooms", {{"RINCON_A", nullptr}}}},
       {{"playlist_shuffle_rooms", {{"RINCON_A", true}, {"RINCON_B", "bad"}}}},
-      {{"playlist_shuffle_room", "Living Room"}}, {{"playlist_shuffle_room", Json::array()}},
+      {{"playlist_shuffle_room", Json::array()}},
       {{"playlist_shuffle_room", "RINCON_A"}, {"playlist_shuffle_rooms", Json::object()}}}) {
     loaded = rules;
     assert(!parsePlaylistPolicy(invalid, loaded) && loaded == rules); ++cases;
@@ -98,21 +101,22 @@ unsigned milestoneTests() {
   for (int n = 0; n < 33; ++n) excessive["RINCON_" + std::to_string(n)] = true;
   assert(!parsePlaylistPolicy(Json{{"playlist_shuffle_rooms", excessive}}, loaded)); ++cases;
 
-  Room a{"RINCON_A", "Office", "192.168.1.2", "RINCON_A", "a", true};
-  Room b{"RINCON_B", "Living Room", "192.168.1.3", "RINCON_B", "b", true};
-  RoomSelection rooms; rooms.preferredId = b.id; rooms.update({b, a});
-  assert(rooms.selectedId == b.id && rooms.warning.empty()); ++cases;
+  Room a{"RINCON_A", "Office", "192.168.1.2", "RINCON_A", "a", true, "office"};
+  Room b{"RINCON_B", "Living Room", "192.168.1.3", "RINCON_B", "b", true, "living-room"};
+  RoomSelection rooms; rooms.allowedIds = {"office", "living-room"};
+  rooms.preferredId = "living-room"; rooms.update({b, a});
+  assert(rooms.selectedId == b.id && rooms.warning.empty() && rooms.rooms.front().id == b.id); ++cases;
   b.name = "Renamed"; b.address = "192.168.1.4"; rooms.update({a, b});
-  assert(rooms.selected()->name == "Renamed" && rooms.selected()->address == "192.168.1.4" && rooms.selectedId == b.id); ++cases;
-  b.eligible = false; rooms.update({a, b});
-  assert(rooms.selectedId == b.id && !rooms.selected()->eligible && !rooms.warning.empty()); ++cases;
+  assert(rooms.selectedId == a.id && rooms.rooms.size() == 1 && rooms.warning.find("living-room") != std::string::npos); ++cases;
+  b.name = "Living Room"; b.eligible = false; rooms.update({a, b});
+  assert(rooms.rooms.size() == 1 && !rooms.warning.empty()); ++cases;
   assert(rooms.cycle() && rooms.selectedId == a.id); ++cases;
   b.eligible = true; rooms.update({a, b}); assert(rooms.cycle() && rooms.selectedId == b.id); ++cases;
-  rooms.warning = "Topology unavailable; mutations blocked"; rooms.update({a, b});
-  assert(rooms.warning.empty()); ++cases;
-  RoomSelection fallback; fallback.preferredId = "RINCON_MISSING"; fallback.update({b, a});
-  assert(fallback.selectedId == a.id && !fallback.warning.empty() && fallback.preferredId == "RINCON_MISSING"); ++cases;
-  fallback.update({b}); assert(fallback.selectedId == a.id && !fallback.selected()); ++cases;
+  rooms.update({a, b}); assert(rooms.warning.empty()); ++cases;
+  RoomSelection fallback; fallback.allowedIds = {"office", "living-room"};
+  fallback.preferredId = "missing"; fallback.update({b, a});
+  assert(fallback.selectedId == b.id && !fallback.warning.empty() && fallback.preferredId == "missing"); ++cases;
+  fallback.update({a}); assert(fallback.selectedId == a.id); ++cases;
   std::vector<Room> topology;
   for (const auto& extra : {std::string(), std::string("<ZoneGroupMember UUID=\"RINCON_B\"/>")}) {
     assert(parseTopology("<ZoneGroups><ZoneGroup Coordinator=\"RINCON_A\"><ZoneGroupMember UUID=\"RINCON_A\"/>" + extra + "</ZoneGroup></ZoneGroups>", topology).ok);
@@ -212,9 +216,153 @@ unsigned milestoneTests() {
   assert(!groupSonos.execute(Operation::Play).ok && grouping.writes.empty()); ++cases;
   grouping.grouped = false; grouping.id = b.id;
   assert(!groupSonos.execute(Operation::Play).ok && grouping.writes.empty()); ++cases;
-  assert(mutationAuthorized(true, a.id, "Office", a.id, "Office")); ++cases;
-  assert(!mutationAuthorized(false, a.id, "Office", a.id, "Office")); ++cases;
-  assert(!mutationAuthorized(true, b.id, "Office", a.id, "Office")); ++cases;
-  assert(!mutationAuthorized(true, a.id, "Living Room", a.id, "Office")); ++cases;
+  // Normalization is intentionally ASCII, deterministic and shared with topology.
+  for (const auto& example : std::map<std::string, std::string>{
+      {"Office", "office"}, {"Living Room", "living-room"}, {"Kids' Room", "kids-room"},
+      {"Luke's Office", "lukes-office"}, {" -- A __  B!! -- ", "a-b"}, {"Room 12", "room-12"},
+      {"!!!", ""}, {"", ""}, {"Café", ""}, {std::string("Room") + char(127), ""}}) {
+    assert(roomDisplayId(example.first) == example.second); ++cases;
+  }
+  for (auto id : {"", "Office", "a--b", "-a", "a-", "a_b", "RINCON_A"}) {
+    assert(!validRoomDisplayId(id)); ++cases;
+  }
+  Room extra{"RINCON_C", "Bedroom", "192.168.1.5", "RINCON_C", "c", true, "bedroom"};
+  RoomSelection selected; selected.allowedIds = {"office", "living-room", "missing", "Bad ID"};
+  selected.playlistRules = {{"living-room", true}};
+  selected.update({extra, a, b});
+  assert(selected.rooms.size() == 2 && selected.rooms[0].id == b.id && selected.problems.size() == 2); ++cases;
+  for (int n = 0; n < 8; ++n) { assert(selected.cycle() && selected.selectedId != extra.id); ++cases; }
+  assert(selected.resolvedPlaylistRules == PlaylistShuffleRooms({{b.id, true}})); ++cases;
+  auto accepted = resolvePolicy(parsed(playlist), {b.id, selected.resolvedPlaylistRules, 9});
+  selected.cycle(); selected.allowedIds = {"office"}; b.name = "New Name"; selected.update({a, b});
+  assert(accepted.targetId == b.id && accepted.intent.shuffle == true && accepted.policyRevision == 9); ++cases;
+  assert(selected.resolvedPlaylistRules.empty() && selected.selectedId == a.id); ++cases;
+  b.name = "Living Room";
+  extra.name = "Office!"; selected.allowedIds = {"office", "living-room"}; selected.update({extra, a, b});
+  assert(selected.rooms.size() == 1 && selected.selectedId == b.id && selected.warning.find("AMBIGUOUS: office") != std::string::npos); ++cases;
+  selected.playlistRules = {{"office", true}}; selected.update({extra, a, b});
+  assert(selected.resolvedPlaylistRules.empty()); ++cases;
+  extra.eligible = false; selected.update({extra, a, b});
+  assert(selected.rooms.size() == 1 && selected.selectedId == b.id); ++cases;
+  extra.eligible = true;
+  selected.playlistRules = {{"RINCON_A", true}}; selected.update({a, b});
+  assert(selected.resolvedPlaylistRules.empty() && selected.warning.find("INVALID: RINCON_A") != std::string::npos); ++cases;
+  selected.playlistRules = {{"living-room", true}};
+  selected.preferredId = "living-room"; selected.initialized = false; selected.update({a, b});
+  auto beforeReplacement = resolvePolicy(parsed(playlist), {selected.selectedId, selected.resolvedPlaylistRules, 11});
+  auto replacement = b; replacement.id = "RINCON_REPLACEMENT";
+  selected.update({a, replacement});
+  assert(selected.selectedId == replacement.id && beforeReplacement.targetId == b.id && beforeReplacement.intent.shuffle == true); ++cases;
+  extra.name = "Bedroom";
+  bool mode = false; std::vector<std::string> ids;
+  using surface::device::parseDeviceRooms;
+  assert(parseDeviceRooms(Json::object(), mode, ids) && mode && ids.empty()); ++cases;
+  for (bool readOnly : {true, false}) {
+    assert(parseDeviceRooms(Json{{"read_only", readOnly}, {"rooms", {"office", "missing", "Bad ID"}}}, mode, ids));
+    selected.allowedIds = ids; selected.update({a, b, extra});
+    assert(mode == readOnly && selected.rooms.size() == 1 && selected.selectedId == a.id); ++cases;
+  }
+  for (const Json& invalid : std::vector<Json>{{{"read_only", "false"}}, {{"read_only", nullptr}},
+      {{"rooms", "office"}}, {{"rooms", {"office", "office"}}}, {{"rooms", {1}}}}) {
+    auto before = ids; auto oldMode = mode;
+    assert(!parseDeviceRooms(invalid, mode, ids) && ids == before && mode == oldMode); ++cases;
+  }
+  // Exercise the exact final HTTP gate used by EspHttp, counting downstream calls.
+  struct GuardFixture : GuardedHttp {
+    ControlHttp downstream;
+    GuardFixture() { target = "RINCON_A"; }
+    unsigned sent = 0;
+    HttpResponse dispatch(const std::string& p, const std::string& a, const std::string& b) override {
+      ++sent; return downstream.request(p, a, b);
+    }
+    uint64_t nowMs() override { return downstream.nowMs(); }
+    void pollWait(uint32_t ms) override { downstream.pollWait(ms); }
+  };
+  for (const auto* action : {"Stop", "RemoveAllTracksFromQueue", "AddURIToQueue", "SetAVTransportURI",
+      "SetPlayMode", "SetVolume", "SetMute", "Play", "Pause", "Next", "Previous", "FutureMutation"}) {
+    GuardFixture gate; gate.targetAllowed = true;
+    auto reply = gate.request("/control", std::string("urn:schemas-upnp-org:service:AVTransport:1#") + action, "");
+    assert(reply.notSent && gate.sent == 0 && reply.error.find("READ_ONLY_BLOCKED") != std::string::npos); ++cases;
+  }
+  for (const Json& request : std::vector<Json>{{{"source", {{"service", "apple-music"}, {"url", album}}}},
+      {{"source", {{"service", "apple-music"}, {"url", playlist}}}},
+      {{"source", {{"service", "apple-music"}, {"url", station}}}, {"transport", "play"}},
+      {{"volume", {{"delta", 5}}}}, {{"shuffle", true}}, {{"repeat", "all"}},
+      {{"transport", "play"}}, {{"transport", "pause"}}, {{"transport", "next"}}, {{"transport", "previous"}}}) {
+    GuardFixture gate; gate.targetAllowed = true;
+    if (request.value("transport", "") == "pause") gate.downstream.playback = "PLAYING";
+    DirectSonos sonos(gate, {a.id, "52231"}); Application app(sonos, {a.id, {{a.id, true}}, 10});
+    auto normalized = parsed(card(request)); auto resolved = resolvePolicy(normalized, {a.id, {{a.id, true}}, 10});
+    Plan plan; assert(makePlan(resolved, plan).ok && !plan.operations.empty());
+    assert(app.refresh().ok);
+    auto result = app.submit(resolved);
+    if (result.ok || result.error.find("READ_ONLY_BLOCKED") == std::string::npos) std::cerr << request.dump() << ": " << result.error << "\n";
+    assert(!result.ok && result.error.find("READ_ONLY_BLOCKED") != std::string::npos && gate.downstream.writes.empty()); ++cases;
+    gate.readOnly = false; gate.targetAllowed = false;
+    result = app.submit(resolved);
+    assert(!result.ok && result.error.find("ROOM_BLOCKED") != std::string::npos && gate.downstream.writes.empty()); ++cases;
+    gate.targetAllowed = true;
+    auto allowed = app.submit(resolved);
+    if (!allowed.ok) std::cerr << request.dump() << ": " << allowed.error << "\n";
+    assert(allowed.ok && !gate.downstream.writes.empty()); ++cases;
+  }
+  // The root player identity wins over embedded _MS/_MR devices in the exact
+  // shared HTTP guard, not just in the adapter's earlier identity check.
+  std::string playerId = "unchanged", playerRoom = "unchanged";
+  assert(parseSonosIdentity(deviceDescription(a.id, "Office"), playerId, playerRoom).ok && playerId == a.id && playerRoom == "Office"); ++cases;
+  auto namespaced = std::string("<u:root xmlns:u=\"urn:schemas-upnp-org:device-1-0\"><u:device>") +
+      "<u:deviceType>urn:schemas-upnp-org:device:ZonePlayer:1</u:deviceType><u:UDN>uuid:RINCON_A</u:UDN>"
+      "<u:roomName>Office</u:roomName></u:device></u:root>";
+  assert(parseSonosIdentity(namespaced, playerId, playerRoom).ok && playerId == a.id); ++cases;
+  for (auto invalid : {std::string("bad XML"), std::string("<root><UDN>uuid:RINCON_A</UDN></root>"),
+      std::string("<root><device><deviceList><device><UDN>uuid:RINCON_A</UDN></device></deviceList></device></root>"),
+      std::string("<root><device><deviceType>urn:schemas-upnp-org:device:ZonePlayer:1</deviceType><UDN>uuid:RINCON_A</UDN><UDN>uuid:RINCON_B</UDN><roomName>Office</roomName></device></root>")}) {
+    auto beforeId = playerId, beforeRoom = playerRoom;
+    assert(!parseSonosIdentity(invalid, playerId, playerRoom).ok && playerId == beforeId && playerRoom == beforeRoom); ++cases;
+  }
+  {
+    GuardFixture gate; gate.readOnly = false; gate.targetAllowed = true;
+    gate.downstream.room = "Renamed Room";
+    assert(gate.request("/control", "urn:schemas-upnp-org:service:AVTransport:1#Play", "").status == 200);
+    assert(gate.downstream.writes.size() == 1); ++cases;
+    for (const auto& expected : {std::string(), std::string("RINCON_OTHER"), std::string("RINCON_A_MR")}) {
+      gate.target = expected;
+      auto reply = gate.request("/control", "urn:schemas-upnp-org:service:AVTransport:1#Play", "");
+      assert(reply.notSent && reply.error.find("IDENTITY_BLOCKED") != std::string::npos && gate.downstream.writes.size() == 1); ++cases;
+    }
+  }
+  for (const auto* playback : {"PLAYING", "PAUSED_PLAYBACK", "STOPPED"}) {
+    GuardFixture gate; gate.readOnly = false; gate.targetAllowed = true;
+    DirectSonos sonos(gate, {a.id, "52231"}); Application app(sonos, {a.id, {}, 1});
+    gate.downstream.playback = "PAUSED_PLAYBACK";
+    assert(app.refresh().ok);
+    // External playback changes after the cached snapshot must drive the toggle.
+    gate.downstream.playback = playback;
+    PolicyContext captured{a.id, {{a.id, true}}, 17};
+    assert(app.submitToggle(captured).ok);
+    assert(gate.downstream.writes.size() == 1);
+    assert(gate.downstream.writes[0].first == (std::string(playback) == "PLAYING" ? "Pause" : "Play"));
+    assert(gate.downstream.volume == 30 && gate.downstream.mode == "SHUFFLE_REPEAT_ONE" && gate.downstream.count == 3); ++cases;
+    auto once = gate.downstream.writes.size();
+    assert(!app.submitToggle({b.id, {}, 18}).ok && gate.downstream.writes.size() == once); ++cases;
+  }
+  for (const auto* playback : {"TRANSITIONING", "NO_MEDIA_PRESENT", "UNKNOWN", ""}) {
+    GuardFixture gate; gate.readOnly = false; gate.targetAllowed = true;
+    gate.downstream.playback = playback;
+    DirectSonos sonos(gate, {a.id, "52231"}); Application app(sonos, {a.id, {}, 1});
+    assert(!app.submitToggle({a.id, {}, 1}).ok && gate.downstream.writes.empty()); ++cases;
+  }
+  for (bool readOnly : {true, false}) {
+    GuardFixture gate; gate.readOnly = readOnly; gate.targetAllowed = readOnly;
+    DirectSonos sonos(gate, {a.id, "52231"}); Application app(sonos, {a.id, {}, 1});
+    assert(!app.submitToggle({a.id, {}, 1}).ok && gate.downstream.writes.empty()); ++cases;
+  }
+  {
+    GuardFixture gate; gate.readOnly = false; gate.targetAllowed = true;
+    gate.downstream.failAction = "Play"; gate.downstream.uncertain = true;
+    DirectSonos sonos(gate, {a.id, "52231"}); Application app(sonos, {a.id, {}, 1});
+    assert(!app.submitToggle({a.id, {}, 1}).ok && app.state().recoveryRequired);
+    assert(!app.submitToggle({a.id, {}, 1}).ok && gate.downstream.writes.size() == 1); ++cases;
+  }
   return cases;
 }

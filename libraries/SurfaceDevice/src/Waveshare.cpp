@@ -6,9 +6,6 @@
 #include <Arduino_GFX_Library.h>
 #include <esp_heap_caps.h>
 #include <Preferences.h>
-#if SURFACE_TOUCH_DIAGNOSTIC && SURFACE_ALLOW_SONOS_MUTATIONS
-#error "Touch diagnostics must use read-only firmware"
-#endif
 
 namespace surface::device {
 namespace {
