@@ -1,0 +1,9 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    { "label": "surface: setup", "type": "process", "command": "python3", "args": ["scripts/setup.py"], "problemMatcher": [] },
+    { "label": "surface: test", "type": "process", "command": "python3", "args": ["scripts/test.py"], "group": "test", "problemMatcher": ["$gcc"] },
+    { "label": "surface: build stick", "type": "process", "command": "python3", "args": ["scripts/device.py", "build", "stick"], "group": "build", "problemMatcher": ["$gcc"] },
+    { "label": "surface: build waveshare", "type": "process", "command": "python3", "args": ["scripts/device.py", "build", "waveshare"], "group": "build", "problemMatcher": ["$gcc"] }
+  ]
+}

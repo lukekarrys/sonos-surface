@@ -8,6 +8,13 @@ optional behavior. Deliberate contracts below are distinct from reference
 observations and experimental assumptions. These documents specify the first
 safe vertical slice and its extension points, not a complete Sonos library.
 
+Implementation progress and measured evidence live in [hardware.md](hardware.md).
+The current slice uses polling rather than subscriptions and rejects unsupported
+v1 capabilities explicitly. Both device playback paths now have physical evidence:
+M5 NFC playback and calibrated Waveshare button control are owner-confirmed.
+Boot reliability and calibration portability remain limitations. See
+[README](../README.md) for reproducible commands.
+
 ## Available hardware and scope
 
 | Available target | Product capability | Later expansion |
@@ -112,10 +119,17 @@ explicit or policy-derived fields before any effect, never silently drop them.
 Product questions that remain for the family, without blocking that slice:
 
 - Which room gets playlist shuffle? Supply its stable target during setup.
-- What existing card payloads beyond bare URLs must keep working? Inspect real
-  cards before promising compatibility or migrating them.
 - What queue interactions and artist-name voice behavior are actually wanted?
   V1 defers queue mutations/selection and uses explicit aliases for voice.
+
+Existing cards are confirmed by the owner to contain only an Apple Music URL in
+an NDEF Text/URI record or a well-known record with an empty type and raw URL
+payload (confirmed in the owner's NFC Tools screenshots).
+Supporting these alongside new v1 cards is required for
+testing and initial use; rewriting the existing collection is not a prerequisite.
+Legacy compatibility also includes Apple Music station share URLs, including
+personal stations. These select a direct radio source through the same intent
+and application layers; they do not replace the stored queue.
 
 Agents should choose the build stack, drivers, bounded parser limits, pairing
 mechanism, polling/retry timings, and caches through small experiments rather

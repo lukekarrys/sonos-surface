@@ -2,30 +2,32 @@
 
 ## Project Structure & Module Organization
 
-`sonos-surface` is a personal, single-household ESP32-S3 Sonos project. This repository currently contains specifications, not firmware. Read [product scope](docs/product.md), [intents and NFC format](docs/intent.md), [policies](docs/policy.md), and [planning and execution](docs/planner-executor.md) before changing behavior.
+`sonos-surface` is a personal, single-household ESP32-S3 Sonos project. Read [product scope](docs/product.md), [intents](docs/intent.md), [policies](docs/policy.md), [execution](docs/planner-executor.md), and [hardware evidence](docs/hardware.md) before changing behavior. The first two-board slice is demonstrated: M5 NFC playback and calibrated Waveshare center-button Pause/Play are owner-confirmed, with independent state reads on both. The V2 fit is specific to this unit; diagnostics remain raw. Boot issues have workarounds, not a confirmed fix.
 
-Future code must separate the portable core from device inputs/UI and Sonos transport. Both hardware targets share intent, policy, planner, executor, and AppState contracts. Do not import hardware, display, or network SDKs into the pure intent/policy/planning layers. Directory names and implementation language remain undecided.
+`libraries/SurfaceCore/src/` owns portable intent, policy, planning, execution, and AppState. `SurfaceSonos/src/` owns SOAP/Apple metadata behind `LocalHttp`. `SurfaceDevice/src/` contains the ESP32 runtime and separate board adapters. `firmware/sonos_surface/` is the shared entry point; `tests/` and `scripts/` contain validation/tooling. Keep hardware/network SDKs out of portable layers.
 
 ## Build, Test, and Development Commands
 
-No build, test, or development commands are configured. Add small macOS tests for portable logic, then integrate both available boards early; do not require a complete simulator first. When introducing tooling, document exact setup and verification commands in `README.md`; commit manifests and lockfiles together. Do not claim unconfigured commands have passed.
+Run `python3 scripts/setup.py` for pinned Arduino-ESP32 dependencies, or add `--host-only` for portable tests. Run `python3 scripts/test.py`, then `python3 scripts/device.py build stick` or `build waveshare`. README documents exact flash/monitor commands. Keep generated `.deps/`, `.build/`, and private `.local/` files untracked. Update dependency pins and setup instructions together.
 
 ## Coding Style & Naming Conventions
 
-No formatter or linter is selected. Configure indentation and naming with the chosen stack. Use descriptive Markdown headings, relative links, and valid JSON examples. Keep wire-format names consistent with the specifications.
+C++17 uses two-space indentation, PascalCase types, and camelCase functions/fields. Python uses four spaces. No formatter is configured. Use descriptive Markdown headings, relative links, and valid JSON examples; keep wire names consistent with the specifications.
 
 Treat omitted intent fields as preservation, retain policy provenance, and express operation dependencies explicitly. Never encode Sonos ordering or sleeps in cards. Keep grouping, generic scripting, and unrelated Sonos management out of scope.
 
 ## Testing Guidelines
 
-No framework or coverage threshold exists. Use the acceptance cases in the specifications as behavioral fixtures, including omission, explicit `false`, policy precedence, partial failure, uncertain retries, and stale state. Separate deterministic Mac tests from real-speaker tests; report which ran.
+Portable assertion tests run with address/undefined behavior sanitizers; no coverage threshold is imposed. Test omission, explicit false, policies, ordering, and failures as functionality grows. Keep the Mac probe read-only. Record real board/Sonos observations in `docs/hardware.md`; distinguish measured behavior from assumptions.
 
 ## Commit & Pull Request Guidelines
 
-History currently contains only `init`; no established convention exists. Use focused commits with imperative subjects such as `Specify intent preservation semantics`.
+Use focused commits with imperative subjects. No broader commit convention has been established.
 
 PRs should explain behavior, validation, and unresolved risks; link issues when available and include screenshots for UI changes. Update affected specifications together. Keep household credentials and personal configuration out of commits.
 
 ## Agent Working Style
+
+The owner now authorizes real Sonos mutations ONLY for Office (verify its room name and stable UUID before use). All other speakers remain read-only. M5/Waveshare flashing and non-Sonos hardware testing are authorized. Firmware defaults to an HTTP-boundary mutation guard; keep that default and bind playback tests explicitly to Office.
 
 Resolve reversible engineering choices autonomously. Involve the human for meaningful hardware tests or choices that materially change user-visible semantics, persisted formats, or architecture. Label deliberate contracts, reference evidence, and experimental assumptions separately. Prefer small working slices on both boards; measure Sonos/NFC behavior before adding abstractions. Stay within the current task's authorized scope.

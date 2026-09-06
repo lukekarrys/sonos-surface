@@ -1,0 +1,231 @@
+#if defined(SURFACE_WAVESHARE)
+#include "SurfaceDevice.h"
+#include "TouchCoordinates.h"
+#include <Arduino.h>
+#include <Wire.h>
+#include <Arduino_GFX_Library.h>
+#include <esp_heap_caps.h>
+#if SURFACE_TOUCH_DIAGNOSTIC && SURFACE_ALLOW_SONOS_MUTATIONS
+#error "Touch diagnostics must use read-only firmware"
+#endif
+
+namespace surface::device {
+namespace {
+Arduino_ESP32QSPI bus(12, 11, 4, 5, 6, 7);
+Arduino_OLED* panel = nullptr;
+// CO5300 direct one-pixel windows can omit lines/circles. Compose all graphics
+// in PSRAM and transmit an aligned, full-screen image instead (GFX issue #780).
+class ScreenCanvas : public Arduino_Canvas {
+public:
+  explicit ScreenCanvas(Arduino_OLED* output) : Arduino_Canvas(368, 448, output) {}
+  bool begin(int32_t = GFX_NOT_DEFINED) override {
+    if (!_framebuffer)
+      _framebuffer = static_cast<uint16_t*>(heap_caps_aligned_alloc(
+          16, 368 * 448 * sizeof(uint16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    return _framebuffer != nullptr;
+  }
+};
+ScreenCanvas* gfx = nullptr;
+uint8_t touchAddress = 0;
+bool ready = false;
+bool held = false;
+uint32_t lastTouch = 0;
+std::string lastScreen;
+struct Button { int x, y; const char* title; Input input; };
+constexpr Button buttons[] = {
+  {12, 300, "Source", Input::Source}, {196, 300, "Refresh", Input::Refresh},
+  {12, 376, "Play", Input::Play}, {196, 376, "Pause", Input::Pause}
+};
+const Button* buttonAt(int x, int y) {
+  for (const auto& b : buttons)
+    if (x >= b.x && x < b.x + 160 && y >= b.y && y < b.y + 60) return &b;
+  return nullptr;
+}
+bool probe(uint8_t address) {
+  Wire.beginTransmission(address); return Wire.endTransmission() == 0;
+}
+bool writeRegister(uint8_t address, uint8_t reg, uint8_t value) {
+  Wire.beginTransmission(address); Wire.write(reg); Wire.write(value);
+  return Wire.endTransmission() == 0;
+}
+void button(int x, int y, const char* title) {
+  gfx->drawRoundRect(x, y, 160, 60, 8, RGB565_CYAN);
+  gfx->setCursor(x + 12, y + 20); gfx->print(title);
+}
+#if SURFACE_TOUCH_DIAGNOSTIC
+constexpr int calibrationTargets[][2] = {
+  {92, 140}, {276, 140}, {92, 270}, {276, 270}, {92, 406}, {276, 406}
+};
+unsigned calibrationTarget = 0;
+bool calibrationArmed = false, calibrationContact = false, calibrationMoved = false;
+int firstX = 0, firstY = 0, contactX = 0, contactY = 0;
+bool calibrationRetry = false;
+void collectCalibration(int x, int y, int fingers) {
+  if (calibrationTarget >= 6) return;
+  // Ignore a finger already held during boot; require a release before starting.
+  if (!calibrationArmed) { if (!fingers) calibrationArmed = true; return; }
+  if (fingers) {
+    if (!calibrationContact) {
+      calibrationContact = true; calibrationMoved = false;
+      firstX = x; firstY = y;
+    }
+    if (fingers != 1 || abs(x - firstX) > 16 || abs(y - firstY) > 16)
+      calibrationMoved = true;
+    contactX = x; contactY = y;
+  } else if (calibrationContact) {
+    calibrationContact = false;
+    calibrationRetry = calibrationMoved;
+    if (calibrationMoved) {
+      Serial.printf("[calibration] target=%u retry: tap without dragging\n", calibrationTarget + 1);
+      return;
+    }
+    const auto& t = calibrationTargets[calibrationTarget];
+    Serial.printf("[calibration] target=%u expected=%d,%d first=%d,%d last=%d,%d release=%d,%d\n",
+                  calibrationTarget + 1, t[0], t[1], firstX, firstY, contactX, contactY, x, y);
+    ++calibrationTarget;
+    if (calibrationTarget == 6)
+      Serial.println("[calibration] COMPLETE: six samples recorded; no correction applied");
+  }
+}
+void diagnosticScreen(int x, int y, int fingers, int event) {
+  gfx->fillScreen(RGB565_BLACK);
+  gfx->setTextColor(RGB565_WHITE);
+  gfx->setCursor(12, 10); gfx->println("Touch test / read-only");
+  gfx->setCursor(12, 36); gfx->printf("x=%d y=%d fingers=%d", x, y, fingers);
+  const auto* hit = buttonAt(x, y);
+  gfx->setCursor(12, 62); gfx->printf("hit=%s event=%d", hit ? hit->title : "none", event);
+  gfx->setCursor(12, 90);
+  if (calibrationTarget < 6) {
+    gfx->printf("%s %u/6", calibrationRetry ? "Retry target" : "Tap + center", calibrationTarget + 1);
+    const auto& t = calibrationTargets[calibrationTarget];
+    gfx->drawCircle(t[0], t[1], 16, RGB565_WHITE);
+    gfx->drawFastHLine(t[0] - 10, t[1], 21, RGB565_WHITE);
+    gfx->drawFastVLine(t[0], t[1] - 10, 21, RGB565_WHITE);
+  } else {
+    gfx->println("Done - samples recorded");
+  }
+  // Show the live marker while touching, but leave the next white target clear.
+  if ((fingers || calibrationTarget == 6) && x >= 0 && x < 368 && y >= 0 && y < 448) {
+    gfx->drawCircle(x, y, 7, RGB565_YELLOW);
+    gfx->drawFastHLine(x - 10, y, 21, RGB565_YELLOW);
+    gfx->drawFastVLine(x, y - 10, 21, RGB565_YELLOW);
+  }
+  auto started = millis();
+  gfx->flush();
+  Serial.printf("[display] diagnostic flush=%lu ms cursor=%s\n", millis() - started,
+                x >= 0 && x < 368 && y >= 0 && y < 448 &&
+                gfx->getFramebuffer()[y * 368 + x] == RGB565_YELLOW ? "yellow-in-buffer" : "none");
+}
+#endif
+} // namespace
+bool boardBegin(std::string& notice) {
+  Wire.begin(15, 14, 100000);
+  Wire.setTimeOut(50);
+  // Vendor reset sequence: XCA9554 outputs 0..2 drive peripheral resets.
+  // This 20ms electrical reset pulse is unrelated to Sonos synchronization.
+  if (!probe(0x20) || !writeRegister(0x20, 0x01, 0x00) || !writeRegister(0x20, 0x03, 0xF8)) {
+    notice = "Waveshare expander 0x20 missing"; Serial.println(notice.c_str()); return false;
+  }
+  delay(20);
+  if (!writeRegister(0x20, 0x01, 0x07)) {
+    notice = "Waveshare reset release failed"; Serial.println(notice.c_str()); return false;
+  }
+  // Revision choice is a board-only concern. V1 FT3168=0x38; V2 CST820=0x15.
+  auto deadline = millis() + 1000;
+  do {
+    if (probe(0x38)) touchAddress = 0x38;
+    else if (probe(0x15)) touchAddress = 0x15;
+    else delay(10); // Bounded peripheral-ready polling after reset.
+  } while (!touchAddress && millis() < deadline);
+  if (!touchAddress) { notice = "No FT3168/CST820 touch response"; Serial.println(notice.c_str()); return false; }
+  if (touchAddress == 0x38) {
+    panel = new Arduino_SH8601(&bus, GFX_NOT_DEFINED, 0, 368, 448);
+    writeRegister(touchAddress, 0xA5, 1); // Vendor monitor power mode.
+    notice = "Waveshare V1 SH8601/FT3168";
+  } else {
+    panel = new Arduino_CO5300(&bus, GFX_NOT_DEFINED, 0, 368, 448, 16, 0, 0, 0);
+    writeRegister(touchAddress, 0xFA, 0x40); // Vendor periodic touch interrupts.
+    notice = "Waveshare V2 CO5300/CST820";
+  }
+  if (!panel->begin()) { notice = "AMOLED begin failed"; Serial.println(notice.c_str()); return false; }
+  gfx = new ScreenCanvas(panel);
+  if (!gfx->begin()) { notice = "AMOLED PSRAM canvas failed"; Serial.println(notice.c_str()); return false; }
+  panel->setBrightness(140);
+  gfx->setTextSize(2);
+  Serial.println("[display] PSRAM canvas=329728 bytes; full-frame flush");
+  Serial.println(notice.c_str());
+  Serial.printf("[touch] coordinates=%s\n", touchAddress == 0x15 ?
+                "V2 measured six-point fit (diagnostics remain raw)" : "V1 raw");
+  Serial.printf("[board] display=%dx%d touch=0x%02x SDA=15 SCL=14\n", gfx->width(), gfx->height(), touchAddress);
+  ready = true;
+#if SURFACE_TOUCH_DIAGNOSTIC
+  diagnosticScreen(-1, -1, 0, 0);
+  Serial.println("[touch] DIAGNOSTIC: coordinates only; touch actions disabled");
+#endif
+  return true;
+}
+BoardEvent boardPoll() {
+  if (!ready || millis() - lastTouch < 30) return {};
+  lastTouch = millis();
+  // Both vendor drivers read finger count at 0x02 and XY at 0x03..0x06.
+  Wire.beginTransmission(touchAddress); Wire.write(0x02);
+  static uint32_t lastError = 0;
+  if (Wire.endTransmission(false) || Wire.requestFrom(touchAddress, uint8_t(5)) != 5) {
+    if (millis() - lastError >= 5000) { Serial.println("[touch] I2C read failed"); lastError = millis(); }
+    return {};
+  }
+  uint8_t fingers = Wire.read() & 0x0F;
+  uint8_t xh = Wire.read(), xl = Wire.read(), yh = Wire.read(), yl = Wire.read();
+  static bool loggedRead = false;
+  if (!loggedRead) {
+    Serial.printf("[touch] first register read OK fingers=%u xy-bytes=%02x %02x %02x %02x\n", fingers, xh, xl, yh, yl);
+    loggedRead = true;
+  }
+  int x = ((xh & 0x0F) << 8) | xl, y = ((yh & 0x0F) << 8) | yl;
+#if SURFACE_TOUCH_DIAGNOSTIC
+  collectCalibration(x, y, fingers);
+  static int previousX = -1, previousY = -1, previousFingers = -1;
+  if (fingers != previousFingers || (fingers && (x != previousX || y != previousY))) {
+    const auto* hit = buttonAt(x, y);
+    Serial.printf("[touch] raw=%02x %02x %02x %02x x=%d y=%d fingers=%d event=%d hit=%s\n",
+                  xh, xl, yh, yl, x, y, fingers, xh >> 6, hit ? hit->title : "none");
+    diagnosticScreen(x, y, fingers, xh >> 6);
+    previousX = x; previousY = y; previousFingers = fingers;
+  }
+  return {};
+#endif
+  if (!fingers) { held = false; return {}; }
+  const auto point = waveshareTouchPoint(x, y, touchAddress == 0x15);
+  if (fingers != 1 || point.x < 0 || point.y < 0) return {};
+  if (held) return {};
+  held = true;
+  const auto* hit = buttonAt(point.x, point.y);
+  Serial.printf("[touch] raw=%d,%d mapped=%d,%d fingers=%d hit=%s\n",
+                x, y, point.x, point.y, fingers, hit ? hit->title : "none");
+  if (hit) return {hit->input, ""};
+  return {};
+}
+void boardRender(const AppState& state, const std::string& notice) {
+#if SURFACE_TOUCH_DIAGNOSTIC
+  (void)state; (void)notice;
+  return;
+#endif
+  if (!ready) return;
+  const auto& observed = state.observed;
+  std::string screen = notice + observed.playback + observed.title + state.status + state.detail + std::to_string(observed.stale);
+  if (screen == lastScreen) return;
+  lastScreen = screen;
+  gfx->fillScreen(RGB565_BLACK);
+  gfx->setTextColor(RGB565_WHITE);
+  gfx->setCursor(12, 12); gfx->println("sonos-surface");
+  gfx->setCursor(12, 44); gfx->println(notice.substr(0, 56).c_str());
+  gfx->setCursor(12, 96); gfx->printf("%s%s", observed.known ? observed.playback.c_str() : "Playback unknown", observed.stale ? " *" : "");
+  gfx->setCursor(12, 126); gfx->println(observed.title.substr(0, 54).c_str());
+  gfx->setCursor(12, 182); gfx->println(state.status.c_str());
+  gfx->setCursor(12, 210); gfx->println(state.detail.substr(0, 100).c_str());
+  for (const auto& b : buttons) button(b.x, b.y, b.title);
+  gfx->flush();
+  Serial.printf("[display] rendered status=%s playback=%s stale=%d\n", state.status.c_str(), observed.playback.c_str(), observed.stale);
+}
+} // namespace surface::device
+#endif

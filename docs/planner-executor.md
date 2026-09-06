@@ -2,6 +2,12 @@
 
 ## Deliberate boundaries
 
+The current slice uses a serial typed operation list, one worker, bounded
+readiness polling, and no mutation retries. Subscriptions, deduplication,
+cancellation, and richer recovery are deferred. [Hardware notes](hardware.md)
+record exact limits and evidence; the reliability contract below describes the
+direction of implementation, not features already proven on the boards.
+
 The planner converts a validated, policy-resolved MusicIntent into a finite
 acyclic dependency graph. The executor schedules it and handles failures; the
 Sonos adapter implements protocol calls and supplies capability/readiness
@@ -34,7 +40,14 @@ validated that it makes the dependent action safe. Otherwise use an event or
 bounded read/poll. Backoff, deadlines, and subscription timers are legitimate;
 sleeps MUST NOT encode the semantics of a card or operation dependency.
 
-Illustrative source + play + volume plan:
+Station + play uses SelectStation (SetAVTransportURI with station metadata) →
+Play. It does not clear/add/select a queue or set shuffle/repeat. Verify the
+station URI and playing state, plus preserved mute; a generic PLAYING result on
+a different source is insufficient. Reject explicit unsupported mode fields
+before selection. The initial station path, like other sources in this slice,
+requires explicit play. The stored queue remains available for later queue use.
+
+Illustrative queue source + play + volume plan:
 
 ```text
 Preflight -> optional transport preparation -> ClearQueue -> AddSource

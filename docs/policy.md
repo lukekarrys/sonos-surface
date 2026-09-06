@@ -2,6 +2,11 @@
 
 ## Purpose and boundaries
 
+The first slice implements the two required rules below, with the playlist room
+configured over USB. A general configuration/rule editor is not implemented.
+Policy rule-set revision is currently fixed at 1; runtime configuration revision
+tracking remains a later extension alongside policy editing.
+
 Policies fill missing MusicIntent fields using trusted context. They MUST NOT
 overwrite explicit input, including `false`, zero, or an explicit value equal
 to current state. An unfilled field continues to mean preserve; the resolver
@@ -50,6 +55,8 @@ V1 configuration has this shape:
 also identify the controller/configuration, since revisions are not global.
 `roomId` is a stable target speaker ID, required for room scope and forbidden
 for household scope. `sourceKind` is exactly `album`, `playlist`, or `track`.
+Station intents receive no shuffle policy; station shuffle is unsupported, so
+`station` is not a valid selector in this shuffle-only configuration format.
 Rule IDs are unique nonempty strings, and defaults contain only boolean
 `shuffle`. Reject unknown keys, wrong versions/types, and duplicate keys rather
 than partially applying a malformed configuration.
