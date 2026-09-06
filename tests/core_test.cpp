@@ -63,6 +63,7 @@ struct StationHttp : LocalHttp {
     if (name == "GetMediaInfo") return reply("<r><CurrentURI>" + xmlEscape(uri) + "</CurrentURI></r>");
     if (name == "GetVolume") return reply("<CurrentVolume>20</CurrentVolume>");
     if (name == "GetMute") return reply("<r><CurrentMute>0</CurrentMute></r>");
+    if (name == "Browse") return reply("<TotalMatches>0</TotalMatches><NumberReturned>0</NumberReturned><UpdateID>0</UpdateID><Result>&lt;DIDL-Lite/&gt;</Result>");
     if (name == "GetZoneGroupState") return reply("<r><ZoneGroupState>" + xmlEscape(
       "<ZoneGroups><ZoneGroup Coordinator=\"RINCON_TEST\"><ZoneGroupMember UUID=\"RINCON_TEST\"/></ZoneGroup></ZoneGroups>") + "</ZoneGroupState></r>");
     if (name == "SetAVTransportURI") {
@@ -80,9 +81,11 @@ struct StationHttp : LocalHttp {
 };
 
 #include "milestone_tests.h"
+#include <cstdio>
+#include "capability_tests.h"
 
 int main() {
-  unsigned cases = milestoneTests();
+  unsigned cases = milestoneTests() + capabilityTests();
   auto stationIntent = parsed(station + "?ls=1");
   assert(station.size() == 92 && stationIntent.source->kind == SourceKind::Station &&
          stationIntent.source->url == station && stationIntent.transport == TransportCommand::Play); ++cases;

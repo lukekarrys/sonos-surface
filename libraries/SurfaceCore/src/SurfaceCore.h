@@ -29,6 +29,8 @@ struct MusicIntent {
   std::optional<bool> shuffle;
   std::optional<Repeat> repeat;
   std::optional<Volume> volume;
+  std::optional<int64_t> seekPositionMs;
+  std::optional<int64_t> queueIndex; // Zero-based, like queue page offsets.
 };
 using PlaylistShuffleRooms = std::map<std::string, bool>;
 struct PolicyContext {
@@ -73,10 +75,24 @@ Result decodeNdefUri(const uint8_t* data, size_t size, std::string& url);
 Result decodeNdefRecord(uint8_t tnf, const std::string& type, const uint8_t* data, size_t size, std::string& text);
 
 // Conservative serial schedule: each operation depends on completion of its predecessor.
-enum class Operation { Stop, ClearQueue, AddSource, SelectQueue, SelectStation, ApplyMode, SetVolume, RestoreTransport, Play, Pause, Next, Previous };
+enum class Operation { Stop, ClearQueue, AddSource, SelectQueue, SelectStation, ApplyMode, SetVolume, RestoreTransport, Play, Pause, Next, Previous, Seek, SelectQueueItem };
 const char* operationName(Operation operation);
 struct Plan { ResolvedIntent resolved; std::vector<Operation> operations; };
 Result makePlan(const ResolvedIntent& intent, Plan& plan);
+enum class PlaybackStatus { Unknown, Playing, Paused, Stopped, NoMedia, Transitioning };
+enum class PlaybackSource { Unknown, Queue, AppleMusicStation, Live, Other };
+constexpr uint32_t maxQueuePageSize = 20;
+struct QueueItem {
+  uint32_t index = 0; // Position within this queue revision, not a permanent ID.
+  std::string title, artist, album, artwork, uri, id;
+  std::optional<uint32_t> durationMs;
+};
+struct QueuePage {
+  std::string targetId;
+  uint32_t start = 0, total = 0, revision = 0;
+  uint64_t observedAtMs = 0;
+  std::vector<QueueItem> items;
+};
 struct PlaybackState {
   bool known = false;
   bool stale = true;
@@ -84,6 +100,13 @@ struct PlaybackState {
   uint64_t observedAtMs = 0;
   std::optional<int> volume;
   std::string track;
+  std::string roomDisplayId, album, artwork, trackUri;
+  PlaybackStatus transport = PlaybackStatus::Unknown;
+  PlaybackSource source = PlaybackSource::Unknown;
+  std::optional<uint32_t> positionMs, durationMs, queueIndex, queueTotal, queueRevision;
+  std::optional<bool> queueBacked, seekable, mute, shuffle;
+  std::optional<Repeat> repeat;
+  std::string queueError;
 };
 struct AppState {
   PlaybackState observed;
@@ -91,11 +114,18 @@ struct AppState {
   std::string refreshError; // Observation failures do not replace command outcomes.
   uint64_t requestId = 0;
   bool recoveryRequired = false;
+  std::optional<QueuePage> queue;
+  std::string queueError;
 };
+// Device projection: discard all observations immediately when selection changes;
+// outcomes from a different bound executor never replace the selected room.
+bool selectObservedRoom(AppState& state, const Room& room);
+bool publishSelectedState(AppState& state, const AppState& incoming, const std::string& selectedId);
 class SonosTransport {
 public:
   virtual ~SonosTransport() = default;
   virtual Result refresh(PlaybackState& state) = 0;
+  virtual Result queue(uint32_t, uint32_t, QueuePage&) { return Result::fail("Queue reading unsupported"); }
   virtual Result prepare(const ResolvedIntent& intent) = 0;
   virtual Result execute(Operation operation) = 0;
   virtual Result verify(const ResolvedIntent& intent, PlaybackState& state) = 0;
@@ -110,6 +140,9 @@ public:
   // explicit Play/Pause intent. Toggle is never part of the card wire format.
   Result submitToggle(const PolicyContext& bound);
   Result refresh();
+  Result queue(uint32_t start, uint32_t count);
+  // Drop observations on selection/reconnect, preserving command uncertainty.
+  void invalidateObservation();
   const AppState& state() const { return state_; }
 private:
   void publish();

@@ -153,7 +153,17 @@ Result normalizeAppleUrl(const std::string& input, Source& source) {
 }
 
 Result validateIntent(const MusicIntent& intent) {
-  if (!intent.source && !intent.transport && !intent.shuffle.has_value() && !intent.repeat && !intent.volume) return Result::fail("Empty intent");
+  if (!intent.source && !intent.transport && !intent.shuffle.has_value() && !intent.repeat && !intent.volume &&
+      !intent.seekPositionMs && !intent.queueIndex) return Result::fail("Empty intent");
+  if (intent.seekPositionMs && (*intent.seekPositionMs < 0 || *intent.seekPositionMs > UINT32_MAX))
+    return Result::fail("seek.positionMs must be an integer in 0..4294967295");
+  if (intent.queueIndex && (*intent.queueIndex < 0 || *intent.queueIndex >= UINT32_MAX))
+    return Result::fail("queueIndex must be an integer in 0..4294967294");
+  if ((intent.seekPositionMs || intent.queueIndex) &&
+      (intent.source || intent.transport == TransportCommand::Next || intent.transport == TransportCommand::Previous))
+    return Result::fail("Seek/queue selection cannot combine with source or next/previous");
+  if (intent.seekPositionMs && intent.queueIndex)
+    return Result::fail("Seek and queue selection require separate requests");
   if (intent.transport && *intent.transport != TransportCommand::Play && *intent.transport != TransportCommand::Pause &&
       *intent.transport != TransportCommand::Next && *intent.transport != TransportCommand::Previous)
     return Result::fail("Unsupported transport");
@@ -209,8 +219,20 @@ Result parseIntent(const std::string& payload, MusicIntent& output) {
     if (root.contains("requires") && (!root["requires"].is_array() || !root["requires"].empty()))
       return Result::fail("Required extensions are unsupported by this slice");
     const auto& fields = root["intent"];
-    if (!keys(fields, {"source", "transport", "shuffle", "repeat", "volume"}))
+    if (!keys(fields, {"source", "transport", "shuffle", "repeat", "volume", "seek", "queueIndex"}))
       return Result::fail("Unsupported intent field");
+    if (fields.contains("seek")) {
+      const auto& seek = fields["seek"];
+      if (!keys(seek, {"positionMs"}) || seek.size() != 1 || !seek.contains("positionMs") ||
+          !seek["positionMs"].is_number_integer() || seek["positionMs"] < 0 || seek["positionMs"] > UINT32_MAX)
+        return Result::fail("Invalid seek.positionMs");
+      intent.seekPositionMs = seek["positionMs"].get<int64_t>();
+    }
+    if (fields.contains("queueIndex")) {
+      const auto& index = fields["queueIndex"];
+      if (!index.is_number_integer() || index < 0 || index >= UINT32_MAX) return Result::fail("Invalid queueIndex");
+      intent.queueIndex = index.get<int64_t>();
+    }
     if (fields.contains("source")) {
       const auto& s = fields["source"];
       if (!keys(s, {"service", "url"}) || !s.contains("service") || s["service"] != "apple-music" ||
@@ -320,6 +342,8 @@ const char* operationName(Operation op) {
     case Operation::Pause: return "Pause";
     case Operation::Next: return "Next";
     case Operation::Previous: return "Previous";
+    case Operation::Seek: return "Seek";
+    case Operation::SelectQueueItem: return "SelectQueueItem";
     case Operation::SetVolume: return "SetVolume";
     case Operation::RestoreTransport: return "RestoreTransport";
   }
@@ -329,6 +353,8 @@ Result makePlan(const ResolvedIntent& resolved, Plan& plan) {
   auto valid = validateIntent(resolved.intent);
   if (!valid.ok) return valid;
   plan = {resolved, {}};
+  if (resolved.intent.seekPositionMs) plan.operations.push_back(Operation::Seek);
+  if (resolved.intent.queueIndex) plan.operations.push_back(Operation::SelectQueueItem);
   if (resolved.intent.source) {
     if (resolved.intent.source->kind == SourceKind::Station) {
       if (resolved.intent.transport != TransportCommand::Play) plan.operations.push_back(Operation::Stop);
@@ -350,12 +376,30 @@ Result makePlan(const ResolvedIntent& resolved, Plan& plan) {
 }
 
 Application::Application(SonosTransport& transport, PolicyContext context, Changed changed)
-    : transport_(transport), context_(std::move(context)), changed_(std::move(changed)) {}
+    : transport_(transport), context_(std::move(context)), changed_(std::move(changed)) {
+  state_.observed.targetId = context_.targetId;
+}
+bool selectObservedRoom(AppState& state, const Room& room) {
+  if (state.observed.targetId == room.id) return false;
+  state = {};
+  state.observed.targetId = room.id;
+  state.observed.room = room.name;
+  state.observed.roomDisplayId = room.displayId;
+  return true;
+}
+bool publishSelectedState(AppState& state, const AppState& incoming, const std::string& selectedId) {
+  if (incoming.observed.targetId != selectedId) return false;
+  state = incoming;
+  return true;
+}
 void Application::publish() { if (changed_) changed_(state_); }
 Result Application::refresh() {
   if (busy_) return Result::fail("Busy");
   auto next = state_.observed;
   auto result = transport_.refresh(next);
+  if (result.ok && next.targetId != context_.targetId) result = Result::fail("Observation target mismatch");
+  // Reconciliation invalidates pages even if the queue appears unchanged.
+  state_.queue.reset();
   if (result.ok) {
     state_.observed = std::move(next);
     state_.refreshError.clear();
@@ -363,6 +407,32 @@ Result Application::refresh() {
     state_.observed.stale = true;
     state_.refreshError = result.error;
   }
+  publish();
+  return result;
+}
+void Application::invalidateObservation() {
+  state_.observed = {};
+  state_.observed.targetId = context_.targetId;
+  state_.queue.reset(); state_.queueError.clear();
+  publish();
+}
+Result Application::queue(uint32_t start, uint32_t count) {
+  if (busy_) return Result::fail("Busy");
+  state_.queue.reset();
+  QueuePage page;
+  auto result = count == 0 || count > maxQueuePageSize ? Result::fail("Queue count must be 1..20") :
+      transport_.queue(start, count, page);
+  if (result.ok && page.targetId != context_.targetId) result = Result::fail("Queue target mismatch");
+  if (result.ok) {
+    if (state_.observed.queueRevision != page.revision) {
+      state_.observed.stale = true;
+      state_.observed.queueIndex.reset();
+    }
+    if (state_.observed.queueBacked == true) state_.observed.queueTotal = page.total;
+    state_.observed.queueRevision = page.revision;
+    state_.queue = std::move(page);
+  }
+  state_.queueError = result.ok ? "" : result.error;
   publish();
   return result;
 }
@@ -414,6 +484,7 @@ Result Application::submit(const ResolvedIntent& accepted) {
     return result;
   }
   busy_ = true;
+  state_.queue.reset();
   state_.status = "pending";
   state_.detail = "Preflight";
   state_.shuffleOrigin = plan.resolved.shuffleOrigin;

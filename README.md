@@ -7,7 +7,9 @@ and direct Sonos adapter. No Node server is required.
 **Current milestone:** M5StickS3 discovers independent Sonos rooms, selects a room
 with A double-click, and resolves the same NFC intent against that room's UUID.
 The shared core supports source selection, play/pause/next/previous, absolute and
-relative volume, shuffle, and repeat. Runtime `read_only` defaults true.
+relative volume, shuffle, repeat, absolute seek, normalized playback metadata,
+and bounded queue reading/selection. Runtime `read_only` defaults true.
+See the [shared capability contract](docs/sonos-capabilities.md).
 See the [Stick manual test](docs/stick-milestone-test.md) and latest
 [hardware evidence](docs/hardware.md) for measured versus pending behavior.
 
@@ -383,7 +385,8 @@ accuracy claim.
 Supported: Apple album/playlist/track/station URLs; legacy URL → source + play;
 v1 JSON source with explicit play/pause or omitted transport; standalone
 play/pause/next/previous; `volume: {"set": 25}` / `{"delta": -5}`;
-`shuffle: true/false`; `repeat: "off"/"all"/"one"`.
+`shuffle: true/false`; `repeat: "off"/"all"/"one"`;
+`seek: {"positionMs": 125000}`; `queueIndex: 2` (third active-queue item).
 
 Omission preserves source/queue, volume, repeat, shuffle (unless policy derives
 it), and playing versus non-playing transport during source replacement.
@@ -391,8 +394,15 @@ Relative volume reads a fresh baseline, clamps to 0–100, and freezes one absol
 target. Mode writes preserve the omitted shuffle/repeat component. Next/previous
 cannot combine with source or mode fields and are never automatically retried.
 Stations keep their existing direct-radio behavior; explicit station mode fields
-reject. Seeking, queue browsing, toggles, unknown fields, and required extensions
-reject before mutation.
+reject. Seek/queue selection preserve transport and cannot combine with source,
+next/previous, or each other. Queue selection requires active queue playback.
+Unknown fields and required extensions reject before mutation.
+
+USB `queue [start,count]` reads a selected-room queue page, count 1–20.
+For example, `queue [0,2]` reads the first two entries. The same read-only
+Mac probe accepts `--queue-start`, `--queue-count`, `--samples`, and `--interval-ms`.
+Metadata includes album, normalized artwork URL, millisecond position/duration,
+queue index/total, mute, and normalized modes/source. Artwork is never downloaded.
 
 USB commands (newline terminated): `rooms`, `room-next`, `status`, `source`,
 `play`, `pause`, `toggle`, `next`, `previous`, `reboot`, a bare Apple URL, or v1 intent JSON.
@@ -439,7 +449,7 @@ there is no editor to round-trip them yet.
 - `tests/`: portable behavioral tests and read-only real-Sonos diagnostic.
 - `scripts/`: pinned setup, tests, build/flash/monitor, discovery/configuration.
 
-No generic workflow engine, queue editor, artwork, voice, or
+No generic workflow engine, queue editor, artwork rendering/downloading, voice, or
 full retry/reconciliation framework is included in this slice.
 
 Diagnostics stream over USB serial; the device has no stored log history to

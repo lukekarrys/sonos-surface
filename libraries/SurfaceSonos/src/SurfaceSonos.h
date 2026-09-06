@@ -14,6 +14,7 @@ public:
                                const std::string& body) = 0;
   virtual uint64_t nowMs() = 0;
   virtual void pollWait(uint32_t ms) = 0;
+  virtual std::string baseUrl() const { return ""; }
 };
 // Hard dispatch boundary shared by the device and protocol tests. Unknown SOAP
 // actions fail closed in read-only mode. Target permission comes from resolution.
@@ -35,6 +36,10 @@ Result appleSourceItem(const Source& source, const std::string& region, AppleSou
 Result parseTopology(const std::string& xml, std::vector<Room>& rooms);
 Result combineMode(const std::string& current, std::optional<bool> shuffle, std::optional<Repeat> repeat, std::string& mode);
 Result modeWithShuffle(const std::string& current, std::optional<bool> shuffle, std::string& mode);
+std::optional<uint32_t> parseSonosTime(const std::string& text);
+std::string normalizeArtwork(const std::string& reference, const std::string& baseUrl);
+Result parseQueuePage(const std::string& xml, uint32_t start, uint32_t count,
+                      const std::string& baseUrl, QueuePage& page);
 
 class DirectSonos : public SonosTransport {
 public:
@@ -42,6 +47,7 @@ public:
   DirectSonos(LocalHttp& http, SonosConfig config, Log log = {});
   Result discover(std::vector<Room>& rooms);
   Result refresh(PlaybackState& state) override;
+  Result queue(uint32_t start, uint32_t count, QueuePage& page) override;
   Result prepare(const ResolvedIntent& intent) override;
   Result execute(Operation operation) override;
   Result verify(const ResolvedIntent& intent, PlaybackState& state) override;
@@ -51,6 +57,8 @@ private:
   Result identity();
   Result ungrouped();
   Result queueCount(unsigned& count);
+  Result browse(uint32_t start, uint32_t count, QueuePage& page);
+  Result validatePositionRequest(const PlaybackState& state);
   Result waitQueue(bool empty);
   Result readMute(std::string& mute);
   LocalHttp& http_;
@@ -63,5 +71,9 @@ private:
   int desiredVolume_ = -1, baselineVolume_ = -1;
   bool desiredPlaying_ = false;
   bool prepared_ = false, advanceDispatched_ = false;
+  bool positionDispatched_ = false;
+  PlaybackState positionBaseline_;
+  QueuePage selectionBaseline_;
+  uint64_t positionDispatchMs_ = 0;
 };
 } // namespace surface

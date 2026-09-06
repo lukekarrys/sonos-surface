@@ -1431,3 +1431,128 @@ measured on the household. No next feature milestone has started.
   `.local/stick-toggle-flash.log`. A bounded 30-minute USB capture was started at
   `.local/stick-toggle-physical.log` for an owner B pause/resume retest. The host
   sent only a configuration query, with no toggle or other playback test command.
+
+## Shared Sonos capability read-only checkpoint: 2026-09-06
+
+### Implemented contracts and software evidence
+
+- Added optional millisecond timing, normalized transport/source/audio/mode fields,
+  album/artwork references, and current queue index/total/revision. Queue pages are
+  zero-based, capped at 20 items and 64 KiB responses, and belong to a bound UUID.
+  Relative artwork resolves to that speaker's HTTP origin; no image is fetched.
+- Added declarative `seek: {"positionMs": N}` and `queueIndex: N` intents. Queue
+  selection currently requires active queue playback. Native REL_TIME/TRACK_NR
+  seeks validate fresh content/bounds/revision before dispatch and verify observed
+  timing with tolerance or selected index/item. Neither implies transport or source
+  replacement. There are no automatic retries after uncertain position dispatch.
+- Selected-room projection clears all observed metadata/timing/pages immediately
+  on switching and rejects old-room publication. Per-room uncertainty survives.
+  Every reconciliation invalidates its one cached queue page. Existing topology
+  subscriptions and nominal 10-second playback polling remain; full playback/
+  rendering/queue event subscriptions are deferred. Final media/position reads
+  reject mixed-content snapshots. See [the complete contract](sonos-capabilities.md).
+- **452 portable behavioral checks** pass with address/undefined sanitizers,
+  plus touch/calibration and the pinned M5 button suite. Coverage includes parsing,
+  omission, explicit zero/false, unknown/live timing, artwork, pagination/malformed
+  queue responses, external observation replacement, actual selected-state
+  projection helpers, frozen seek/selection UUIDs, fresh bounds/revision rejection,
+  tolerance, read-only guard, and uncertain one-attempt behavior. Existing NFC,
+  multi-room, source, and policy fixtures continue to pass. Evidence:
+  `.local/capability-tests.log`.
+- Final normal board builds passed: Stick **1,583,147 bytes**, Waveshare
+  **1,369,363 bytes**. No Waveshare UI, flash, calibration, or physical gesture was
+  changed. Evidence: `.local/capability-{stick,waveshare}-build.log`.
+
+### Measured read-only Sonos and Stick evidence
+
+- Read-only LAN discovery reached the household. The shared C++ Mac adapter read
+  the three configured rooms, with no Sonos write path available. Office reported
+  `Mud`, artist Waxahatchee, album `Mud - Single`, **24,000 / 127,000 ms**, index
+  **1 of total 27** (human track 2), queue revision 47, and an absolute artwork
+  URL normalized from `/getaa?...`. Bedroom independently reported `Right Back to
+  It (feat. MJ Lenderman)`, `Tigers Blood`, **57,000 / 273,000 ms**, index **0 of
+  27**, revision 8, and its own speaker's artwork origin. Initial Living Room had
+  no selected source, STOPPED, volume 12, and an empty stored queue. Evidence:
+  `.local/capability-{office,bedroom,living}-read.log` and
+  `.local/capability-raw/` (private SOAP captures).
+- Twelve bounded Office observations read start=20,count=20 and consistently
+  returned seven remaining items, total 27, revision 47. Office stayed paused;
+  identical snapshots establish successful polling and pagination, not an external
+  transition. Evidence: `.local/capability-office-observation.log`.
+- The Stick was still CONTROL from the prior owner-enabled milestone. Closed the
+  identified old read-only serial monitor, sent only `read-only true`, and verified
+  the saved mode plus unchanged three display IDs and Living Room policy after
+  reboot. Updated private `.local/config.json` to true as well. It has not been
+  turned false during this work. Evidence: `.local/capability-usb-prepare.log`.
+- Flashed the new Stick image with hash verification and application readiness.
+  USB cycled **Office → Bedroom → Living Room → Office** and read independent
+  metadata/pages in each. Queue totals were 27, 27, 0, 27 with matching UUIDs and
+  revisions. The actual shared projection used by the device clears state on
+  selection; its no-leak/error/late-result cases are also portable-test covered.
+  The matrix capture contains **175 read SOAP calls and no mutating dispatch**.
+  Measured SOAP reads in that capture were **22–69 ms, median 36 ms**. These are
+  sample timings, not network-failure or maximum-refresh guarantees. Evidence:
+  `.local/capability-stick-flash.log`, `.local/capability-usb-matrix.log`.
+- Stick USB pagination returned **20 items at offset 0**, **7 at offset 20**, and
+  **0 at offset 27**, always total 27/revision 47. All 27 normalized item lines
+  were captured. Idle heartbeat heap during that bounded test ranged from
+  191,348 to 197,076 bytes; this is not a peak-allocation measurement or a stress
+  guarantee for unusually large service metadata. Evidence:
+  `.local/capability-usb-pages.log`.
+- A real change made elsewhere occurred during these reads: Living Room changed
+  from **STOPPED / volume 12 / no selected source** to **PLAYING / volume 18 /
+  TV-SPDIF live source**. The Stick's selected-room snapshots and an independent
+  final shared C++ probe agreed; direct media reads identified `x-sonos-htastream`
+  and NOT_IMPLEMENTED timing. The normalized result had no queue index/total or
+  duration, while its separate stored queue remained empty. No agent Sonos mutation
+  produced this change. The external action's exact time and actor are unknown,
+  so these observations prove convergence, not an event-to-display latency bound.
+  Evidence: initial `.local/capability-living-read.log`,
+  `.local/capability-usb-matrix.log`, `.local/capability-living-external-read.log`,
+  and `.local/capability-living-external-raw.log`. External track, shuffle/repeat,
+  and queue-edit/selection transitions are fixture-tested, not newly induced on
+  real speakers during this autonomous checkpoint.
+- With read-only asserted, submitted one seek and one queue-selection intent over
+  USB. Both logged frozen Office UUID/policy revision and the respective typed
+  plan, performed preflight reads, and reached `READ_ONLY_BLOCKED` at Seek.
+  No mutating SOAP action was dispatched. Six further USB album/playlist inputs
+  across the three rooms retained album `albums-in-order`, Living Room playlist
+  `playlist-room-shuffle`, and other-room playlist `preserve`, all blocked before
+  Stop. These are new USB regression observations; earlier owner-confirmed NFC
+  physical behavior remains historical, and no fresh physical card tap is claimed.
+  Evidence: `.local/capability-usb-{guard,regression}.log`.
+
+- The final reviewed Stick image was flashed again with hash verification and
+  application readiness after metadata parsing review. A post-flash USB smoke test
+  reverified read-only config, restored Office, normalized track/timing/artwork,
+  the seven-item page at offset 20, and both new intents blocked at Seek. Terminal
+  failures reconciled the unchanged Office state, and the last config query still
+  reported true. The final-image capture contains only read SOAP dispatches;
+  no serial monitor is left holding either board port. Evidence:
+  `.local/capability-stick-final-flash.log`, `.local/capability-usb-final.log`.
+
+### Remaining intentional mutation checkpoint
+
+The read-only capability evidence supports handing off the
+[small seek and queue-selection procedure](capability-milestone-test.md).
+No real REL_TIME or TRACK_NR mutation has been sent autonomously. Native paused/
+stopped/playing seek/selection behavior and actual speaker seek tolerance still
+need owner confirmation. Runtime read-only remains true; do not automatically
+resume control mode or proceed to a Waveshare UI milestone.
+
+### Owner-confirmed paused seek and queue selection: 2026-09-06
+
+- The owner enabled `read-only false` through the Stick USB monitor and reported
+  that it worked. The following tests were deliberately performed by the owner;
+  no agent-issued Sonos mutation was involved.
+- With Office paused on its active queue, the owner submitted
+  `seek: {"positionMs": 10000}` and confirmed the requested result: position near
+  10 seconds, the same track, and transport remaining paused.
+- The owner then submitted `queueIndex: 2` and confirmed selection of the third
+  existing track, continued paused transport, and unchanged queue contents.
+- These are owner-reported functional observations. No new serial capture was
+  supplied for these two requests, so exact timing, terminal verification logs,
+  and unchanged volume/mute/modes are not independently established here.
+  This completes the smallest paused-state mutation checkpoint. Playing/stopped
+  behavior remains a separate follow-up; returning to read-only mode has not yet
+  been confirmed. No Waveshare UI or further capability milestone was started.

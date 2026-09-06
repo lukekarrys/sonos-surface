@@ -39,12 +39,16 @@ struct Job {
   bool cycle = false;
   ResolvedIntent accepted;
   std::optional<PolicyContext> toggleContext = std::nullopt;
+  std::optional<std::pair<uint32_t, uint32_t>> queuePage = std::nullopt;
   const std::string& targetId() const { return toggleContext ? toggleContext->targetId : accepted.targetId; }
 };
 void log(const std::string& message) { Serial.printf("[%lu] %s\n", millis(), message.c_str()); }
 void publish(const AppState& state) {
   xSemaphoreTake(stateMutex, portMAX_DELAY);
-  sharedState = state;
+  // An accepted request may finish after topology switches the selection.
+  // Keep its outcome in its Session; never publish it as the new room's state.
+  const auto* room = selection.selected();
+  publishSelectedState(sharedState, state, room ? room->id : "");
   if (!selection.warning.empty()) sharedState.refreshError = selection.warning;
   xSemaphoreGive(stateMutex);
   log("request=" + std::to_string(state.requestId) + " status=" + state.status + " " + state.detail +
@@ -86,6 +90,7 @@ class EspHttp final : public GuardedHttp {
 public:
   std::string host;
   EspHttp() { readOnly = config.readOnly; }
+  std::string baseUrl() const override { return "http://" + host + ":1400"; }
 protected:
   HttpResponse blocked(const std::string& reason, const std::string& action) override {
     log(reason + " " + action);
@@ -272,7 +277,7 @@ void worker(void*) {
     const auto selectableRooms = selection.rooms;
     const auto problems = selection.problems;
     const auto resolvedRules = selection.resolvedPlaylistRules;
-    const bool changedTarget = sharedState.observed.targetId != selectedRoom.id;
+    const bool changedTarget = selectObservedRoom(sharedState, selectedRoom);
     Room target = selectedRoom;
     if (!job->refresh) {
       target = {};
@@ -299,10 +304,24 @@ void worker(void*) {
       session->http.targetAllowed = target.eligible;
       if (job->refresh) {
         if (changedTarget || job->cycle) {
+          session->app.invalidateObservation();
           AppState loading; loading.observed.room = target.name; loading.observed.targetId = target.id;
           loading.detail = job->cycle ? "Room switched; reading state" : warning; publish(loading);
         }
         session->app.refresh();
+        if (job->queuePage) {
+          const auto result = session->app.queue(job->queuePage->first, job->queuePage->second);
+          if (!result.ok) log("queue-error=" + result.error);
+          else {
+            const auto& page = *session->app.state().queue;
+            log("queue-page " + Json{{"target", page.targetId}, {"start", page.start},
+                {"total", page.total}, {"revision", page.revision}, {"count", page.items.size()}}.dump());
+            for (const auto& item : page.items)
+              log("queue-item " + Json{{"index", item.index}, {"title", item.title}, {"artist", item.artist},
+                  {"album", item.album}, {"artwork", item.artwork}, {"uri", item.uri},
+                  {"durationMs", item.durationMs ? Json(*item.durationMs) : Json(nullptr)}}.dump());
+          }
+        }
       } else {
         auto result = job->toggleContext ? session->app.submitToggle(*job->toggleContext) : session->app.submit(job->accepted);
         if (!result.ok) log("command rejected/result: " + result.error);
@@ -312,7 +331,8 @@ void worker(void*) {
     busy.store(false);
   }
 }
-void submit(const std::string& payload, bool refresh = false, bool cycle = false, bool announce = true) {
+void submit(const std::string& payload, bool refresh = false, bool cycle = false, bool announce = true,
+            std::optional<std::pair<uint32_t, uint32_t>> queuePage = std::nullopt) {
   const std::string input = cycle ? "room-next" : refresh ? "refresh" : "intent";
   if (busy.exchange(true)) {
     if (announce) {
@@ -324,6 +344,7 @@ void submit(const std::string& payload, bool refresh = false, bool cycle = false
   if (announce) log("input=" + input + " accepted");
   if (announce) transientNotice = false;
   auto job = new Job{refresh, cycle, {}};
+  job->queuePage = queuePage;
   if (!refresh) {
     MusicIntent intent;
     auto result = parseIntent(payload, intent);
@@ -399,6 +420,14 @@ void handle(const std::string& line) {
     log("device-config " + Json{{"read_only", config.readOnly}, {"rooms", config.rooms},
         {"playlist_shuffle_rooms", config.playlistRooms}}.dump());
   } else if (line == "rooms" || line == "room-next") submit("", true, line == "room-next");
+  else if (line.rfind("queue ", 0) == 0) {
+    // JSON array avoids permissive integer parsing and unbounded "count=0".
+    const auto page = Json::parse(line.substr(6), nullptr, false);
+    if (!page.is_array() || page.size() != 2 || !page[0].is_number_integer() || !page[1].is_number_integer() ||
+        page[0] < 0 || page[0] > UINT32_MAX || page[1] < 1 || page[1] > maxQueuePageSize)
+      log("QUEUE_INVALID: use queue [start,count], count 1..20");
+    else submit("", true, false, true, std::make_pair(page[0].get<uint32_t>(), page[1].get<uint32_t>()));
+  }
   else if (line == "status") submit("", true);
   else if (line == "play") submit(command("play"));
   else if (line == "pause") submit(command("pause"));
@@ -408,7 +437,7 @@ void handle(const std::string& line) {
     if (config.source.empty()) notice = "Configure source_url first";
     else submit(config.source);
   } else if (!line.empty() && (line[0] == '{' || line.compare(0, 8, "https://") == 0)) submit(line);
-  else log("Commands: rooms | room-next | status | play | pause | toggle | next | previous | source | config-status | read-only true/false | config {JSON} | intent JSON");
+  else log("Commands: rooms | room-next | status | queue [start,count] | play | pause | toggle | next | previous | source | config-status | read-only true/false | config {JSON} | intent JSON");
 }
 } // namespace
 

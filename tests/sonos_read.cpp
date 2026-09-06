@@ -5,6 +5,7 @@
 #include <chrono>
 #include <iostream>
 #include <thread>
+#include <surface_json.hpp>
 
 class CurlReadOnly : public surface::LocalHttp {
 public:
@@ -41,6 +42,7 @@ public:
     curl_slist_free_all(headers); curl_easy_cleanup(curl);
     return response;
   }
+  std::string baseUrl() const override { return "http://" + host_ + ":1400"; }
   uint64_t nowMs() override {
     return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
   }
@@ -56,15 +58,39 @@ int main(int argc, char** argv) {
   CurlReadOnly http(argv[1]);
   surface::DirectSonos sonos(http, {argc > 2 ? argv[2] : "", "52231"},
                              [](const std::string& line) { std::cout << line << '\n'; });
-  surface::PlaybackState state;
-  auto result = sonos.refresh(state);
-  if (!result.ok) { std::cerr << result.error << '\n'; return 1; }
-  if (argc > 2) {
-    // Preflight only: checks grouping and identity, dispatches no mutation.
-    surface::MusicIntent intent;
-    intent.transport = surface::TransportCommand::Play;
-    result = sonos.prepare({intent, "preserve", 1});
-    if (!result.ok) { std::cerr << "Preflight: " << result.error << '\n'; return 1; }
+  using Json = nlohmann::json;
+  auto integer = [&](int arg, uint32_t fallback, uint32_t max) {
+    if (argc <= arg) return fallback;
+    std::string text = argv[arg];
+    if (text.empty() || text.size() > 10 || text.find_first_not_of("0123456789") != std::string::npos ||
+        std::stoull(text) > max) { std::cerr << "Invalid numeric argument\n"; std::exit(2); }
+    return static_cast<uint32_t>(std::stoull(text));
+  };
+  const auto start = integer(3, 0, UINT32_MAX), count = integer(4, 2, surface::maxQueuePageSize);
+  const auto samples = integer(5, 1, 360), interval = integer(6, 10000, 60000);
+  if (!count || !samples) return 2;
+  auto optional = [](auto n) { return n ? Json(*n) : Json(nullptr); };
+  for (uint32_t sample = 0; sample < samples; ++sample) {
+    if (sample) http.pollWait(interval);
+    surface::PlaybackState state;
+    auto result = sonos.refresh(state);
+    if (!result.ok) { std::cerr << result.error << '\n'; return 1; }
+    std::cout << "OBSERVATION " << Json{{"target", state.targetId}, {"roomDisplayId", state.roomDisplayId},
+        {"atMs", state.observedAtMs}, {"playback", state.playback}, {"source", static_cast<int>(state.source)},
+        {"title", state.title}, {"artist", state.artist}, {"album", state.album}, {"artwork", state.artwork},
+        {"positionMs", optional(state.positionMs)}, {"durationMs", optional(state.durationMs)},
+        {"queueBacked", optional(state.queueBacked)}, {"queueIndex", optional(state.queueIndex)},
+        {"queueTotal", optional(state.queueTotal)}, {"queueRevision", optional(state.queueRevision)},
+        {"volume", optional(state.volume)}, {"mute", optional(state.mute)}, {"shuffle", optional(state.shuffle)},
+        {"repeat", state.repeat ? Json(static_cast<int>(*state.repeat)) : Json(nullptr)}, {"queueError", state.queueError}}.dump() << '\n';
+    surface::QueuePage page;
+    result = sonos.queue(start, count, page);
+    if (!result.ok) { std::cerr << result.error << '\n'; return 1; }
+    std::cout << "QUEUE " << Json{{"target", page.targetId}, {"start", page.start}, {"total", page.total},
+        {"revision", page.revision}, {"count", page.items.size()}}.dump() << '\n';
+    for (const auto& item : page.items)
+      std::cout << "ITEM " << Json{{"index", item.index}, {"title", item.title}, {"artist", item.artist},
+          {"album", item.album}, {"artwork", item.artwork}, {"uri", item.uri}, {"durationMs", optional(item.durationMs)}}.dump() << '\n';
+    std::cout << "READ_ONLY_OK " << state.targetId << '\n' << std::flush;
   }
-  std::cout << "READ_ONLY_OK " << state.targetId << " " << state.playback << " " << state.title << '\n';
 }

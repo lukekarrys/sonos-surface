@@ -5,6 +5,8 @@ struct ControlHttp : LocalHttp {
   std::string id = "RINCON_A", room = "Office", playback = "PAUSED_PLAYBACK", mode = "SHUFFLE_REPEAT_ONE";
   std::string uri = "x-rincon-queue:RINCON_A#0", mute = "0", failAction;
   int volume = 30, track = 1, count = 3;
+  uint32_t revision = 7;
+  std::string position = "0:00:24", duration = "0:03:00";
   bool grouped = false, uncertain = false, malformedTopology = false;
   uint64_t clock = 0;
   std::vector<std::pair<std::string, std::string>> writes;
@@ -24,7 +26,7 @@ struct ControlHttp : LocalHttp {
           HttpResponse{500, "<errorCode>701</errorCode>", ""};
     }
     if (name == "GetTransportInfo") return reply("<CurrentTransportState>" + playback + "</CurrentTransportState>");
-    if (name == "GetPositionInfo") return reply("<Track>" + std::to_string(track) + "</Track><TrackMetaData></TrackMetaData>");
+    if (name == "GetPositionInfo") return reply("<Track>" + std::to_string(track) + "</Track><TrackURI>track:" + std::to_string(track) + "</TrackURI><RelTime>" + position + "</RelTime><TrackDuration>" + duration + "</TrackDuration><TrackMetaData></TrackMetaData>");
     if (name == "GetTransportSettings") return reply("<PlayMode>" + mode + "</PlayMode>");
     if (name == "GetMediaInfo") return reply("<CurrentURI>" + xmlEscape(uri) + "</CurrentURI>");
     if (name == "GetVolume") return reply("<CurrentVolume>" + std::to_string(volume) + "</CurrentVolume>");
@@ -33,7 +35,19 @@ struct ControlHttp : LocalHttp {
         "<ZoneGroups><ZoneGroup Coordinator=\"" + id + "\"><ZoneGroupMember UUID=\"" + id +
         "\" ZoneName=\"" + room + "\" Location=\"http://192.168.1.2:1400/xml/device_description.xml\"/>" +
         (grouped ? "<ZoneGroupMember UUID=\"RINCON_B\"/>" : "") + "</ZoneGroup></ZoneGroups>") + "</ZoneGroupState>");
-    if (name == "Browse") return reply("<TotalMatches>" + std::to_string(count) + "</TotalMatches>");
+    if (name == "Browse") {
+      const auto start = std::stoul(field("StartingIndex"));
+      const auto requested = std::stoul(field("RequestedCount"));
+      const auto returned = std::min(requested, start < unsigned(count) ? count - start : 0);
+      std::string didl = "<DIDL-Lite>";
+      for (unsigned n = 0; n < returned; ++n) {
+        const auto index = std::to_string(start + n + 1);
+        didl += "<item id=\"Q:0/" + index + "\"><title>Track " + index + "</title><res duration=\"0:03:00\">track:" + index + "</res></item>";
+      }
+      didl += "</DIDL-Lite>";
+      return reply("<TotalMatches>" + std::to_string(count) + "</TotalMatches><NumberReturned>" +
+          std::to_string(returned) + "</NumberReturned><UpdateID>" + std::to_string(revision) + "</UpdateID><Result>" + xmlEscape(didl) + "</Result>");
+    }
     if (name == "SetVolume") volume = std::stoi(field("DesiredVolume"));
     else if (name == "SetPlayMode") mode = field("NewPlayMode");
     else if (name == "SetMute") mute = field("DesiredMute");
@@ -42,6 +56,10 @@ struct ControlHttp : LocalHttp {
     else if (name == "Pause") playback = "PAUSED_PLAYBACK";
     else if (name == "Next") ++track;
     else if (name == "Previous") --track;
+    else if (name == "Seek") {
+      if (field("Unit") == "TRACK_NR") track = std::stoi(field("Target"));
+      else position = field("Target");
+    }
     else if (name == "RemoveAllTracksFromQueue") count = 0;
     else if (name == "AddURIToQueue") { count = 5; return reply("<NumTracksAdded>5</NumTracksAdded>"); }
     else if (name == "SetAVTransportURI") uri = field("CurrentURI");

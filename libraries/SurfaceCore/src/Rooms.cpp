@@ -96,6 +96,9 @@ std::string describeIntent(const MusicIntent& input, const ResolvedIntent& resol
   if (input.transport) fields["transport"] = commands[static_cast<int>(*input.transport)]; else preserved.push_back("transport");
   if (input.volume) fields["volume"] = {{input.volume->relative ? "delta" : "set", input.volume->value}};
   else preserved.push_back("volume");
+  if (input.seekPositionMs) fields["seek"] = {{"positionMs", *input.seekPositionMs}};
+  else if (!input.source && !input.queueIndex) preserved.push_back("position");
+  if (input.queueIndex) fields["queueIndex"] = *input.queueIndex;
   if (input.repeat) fields["repeat"] = *input.repeat == Repeat::Off ? "off" : *input.repeat == Repeat::All ? "all" : "one";
   else preserved.push_back("repeat");
   if (input.shuffle.has_value()) fields["shuffle"] = *input.shuffle;

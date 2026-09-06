@@ -3,9 +3,11 @@
 ## Contract
 
 Current milestone implements source, play/pause/next/previous, absolute/relative
-volume, shuffle, and repeat through shared planning and Sonos boundaries.
+volume, shuffle, repeat, absolute seek, and existing active-queue item selection
+through shared planning and Sonos boundaries.
 Source-only and source + pause capture and preserve playing/non-playing state.
-Seeking, writer mode, and required extensions remain unsupported. See
+Writer mode and required extensions remain unsupported. The
+[capability contract](sonos-capabilities.md) defines timing and queue observations. See
 [hardware evidence](hardware.md) for physical validation and limitations.
 
 A MusicIntent declares requested state and, optionally, one transport command.
@@ -45,6 +47,8 @@ validation. Parsing and policy resolution MUST have no Sonos side effects.
 | `transport` | `"play"`, `"pause"`, `"next"`, or `"previous"` | Start/resume, become non-playing, or advance/rewind once |
 | `volume` | Exactly one of `{ "set": N }` or `{ "delta": N }` | Absolute level or relative adjustment |
 | `shuffle` | Boolean | Requested shuffle state, independent of repeat |
+| `seek` | Exactly `{ "positionMs": N }` | Absolute position in the current track; integer milliseconds, 0–4294967295 |
+| `queueIndex` | Integer, 0–4294967294 | Select an existing item in the active queue; zero-based |
 | `repeat` | `"off"`, `"all"`, or `"one"` | Requested repeat state, independent of shuffle |
 
 Absent fields MUST remain absent until a matching policy fills them. Anything
@@ -89,10 +93,15 @@ Do not promise queue shuffle/repeat behavior for a radio source or report a
 station as a selected queue. A standalone mode change while a station is selected
 is also unsupported in this slice. Mute/volume preservation still applies.
 
-All other table-field combinations are valid, including source + pause,
+Seek and queueIndex cannot combine with each other, source, or next/previous.
+Both preserve transport unless explicit play/pause is supplied, and may combine
+with volume or mode. Seek beyond known duration and selection outside fresh queue
+bounds reject before dispatch; see [details](sonos-capabilities.md#seek-and-queue-selection).
+
+Other table-field combinations are valid, including source + pause,
 source + shuffle + play + volume, and volume alone. Validation rejects the
 entire intent before mutation if a known field/combination is invalid or
-unsupported. V1 has no toggle, queue append, seek, delay, or sequence fields.
+unsupported. V1 has no toggle, queue append, delay, or sequence fields.
 UI toggles MUST resolve from fresh state to explicit values before submission;
 unknown state requires refresh rather than guessing.
 

@@ -9,6 +9,9 @@ observations and experimental assumptions. These documents specify the first
 safe vertical slice and its extension points, not a complete Sonos library.
 
 Implementation progress and measured evidence live in [hardware.md](hardware.md).
+The current [shared capability milestone](sonos-capabilities.md) adds timing,
+metadata/artwork references, bounded queue reads, seek, and active-queue selection
+without new physical UI work.
 Playback state uses polling; topology notifications invalidate the selectable-room list.
 Unsupported explicit v1 capabilities reject before mutation. Both device playback paths now have physical evidence:
 M5 NFC playback and calibrated Waveshare button control are owner-confirmed.
@@ -120,7 +123,8 @@ Product questions that remain for the family, without blocking that slice:
 
 - Which rooms get playlist shuffle? Supply their display IDs during setup.
 - What queue interactions and artist-name voice behavior are actually wanted?
-  V1 defers queue mutations/selection and uses explicit aliases for voice.
+  The current milestone supports existing active-queue selection, defers general
+  queue editing, and uses explicit aliases for voice.
 
 Existing cards are confirmed by the owner to contain only an Apple Music URL in
 an NDEF Text/URI record or a well-known record with an empty type and raw URL

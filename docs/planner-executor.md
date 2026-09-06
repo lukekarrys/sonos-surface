@@ -3,7 +3,7 @@
 ## Deliberate boundaries
 
 The current slice uses a serial typed operation list, one worker, bounded
-readiness polling, and no mutation retries. Playback subscriptions, deduplication,
+readiness polling, and no mutation retries. Full playback subscriptions, deduplication,
 cancellation, and richer recovery are deferred. [Hardware notes](hardware.md)
 record exact limits and evidence; the reliability contract below describes the
 direction of implementation, not features already proven on the boards.
@@ -227,3 +227,18 @@ Policy resolves once after normalization using the captured context; the resulti
 explicit intent follows ordinary planning/execution and the HTTP mode/identity
 guard. No toggle field is added to MusicIntent or cards. Selection changes cannot
 retarget the admitted gesture; busy inputs still reject without queued replay.
+
+## Shared position and queue capability extension
+
+The [capability contract](sonos-capabilities.md) defines normalized observations,
+bounded pages, seek/selection validation, source restrictions, and verification.
+Seek and SelectQueueItem are typed one-attempt operations, ordered before other
+requested mutations. Fresh content and queue observations guard dispatch; accepted
+UUID/policy never change. Both use native Seek with distinct units, retain uncertain
+results without retries, and reconcile through the ordinary observation path.
+
+The selected-room projection now clears all observations/pages on a room switch
+and rejects publication from other UUIDs. Per-room uncertainty survives switching.
+Every reconciliation invalidates the optional queue page; no old seek or queue
+selection becomes a standing desired state. Playback polling remains the measured
+safety net while topology event subscriptions keep their existing role.

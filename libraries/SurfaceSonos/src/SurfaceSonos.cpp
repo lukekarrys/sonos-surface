@@ -4,6 +4,7 @@
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
+#include <cstdio>
 
 namespace surface {
 namespace {
@@ -34,6 +35,38 @@ std::string element(const char* name, const std::string& text) {
 bool number(const std::string& s) {
   return !s.empty() && std::all_of(s.begin(), s.end(), [](unsigned char c) { return std::isdigit(c); });
 }
+std::optional<uint32_t> unsignedNumber(const std::string& s) {
+  if (!number(s) || s.size() > 10) return {};
+  uint64_t n = 0;
+  for (char c : s) n = n * 10 + (c - '0');
+  if (n > UINT32_MAX) return {};
+  return static_cast<uint32_t>(n);
+}
+std::string childText(tinyxml2::XMLElement* parent, const char* name) {
+  tinyxml2::XMLElement* match = nullptr;
+  for (auto e = parent->FirstChildElement(); e; e = e->NextSiblingElement())
+    if (std::strcmp(localName(e->Name()), name) == 0) {
+      if (match) return ""; // Ambiguous required fields must fail closed.
+      match = e;
+    }
+  return match && match->GetText() ? match->GetText() : "";
+}
+void readItem(tinyxml2::XMLElement* item, const std::string& base, QueueItem& result) {
+  result.title = childText(item, "title"); result.artist = childText(item, "creator");
+  if (result.artist.empty()) result.artist = childText(item, "artist");
+  result.album = childText(item, "album");
+  result.artwork = normalizeArtwork(childText(item, "albumArtURI"), base);
+  if (auto id = item->Attribute("id")) result.id = id;
+  for (auto e = item->FirstChildElement(); e; e = e->NextSiblingElement()) {
+    if (std::strcmp(localName(e->Name()), "res") != 0) continue;
+    result.uri = e->GetText() ? e->GetText() : "";
+    if (auto duration = e->Attribute("duration")) {
+      result.durationMs = parseSonosTime(duration);
+      if (result.durationMs == 0) result.durationMs.reset();
+    }
+    break;
+  }
+}
 std::string encodeId(const std::string& s) {
   static const char* hex = "0123456789ABCDEF";
   std::string out;
@@ -44,6 +77,65 @@ std::string encodeId(const std::string& s) {
   return out;
 }
 } // namespace
+
+std::optional<uint32_t> parseSonosTime(const std::string& text) {
+  // H+:MM:SS[.mmm]; invalid/NOT_IMPLEMENTED/overflow remain unknown.
+  auto first = text.find(':');
+  if (first == std::string::npos || first == 0 || first > 6 || text.size() < first + 6 ||
+      text[first + 3] != ':') return {};
+  auto hours = unsignedNumber(text.substr(0, first));
+  auto minutes = unsignedNumber(text.substr(first + 1, 2));
+  auto seconds = unsignedNumber(text.substr(first + 4, 2));
+  if (!hours || !minutes || !seconds || *minutes > 59 || *seconds > 59) return {};
+  uint32_t fraction = 0;
+  if (text.size() != first + 6) {
+    if (text[first + 6] != '.' || text.size() < first + 8 || text.size() > first + 10) return {};
+    auto digits = text.substr(first + 7);
+    auto n = unsignedNumber(digits);
+    if (!n) return {};
+    fraction = *n;
+    for (size_t i = digits.size(); i < 3; ++i) fraction *= 10;
+  }
+  uint64_t ms = (uint64_t(*hours) * 3600 + *minutes * 60 + *seconds) * 1000 + fraction;
+  return ms <= UINT32_MAX ? std::optional<uint32_t>(ms) : std::nullopt;
+}
+std::string normalizeArtwork(const std::string& reference, const std::string& base) {
+  if (reference.empty()) return "";
+  if (reference.rfind("http://", 0) == 0 || reference.rfind("https://", 0) == 0) return reference;
+  if (reference.rfind("//", 0) == 0) return "http:" + reference;
+  auto colon = reference.find(':');
+  if (base.empty() || (colon != std::string::npos && colon < reference.find_first_of("/?#"))) return "";
+  return base + (reference.front() == '/' ? "" : "/") + reference;
+}
+Result parseQueuePage(const std::string& xml, uint32_t start, uint32_t count,
+                      const std::string& base, QueuePage& page) {
+  if (!count || count > maxQueuePageSize || xml.size() > 65536) return Result::fail("Invalid queue page bounds/size");
+  tinyxml2::XMLDocument doc;
+  if (doc.Parse(xml.c_str(), xml.size()) != tinyxml2::XML_SUCCESS) return Result::fail("Malformed queue SOAP XML");
+  auto response = find(&doc, "BrowseResponse");
+  if (!response) return Result::fail("Missing BrowseResponse");
+  auto total = unsignedNumber(childText(response, "TotalMatches"));
+  auto returned = unsignedNumber(childText(response, "NumberReturned"));
+  auto revision = unsignedNumber(childText(response, "UpdateID"));
+  if (!total || !returned || !revision || *returned > count ||
+      *returned > (start < *total ? *total - start : 0)) return Result::fail("Invalid queue counts/revision");
+  const auto didl = childText(response, "Result");
+  tinyxml2::XMLDocument items;
+  if (items.Parse(didl.c_str(), didl.size()) != tinyxml2::XML_SUCCESS || !items.RootElement() ||
+      std::strcmp(localName(items.RootElement()->Name()), "DIDL-Lite") != 0)
+    return Result::fail("Malformed queue DIDL");
+  QueuePage next; next.start = start; next.total = *total; next.revision = *revision;
+  for (auto e = items.RootElement()->FirstChildElement(); e; e = e->NextSiblingElement()) {
+    if (std::strcmp(localName(e->Name()), "item") != 0 || next.items.size() >= *returned)
+      return Result::fail("Invalid queue item count/type");
+    QueueItem item; item.index = start + static_cast<uint32_t>(next.items.size());
+    readItem(e, base, item); next.items.push_back(std::move(item));
+  }
+  if (next.items.size() != *returned || (*returned == 0 && start < *total))
+    return Result::fail("Incomplete queue page");
+  page = std::move(next);
+  return {};
+}
 
 Result parseSonosIdentity(const std::string& xml, std::string& id, std::string& room) {
   tinyxml2::XMLDocument doc;
@@ -262,27 +354,93 @@ Result DirectSonos::ungrouped() {
 Result DirectSonos::refresh(PlaybackState& state) {
   auto r = identity();
   if (!r.ok) return r;
-  std::string transport, position, settings, media, volume;
+  std::string transport, position, settings, media, volume, mute;
   if (!(r = soap(AV, "GetTransportInfo", instance, transport)).ok ||
       !(r = soap(AV, "GetPositionInfo", instance, position)).ok ||
       !(r = soap(AV, "GetTransportSettings", instance, settings)).ok ||
       !(r = soap(AV, "GetMediaInfo", instance, media)).ok ||
-      !(r = soap(RC, "GetVolume", instance + "<Channel>Master</Channel>", volume)).ok) return r;
+      !(r = soap(RC, "GetVolume", instance + "<Channel>Master</Channel>", volume)).ok ||
+      !(r = readMute(mute)).ok) return r;
   PlaybackState next;
   next.targetId = id_; next.room = room_;
+  next.roomDisplayId = roomDisplayId(room_);
   next.playback = value(transport, "CurrentTransportState");
   next.mode = value(settings, "PlayMode");
   next.uri = value(media, "CurrentURI");
   next.track = value(position, "Track");
+  next.trackUri = value(position, "TrackURI");
+  next.positionMs = parseSonosTime(value(position, "RelTime"));
+  next.durationMs = parseSonosTime(value(position, "TrackDuration"));
+  if (next.durationMs == 0) next.durationMs.reset();
+  next.mute = mute == "1";
+  if (next.playback == "PLAYING") next.transport = PlaybackStatus::Playing;
+  else if (next.playback == "PAUSED_PLAYBACK") next.transport = PlaybackStatus::Paused;
+  else if (next.playback == "STOPPED") next.transport = PlaybackStatus::Stopped;
+  else if (next.playback == "NO_MEDIA_PRESENT") next.transport = PlaybackStatus::NoMedia;
+  else if (next.playback == "TRANSITIONING") next.transport = PlaybackStatus::Transitioning;
+  const char* modes[] = {"NORMAL", "REPEAT_ALL", "REPEAT_ONE", "SHUFFLE_NOREPEAT", "SHUFFLE", "SHUFFLE_REPEAT_ONE"};
+  for (unsigned i = 0; i < 6; ++i) if (next.mode == modes[i]) {
+    next.shuffle = i >= 3; next.repeat = static_cast<Repeat>(i % 3);
+  }
   const auto level = value(volume, "CurrentVolume");
   if (!number(level) || level.size() > 3 || std::atoi(level.c_str()) > 100) return Result::fail("Unknown volume");
   next.volume = std::atoi(level.c_str());
   auto metadata = value(position, "TrackMetaData");
-  next.title = value(metadata, "title"); next.artist = value(metadata, "creator");
+  tinyxml2::XMLDocument didl;
+  QueueItem item;
+  if (didl.Parse(metadata.c_str(), metadata.size()) == tinyxml2::XML_SUCCESS)
+    if (auto e = find(&didl, "item")) readItem(e, http_.baseUrl(), item);
+  next.title = item.title; next.artist = item.artist; next.album = item.album; next.artwork = item.artwork;
+  if (!next.durationMs) next.durationMs = item.durationMs;
+  if (!next.uri.empty()) {
+    next.queueBacked = next.uri == "x-rincon-queue:" + id_ + "#0";
+    next.source = *next.queueBacked ? PlaybackSource::Queue : PlaybackSource::Other;
+    const bool radio = next.uri.rfind("x-sonosapi-radio:", 0) == 0;
+    if (radio || next.uri.rfind("x-sonosapi-stream:", 0) == 0 || next.uri.rfind("x-rincon-stream:", 0) == 0 ||
+        next.uri.rfind("x-sonos-htastream:", 0) == 0 || value(metadata, "class") == "object.item.audioItem.audioBroadcast") {
+      const auto query = next.uri.find('?');
+      const auto parameters = query == std::string::npos ? "" : "&" + next.uri.substr(query + 1) + "&";
+      next.source = radio && parameters.find("&sid=204&") != std::string::npos ?
+          PlaybackSource::AppleMusicStation : PlaybackSource::Live;
+      next.seekable = false; next.durationMs.reset(); next.positionMs.reset();
+    }
+  } else {
+    next.queueBacked = false; next.seekable = false;
+    next.positionMs.reset(); next.durationMs.reset();
+  }
+  if (next.queueBacked == true) {
+    auto track = unsignedNumber(next.track);
+    if (track && *track > 0) next.queueIndex = *track - 1;
+    next.queueTotal = unsignedNumber(value(media, "NrTracks"));
+  }
+  if (!next.seekable && next.durationMs && next.positionMs) next.seekable = true;
+  QueuePage summary;
+  auto queueResult = browse(0, 1, summary);
+  if (queueResult.ok) {
+    next.queueRevision = summary.revision;
+    if (next.queueBacked == true) next.queueTotal = summary.total;
+  } else next.queueError = queueResult.error;
+  if (next.queueIndex && next.queueTotal && *next.queueIndex >= *next.queueTotal) next.queueIndex.reset();
+  // A track/source change during the multi-call read must not pair old artwork
+  // or timing with the newly selected content. The next poll retries the read.
+  std::string finalPosition, finalMedia;
+  if (!(r = soap(AV, "GetPositionInfo", instance, finalPosition)).ok ||
+      !(r = soap(AV, "GetMediaInfo", instance, finalMedia)).ok) return r;
+  if (next.uri != value(finalMedia, "CurrentURI") || next.track != value(finalPosition, "Track") ||
+      next.trackUri != value(finalPosition, "TrackURI") || metadata != value(finalPosition, "TrackMetaData"))
+    return Result::fail("Content changed during observation; refresh required");
   if (next.playback.empty() || next.mode.empty()) return Result::fail("Incomplete playback state");
   next.known = true; next.stale = false; next.observedAtMs = http_.nowMs();
   state = std::move(next);
-  if (log_) log_("state=" + state.playback + " mode=" + state.mode + " volume=" + std::to_string(*state.volume) + " track=" + state.track + " title=" + state.title);
+  if (log_) {
+    auto optional = [](std::optional<uint32_t> n) { return n ? std::to_string(*n) : "unknown"; };
+    log_("state=" + state.playback + " mode=" + state.mode + " volume=" + std::to_string(*state.volume) + " track=" + state.track + " title=" + state.title);
+    log_("metadata roomDisplayId=" + state.roomDisplayId + " artist=" + state.artist + " album=" + state.album +
+        " positionMs=" + optional(state.positionMs) + " durationMs=" + optional(state.durationMs) +
+        " queueIndex=" + optional(state.queueIndex) + " queueTotal=" + optional(state.queueTotal) +
+        " queueRevision=" + optional(state.queueRevision) + " source=" + std::to_string(static_cast<int>(state.source)) +
+        " artwork=" + state.artwork + " queueError=" + state.queueError);
+  }
   return {};
 }
 Result DirectSonos::readMute(std::string& mute) {
@@ -293,7 +451,7 @@ Result DirectSonos::readMute(std::string& mute) {
   return mute == "0" || mute == "1" ? Result{} : Result::fail("Unknown mute state");
 }
 Result DirectSonos::prepare(const ResolvedIntent& intent) {
-  prepared_ = false; advanceDispatched_ = false;
+  prepared_ = false; advanceDispatched_ = false; positionDispatched_ = false;
   deadline_ = http_.nowMs() + 60000;
   if (config_.targetId.empty()) return Result::fail("Configure sonos_uid before controlling a speaker");
   auto r = validateIntent(intent.intent);
@@ -304,6 +462,12 @@ Result DirectSonos::prepare(const ResolvedIntent& intent) {
   if (intent.intent.source && !(r = appleSourceItem(*intent.intent.source, config_.appleRegion, item_)).ok) return r;
   PlaybackState state;
   if (!(r = refresh(state)).ok || !(r = ungrouped()).ok) return r;
+  if (intent.intent.seekPositionMs || intent.intent.queueIndex) {
+    if (!(r = validatePositionRequest(state)).ok) return r;
+    positionBaseline_ = state;
+    if (intent.intent.queueIndex && !(r = browse(*intent.intent.queueIndex, 1, selectionBaseline_)).ok) return r;
+    if (intent.intent.queueIndex && selectionBaseline_.items.size() != 1) return Result::fail("Queue item no longer exists");
+  }
   if (!intent.intent.source && (intent.intent.shuffle.has_value() || intent.intent.repeat) && state.uri.rfind("x-sonosapi-radio:", 0) == 0)
     return Result::fail("Shuffle/repeat are unsupported for the current station");
   if ((intent.intent.source && intent.intent.source->kind != SourceKind::Station) || intent.intent.shuffle.has_value() || intent.intent.repeat) {
@@ -323,14 +487,46 @@ Result DirectSonos::prepare(const ResolvedIntent& intent) {
   prepared_ = true;
   return {};
 }
-Result DirectSonos::queueCount(unsigned& count) {
+Result DirectSonos::validatePositionRequest(const PlaybackState& state) {
+  const auto& intent = intent_.intent;
+  if (!intent.transport && state.transport != PlaybackStatus::Playing && state.transport != PlaybackStatus::Paused &&
+      state.transport != PlaybackStatus::Stopped) return Result::fail("Cannot preserve unknown/transitional transport");
+  if (intent.seekPositionMs) {
+    if (state.seekable == false || state.transport == PlaybackStatus::NoMedia)
+      return Result::fail("Current source is not seekable");
+    if (!state.positionMs || state.trackUri.empty()) return Result::fail("Cannot seek without current position/track identity");
+    if (state.durationMs && *intent.seekPositionMs > *state.durationMs) return Result::fail("Seek exceeds current duration");
+  }
+  if (intent.queueIndex) {
+    if (state.queueBacked != true) return Result::fail("Queue selection requires active queue playback");
+    if (!state.queueTotal || !state.queueRevision || !state.queueError.empty())
+      return Result::fail("Cannot select without fresh queue bounds/revision");
+    if (*intent.queueIndex >= *state.queueTotal) return Result::fail("Queue index out of range");
+  }
+  return {};
+}
+Result DirectSonos::queue(uint32_t start, uint32_t count, QueuePage& page) {
+  if (!count || count > maxQueuePageSize) return Result::fail("Queue count must be 1..20");
+  auto r = identity();
+  return r.ok ? browse(start, count, page) : r;
+}
+Result DirectSonos::browse(uint32_t start, uint32_t count, QueuePage& page) {
+  if (!count || count > maxQueuePageSize) return Result::fail("Queue count must be 1..20");
   std::string body;
   auto r = soap("ContentDirectory", "Browse", "<ObjectID>Q:0</ObjectID><BrowseFlag>BrowseDirectChildren</BrowseFlag>"
-      "<Filter>*</Filter><StartingIndex>0</StartingIndex><RequestedCount>1</RequestedCount><SortCriteria></SortCriteria>", body);
+      "<Filter>*</Filter>" + element("StartingIndex", std::to_string(start)) +
+      element("RequestedCount", std::to_string(count)) + "<SortCriteria></SortCriteria>", body);
   if (!r.ok) return r;
-  auto total = value(body, "TotalMatches");
-  if (!number(total)) return Result::fail("Missing queue count");
-  count = std::strtoul(total.c_str(), nullptr, 10);
+  QueuePage next;
+  if (!(r = parseQueuePage(body, start, count, http_.baseUrl(), next)).ok) return r;
+  next.targetId = id_; next.observedAtMs = http_.nowMs(); page = std::move(next);
+  return {};
+}
+Result DirectSonos::queueCount(unsigned& count) {
+  QueuePage page;
+  auto r = browse(0, 1, page);
+  if (!r.ok) return r;
+  count = page.total;
   return {};
 }
 Result DirectSonos::waitQueue(bool empty) {
@@ -356,6 +552,37 @@ Result DirectSonos::execute(Operation op) {
   std::string body;
   Result r;
   switch (op) {
+    case Operation::Seek:
+    case Operation::SelectQueueItem: {
+      const bool seek = op == Operation::Seek;
+      if ((seek && !intent_.intent.seekPositionMs) || (!seek && !intent_.intent.queueIndex))
+        return Result::fail("Position operation not prepared");
+      if (positionDispatched_) return Result::fail("Position already attempted; never resend", true);
+      PlaybackState fresh;
+      if (!(r = refresh(fresh)).ok || !(r = validatePositionRequest(fresh)).ok) return r;
+      if (fresh.uri != positionBaseline_.uri || (seek &&
+          (fresh.trackUri != positionBaseline_.trackUri || fresh.track != positionBaseline_.track)))
+        return Result::fail("Source/track changed before position dispatch");
+      if (!seek) {
+        QueuePage item;
+        if (!(r = browse(*intent_.intent.queueIndex, 1, item)).ok) return r;
+        if (item.revision != selectionBaseline_.revision || item.total != selectionBaseline_.total ||
+            item.items.size() != 1 || item.items[0].uri != selectionBaseline_.items[0].uri ||
+            item.items[0].id != selectionBaseline_.items[0].id)
+          return Result::fail("Queue changed before selection; submit a fresh request");
+      } else if (fresh.queueRevision != positionBaseline_.queueRevision)
+        return Result::fail("Queue changed before seek; submit a fresh request");
+      if (http_.nowMs() >= deadline_) return Result::fail("Request budget exhausted before position dispatch");
+      std::string target;
+      if (seek) {
+        const auto seconds = static_cast<uint32_t>(*intent_.intent.seekPositionMs / 1000);
+        char time[32]; std::snprintf(time, sizeof(time), "%02u:%02u:%02u", seconds / 3600, seconds / 60 % 60, seconds % 60);
+        target = time;
+      } else target = std::to_string(*intent_.intent.queueIndex + 1);
+      positionDispatched_ = true; positionDispatchMs_ = http_.nowMs();
+      return soap(AV, "Seek", instance + element("Unit", seek ? "REL_TIME" : "TRACK_NR") +
+          element("Target", target), body, true);
+    }
     case Operation::Stop:
       if (!(r = soap(AV, "GetTransportInfo", instance, body)).ok) return r;
       if (value(body, "CurrentTransportState") == "STOPPED" || value(body, "CurrentTransportState") == "NO_MEDIA_PRESENT") return {};
@@ -413,9 +640,29 @@ Result DirectSonos::verify(const ResolvedIntent& intent, PlaybackState& state) {
     auto r = refresh(state);
     if (!r.ok) return Result::fail("Verification: " + r.error, true);
     bool matches = true;
-    if (intent.intent.transport == TransportCommand::Play) matches = state.playback == "PLAYING";
+    if (intent.intent.seekPositionMs) {
+      const int64_t requested = *intent.intent.seekPositionMs / 1000 * 1000;
+      // Sonos has whole-second resolution. Allow 2s quantization/latency plus
+      // actual elapsed playing time, capped by the verification window/budget.
+      const int64_t elapsed = state.transport == PlaybackStatus::Playing ? http_.nowMs() - positionDispatchMs_ : 0;
+      matches = state.positionMs && int64_t(*state.positionMs) >= requested - 2000 &&
+          int64_t(*state.positionMs) <= requested + elapsed + 2000 && state.uri == positionBaseline_.uri &&
+          state.trackUri == positionBaseline_.trackUri && state.track == positionBaseline_.track &&
+          state.queueRevision == positionBaseline_.queueRevision;
+    }
+    if (intent.intent.queueIndex) {
+      QueuePage item;
+      if (!(r = browse(*intent.intent.queueIndex, 1, item)).ok) return Result::fail("Queue verification: " + r.error, true);
+      matches = state.queueBacked == true && state.queueIndex == *intent.intent.queueIndex &&
+          item.revision == selectionBaseline_.revision && item.items.size() == 1 &&
+          item.items[0].uri == selectionBaseline_.items[0].uri && state.trackUri == item.items[0].uri;
+    }
+    if ((intent.intent.seekPositionMs || intent.intent.queueIndex) && !intent.intent.transport)
+      matches = matches && (desiredPlaying_ ? state.transport == PlaybackStatus::Playing :
+          state.transport == PlaybackStatus::Paused || state.transport == PlaybackStatus::Stopped);
+    if (intent.intent.transport == TransportCommand::Play) matches = matches && state.playback == "PLAYING";
     else if (intent.intent.transport == TransportCommand::Pause)
-      matches = state.playback == "PAUSED_PLAYBACK" || state.playback == "STOPPED" || state.playback == "NO_MEDIA_PRESENT";
+      matches = matches && (state.playback == "PAUSED_PLAYBACK" || state.playback == "STOPPED" || state.playback == "NO_MEDIA_PRESENT");
     if ((intent.intent.source && intent.intent.source->kind != SourceKind::Station) || intent.intent.shuffle.has_value() || intent.intent.repeat)
       matches = matches && state.mode == desiredMode_;
     if (intent.intent.source && !intent.intent.transport)
