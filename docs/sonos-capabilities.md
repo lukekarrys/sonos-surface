@@ -44,7 +44,9 @@ Other rather than being classified as an Apple album/playlist/track.
 
 Artwork is metadata only. Absolute HTTP(S) URLs are retained, and relative paths
 are resolved against the currently addressed speaker's HTTP origin. Unsupported
-schemes remain empty. Nothing downloads, decodes, caches, or renders images.
+schemes remain empty. The shared adapter never downloads, decodes, caches, or renders images. The
+[Waveshare frontend](waveshare-frontend.md#album-artwork) separately fetches
+bounded speaker HTTP/JPEG covers.
 
 ## Queue pages
 

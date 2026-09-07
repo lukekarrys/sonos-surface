@@ -12,8 +12,9 @@ Implementation progress and measured evidence live in [hardware.md](hardware.md)
 The current [shared capability milestone](sonos-capabilities.md) adds timing,
 metadata/artwork references, bounded queue reads, seek, and active-queue selection
 as the shared backend. The [Waveshare frontend](waveshare-frontend.md) now adds
-now-playing, room selection, volume/seek, and bounded queue selection; its new
-physical visual/touch acceptance is pending.
+now-playing, room selection, volume/seek, and bounded queue selection. Its
+overall visual/touch layout is owner-accepted, with mistaps and safer volume
+interaction noted for follow-up. It now supports bounded background JPEG artwork.
 Playback state uses polling; topology notifications invalidate the selectable-room list.
 Unsupported explicit v1 capabilities reject before mutation. Both device playback paths now have physical evidence:
 M5 NFC playback and calibrated Waveshare button control are owner-confirmed.

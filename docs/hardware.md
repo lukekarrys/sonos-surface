@@ -1677,3 +1677,83 @@ mode from these autonomous checks. Use the
 [read-only checklist](waveshare-frontend.md#physical-read-only-checkpoint), then
 the [deliberate mutation plan](waveshare-frontend.md#deliberate-mutation-test-after-physical-acceptance)
 only after owner acceptance.
+
+## Owner frontend feedback and artwork follow-up: 2026-09-07
+
+- The owner reports that the frontend looks good and is usable, with some
+  mistaps considered acceptable for this small screen and possible later control
+  refinements. This is broad owner-reported visual/touch acceptance, not a new
+  per-control timing trace or evidence that every mutation was exercised.
+- The owner specifically flags accidental volume slides reaching 100% as a
+  serious household concern, based on a previous extremely loud incident. A
+  Sonos-side maximum volume limit is under consideration. No limit, confirmation
+  gesture, or volume-interaction change is authorized/implemented in the artwork
+  follow-up; the concern remains an explicit follow-up before wider control use.
+- The owner requested artwork next. A bounded read-only HTTP GET of Office's
+  observed normalized artwork URL returned a baseline JPEG, 400×400, 64,468 bytes
+  in 817 ms on the Mac. The existing pinned Arduino-ESP32 3.3.11 SDK exposes
+  `esp_jpeg_get_image_info`/`esp_jpeg_decode`; no decoder dependency was added.
+  The Waveshare's persisted read-only setting was queried as true and its exact
+  stored CST820 calibration was retained before firmware work.
+
+### Artwork implementation and measured device results
+
+- Added a Waveshare-only artwork worker, one in-flight job/completion, generation
+  rejection for room/track/URL changes, and a current 64×64 RGB565 thumbnail.
+  The normal canvas draws that thumbnail in the existing placeholder rectangle.
+  No touch rectangles, volume behavior, MusicIntent, policy, shared Sonos code,
+  or persisted format changed. Raw touch diagnostics start no artwork worker.
+- The body is capped at 256 KiB, source dimensions at 2048×2048, and scaled JPEG
+  output at 128 KiB. Large allocations use PSRAM. Baseline JPEG over speaker
+  HTTP is supported; HTTPS, PNG, progressive JPEG, and bad/oversized responses
+  retain the placeholder. No redirect or TLS bypass is used. See the precise
+  [worker limits](waveshare-frontend.md#album-artwork), including timeouts/retries.
+- All 452 prior behavioral checks, touch/calibration, Stick button, and Waveshare
+  UI tests pass. New sanitizer tests cover artwork identity/generation changes,
+  stale success/failure rejection, offline/stale gating, retry delay and timer
+  wrap, URL bounds, missing artwork, RGB565 color preservation, and square versus
+  rectangular thumbnail fitting. These are lifecycle/resampling tests; the SDK
+  decoder itself is exercised on the device. Evidence: `.local/artwork-tests.log`.
+- Normal Waveshare (1,401,387 bytes), Stick (1,587,943), and Waveshare diagnostic
+  (1,377,347) builds pass. Only Waveshare was flashed, with hash verification and
+  application readiness. Evidence: `.local/artwork-{build,stick-build,diagnostic-build,flash}.log`.
+- The first read-only script expected Bedroom's historical album, but fresh state
+  showed a live source with no artwork, playing at volume 8. Its wait for an image
+  timed out; this was an incorrect test expectation, not a decoder failure. The
+  revised script uses the currently observed URL. Living Room also reported live
+  playback, volume 10, and no artwork. Both correctly removed the prior Office
+  cover and kept the placeholder. No source/volume mutation caused these states.
+- Office → Bedroom → Office → Living Room → Office succeeded through USB room
+  selection, with Office's current **Fire / Saint Cloud +3** cover loaded each
+  time. Three measured HTTP downloads of its 64,468-byte, 400×400 JPEG took
+  **704–858 ms**; decode plus thumbnail fitting took **191–195 ms**; total
+  **896–1,051 ms**. SDK scaling produced 100×100 before fitting the 64×64 cover.
+- Working free PSRAM at the sampled decode/thumbnail overlap was **7,750,940
+  bytes**. Each load started at **8,050,216** and ended at **8,041,764** free bytes;
+  selecting a no-art room restored the baseline. The retained pixel payload is
+  8,192 bytes (observed free-PSRAM difference 8,452 including allocation/runtime
+  overhead). No cumulative PSRAM loss appeared across those loads. This is sample
+  evidence for these covers, not a large-image or network-failure stress claim.
+- Normal frame totals in that run were **57–86 ms**, median **62 ms**, with
+  sampled heap **175,036–194,180 bytes**. A queue page fetched in **78 ms**.
+  Peripheral recovery passed and kept the cover/calibration; the **448 ms**
+  maximum polling gap occurred during the deliberate peripheral reset. Runtime
+  queries before/after remained true and calibration matched exactly. The run
+  checked **130 read SOAP dispatches**, with no mutating SOAP dispatches.
+  Evidence: `.local/artwork-device-final{,-summary}.log`.
+- A separate real cancellation test opened the Rooms screen while Office artwork
+  was downloading: its frame rendered in **59 ms** with the image input buffer
+  still allocated. Selecting Bedroom then invalidated that request. The worker
+  stopped its response processing at **724 ms**, discarded stale generation 16,
+  and restored the no-art PSRAM baseline. Returning to Office published generation
+  20 successfully (930 ms fetch, 193 ms decode, 1,124 ms total). No old Office
+  result published as Bedroom. Evidence: `.local/artwork-cancel.log`.
+- The board is left on Office in read-only mode. The owner subsequently reported
+  that the artwork "looks good," confirming its physical appearance. The owner
+  then confirmed an externally initiated album change worked: the display
+  briefly showed the placeholder before loading the new album artwork. This
+  completes the remaining physical acceptance check for the frontend milestone.
+  The placeholder transition is expected while the old cover is cleared and the
+  new one downloads. Broader source/format support and touch/volume refinements
+  remain follow-ups. Deliberate live mutation testing is the handoff described
+  in [the frontend test plan](waveshare-frontend.md#deliberate-mutation-test-after-physical-acceptance).

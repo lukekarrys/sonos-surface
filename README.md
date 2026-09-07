@@ -12,8 +12,8 @@ and bounded queue reading/selection. Runtime `read_only` defaults true.
 See the [shared capability contract](docs/sonos-capabilities.md).
 The Waveshare now has a compact now-playing UI, room selector, release-to-submit
 volume/seek bars, and four-item queue pages. See the
-[frontend contract and physical checklist](docs/waveshare-frontend.md); physical
-acceptance of this new layout is pending.
+[frontend contract and physical checklist](docs/waveshare-frontend.md). The owner
+accepted the overall UI; volume mistaps remain a noted follow-up.
 See the [Stick manual test](docs/stick-milestone-test.md) and latest
 [hardware evidence](docs/hardware.md) for measured versus pending behavior.
 
@@ -293,7 +293,7 @@ Confirm the serial revision matches the physical label.
 The normal screen now shows selected room, title/artist, playback, volume, timing,
 shuffle/repeat, and runtime read-only status. Tap the room header to switch rooms;
 use Queue for four-item pages. Transport buttons and the volume/progress bars
-submit through the shared intent path on release. Artwork is a placeholder.
+submit through the shared intent path on release. Current speaker-served JPEG artwork loads in the background.
 See the [frontend physical checklist](docs/waveshare-frontend.md#physical-read-only-checkpoint)
 before enabling mutations on the new touch layout. USB `room-select office`
 selects without playback effects. The latest enumeration for this same Waveshare
@@ -410,7 +410,7 @@ USB `queue [start,count]` reads a selected-room queue page, count 1–20.
 For example, `queue [0,2]` reads the first two entries. The same read-only
 Mac probe accepts `--queue-start`, `--queue-count`, `--samples`, and `--interval-ms`.
 Metadata includes album, normalized artwork URL, millisecond position/duration,
-queue index/total, mute, and normalized modes/source. Artwork is never downloaded.
+queue index/total, mute, and normalized modes/source. The Waveshare downloads bounded speaker HTTP/JPEG covers on a separate worker.
 
 USB commands (newline terminated): `rooms`, `room-next`, `room-select DISPLAY_ID`, `status`, `source`,
 `play`, `pause`, `toggle`, `next`, `previous`, `reboot`, a bare Apple URL, or v1 intent JSON.
@@ -457,7 +457,7 @@ there is no editor to round-trip them yet.
 - `tests/`: portable behavioral tests and read-only real-Sonos diagnostic.
 - `scripts/`: pinned setup, tests, build/flash/monitor, discovery/configuration.
 
-No generic workflow engine, queue editor, artwork rendering/downloading, voice, or
+No generic workflow engine, queue editor, voice, or
 full retry/reconciliation framework is included in this slice.
 
 Diagnostics stream over USB serial; the device has no stored log history to

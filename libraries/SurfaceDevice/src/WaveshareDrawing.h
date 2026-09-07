@@ -55,16 +55,18 @@ class WaveshareDrawing {
     if (fill) gfx.fillRoundRect(sliderLeft,y,fill,6,3,enabled ? accent : muted);
     if (enabled) gfx.fillCircle(sliderLeft+fill,y+3,preview ? 8 : 5,preview ? amber : white);
   }
-  void nowPlaying(const WaveshareUi& ui) {
+  void nowPlaying(const WaveshareUi& ui, const uint16_t* artwork) {
     using namespace waveshareLayout;
     const auto& o = ui.state.observed;
     text(32,40,o.room.empty() ? "Choose room" : o.room,23);
     text(316,42,"v",1,2,accent);
     text(32,76,ui.context.readOnly ? "READ ONLY" : "SONOS",16,1,ui.context.readOnly ? amber : muted);
     text(206,76,!ui.context.online ? "Wi-Fi offline" : o.stale ? "State out of date" : "",22,1,amber);
-    // Small neutral artwork placeholder; HTTP/image decoding is a follow-up.
-    gfx.fillRoundRect(32,96,64,64,10,tile);
-    gfx.drawCircle(64,128,20,muted); gfx.fillCircle(64,128,5,accent);
+    if (artwork) gfx.draw16bitRGBBitmap(32,96,artwork,64,64);
+    else {
+      gfx.fillRoundRect(32,96,64,64,10,tile);
+      gfx.drawCircle(64,128,20,muted); gfx.fillCircle(64,128,5,accent);
+    }
     const char* sourceTitle = !o.known ? "Loading room..." : o.source == PlaybackSource::Live ? "Live / TV" :
       o.source == PlaybackSource::AppleMusicStation ? "Radio station" : o.source == PlaybackSource::Queue ? "Queue playback" :
       o.source == PlaybackSource::Other ? "Audio source" : "Nothing selected";
@@ -134,10 +136,10 @@ class WaveshareDrawing {
   }
 public:
   explicit WaveshareDrawing(Arduino_GFX& output) : gfx(output) {}
-  void draw(const WaveshareUi& ui) {
+  void draw(const WaveshareUi& ui, const uint16_t* artwork = nullptr) {
     gfx.fillScreen(0); gfx.setTextWrap(false);
     switch (ui.screen) {
-      case WaveshareScreen::NowPlaying: nowPlaying(ui); break;
+      case WaveshareScreen::NowPlaying: nowPlaying(ui, artwork); break;
       case WaveshareScreen::Rooms: rooms(ui); break;
       case WaveshareScreen::Queue: queue(ui); break;
     }

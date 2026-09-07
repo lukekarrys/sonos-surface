@@ -4,8 +4,9 @@
 
 The normal Waveshare build has a now-playing screen, a room selector, and a
 four-item queue browser. It consumes normalized AppState/QueuePage and emits
-explicit MusicIntent values or device navigation actions. It never interprets
-Sonos SOAP, classifies service URIs, or calls the network. Stick keeps its own UI.
+explicit MusicIntent values or device navigation actions. The interaction and rendering code never interprets
+Sonos SOAP, classifies service URIs, or calls the network. A separate device
+artwork worker performs bounded image GETs and decoding. Stick keeps its own UI.
 The [room/policy model](product.md#stick-room-and-policy-milestone) and
 [shared capability contract](sonos-capabilities.md) remain authoritative.
 
@@ -78,11 +79,47 @@ glyphs; other UTF-8 codepoints display as `?`, without broken byte fragments.
 Text is bounded and ellipsized rather than wrapping into other controls. Title
 uses two lines, artist one line, and album one compact line.
 
-Artwork is deliberately a neutral record placeholder. Downloading/JPEG/PNG
-decoding and recent-art caching are the next optional small sub-milestone. No
-artwork request, new image allocation, or decoding library was added. Progress
-uses real observations without interpolation. Full playback event subscriptions
-remain deferred until measured polling latency justifies them.
+## Album artwork
+
+The 64×64 record placeholder now displays the current cover when available. A
+separate low-priority worker downloads the normalized speaker HTTP artwork URL
+and decodes baseline JPEG using the decoder already included in pinned
+Arduino-ESP32 **3.3.11**. No new dependency, media library, or persistent cache is
+introduced. The touch layout, including volume, is unchanged.
+
+Only one job can be in flight. Changing room, track identity, or artwork URL
+immediately removes the visible cover and advances a generation; late results
+are discarded. A changed generation also aborts an active body download at its
+next chunk. The UI never waits for HTTP or decoding. State polling and queue
+reads keep their existing worker; artwork does not hold its busy flag or locks.
+Only the current 8,192-byte RGB565 thumbnail remains resident after completion.
+
+The image body is capped at **256 KiB**, input dimensions at **2048×2048**, and
+scaled decoder output at **128 KiB**, allocated in PSRAM. Baseline JPEG is decoded
+at a supported 1/2, 1/4, or 1/8 scale where useful, then fit into the square with
+black padding for non-square images. Connect timeout is 1.5 seconds, inactivity
+timeout 2 seconds, and body processing has a 6-second deadline checked at chunks
+(an in-flight read can add its inactivity timeout). The worker stack is 8 KiB.
+The accepted image bounds also bound decoding work.
+
+HTTP errors, excessive size/dimensions, missing artwork, PNG, progressive JPEG,
+and HTTPS-only URLs retain the placeholder. No redirects, insecure TLS bypass,
+or credentials are used. Transient failures retry at most every 30 seconds while
+online with non-stale state; unsupported HTTP image formats share that bounded
+retry interval. Empty, overlong, or non-HTTP URLs are not requested. Other image
+formats/TLS are follow-ups if observed household artwork requires them.
+
+Serial `[artwork]` lines measure fetch/decode/total latency, working heap/PSRAM,
+before/after memory, and generation publication/discard. Rendering still uses
+one full-frame canvas flush. Progress uses real observations without
+interpolation; full playback event subscriptions remain deferred.
+
+For physical artwork acceptance, compare the cover with the current track in
+Sonos, switch to another configured room, and return. Confirm the old cover
+clears during selection/loading and the correct cover returns. Changing tracks
+externally should update the cover after the normal state poll, while touch and
+queue navigation remain responsive. No playback mutation is needed for room
+switching. Keep runtime read-only enabled for autonomous checks.
 
 Frame diagnostics report draw/flush/total time, maximum UI polling gap since the
 last frame, free heap, and free PSRAM. Queue diagnostics measure the bounded page
@@ -146,3 +183,11 @@ variable speaker volume). Start with a finite active queue and note volume/modes
 
 Do not proceed to voice, NFC on Waveshare, queue editing, or another milestone
 as part of these checks.
+
+## Owner feedback and volume follow-up
+
+The owner accepted the overall visible UI and reports some mistaps on the small
+screen. They specifically flagged an accidental volume slide reaching 100% as a
+serious concern and may configure a Sonos-side maximum. This artwork change adds
+no volume cap or gesture safeguard. A safer volume interaction remains a separate
+follow-up; the existing slider can still request the full 0–100 range.

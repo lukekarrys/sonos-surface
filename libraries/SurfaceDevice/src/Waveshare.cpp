@@ -2,6 +2,7 @@
 #include "SurfaceDevice.h"
 #include "TouchCoordinates.h"
 #include "WaveshareDrawing.h"
+#include "WaveshareArtwork.h"
 #include <Arduino.h>
 #include <Wire.h>
 #include <Arduino_GFX_Library.h>
@@ -366,13 +367,14 @@ void boardRender(const AppState& state, const std::string& notice) {
 #if SURFACE_TOUCH_DIAGNOSTIC
   (void)state; (void)notice;
   return;
-#endif
+#else
   ui.update(state, uiContext, millis());
+  if (artworkUpdate(state.observed, uiContext.online, millis())) ui.dirty = true;
   if (!ui.dirty) return;
   ui.dirty = false;
   const auto started = millis();
   WaveshareDrawing drawing(*gfx);
-  drawing.draw(ui);
+  drawing.draw(ui, artworkPixels());
   const auto drawn = millis();
   gfx->flush();
   Serial.printf("[ui] frame screen=%d room=%s title=%s transport=%s volume=%d position=%lu duration=%lu seek=%d queue-start=%lu readonly=%d busy=%d draw=%lu flush=%lu total=%lu poll-gap-max=%lu heap=%u psram-free=%u\n",
@@ -382,6 +384,7 @@ void boardRender(const AppState& state, const std::string& notice) {
     maxPollGap, ESP.getFreeHeap(), ESP.getFreePsram());
   maxPollGap = 0;
   (void)notice;
+#endif
 }
 } // namespace surface::device
 #endif

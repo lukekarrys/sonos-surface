@@ -40,3 +40,9 @@ subprocess.run(['clang++', '-std=c++17', '-Wall', '-Wextra', '-Werror', '-g',
                 *map(str, sorted((ROOT / 'libraries/SurfaceCore/src').glob('*.cpp'))),
                 str(ROOT / 'tests/waveshare_ui_test.cpp'), '-o', str(BUILD / 'waveshare_ui_test')], check=True)
 subprocess.run([str(BUILD / 'waveshare_ui_test')], check=True)
+
+subprocess.run(['clang++', '-std=c++17', '-Wall', '-Wextra', '-Werror', '-g',
+                '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
+                '-I' + str(ROOT / 'libraries/SurfaceDevice/src'), '-I' + str(includes[0]),
+                str(ROOT / 'tests/artwork_test.cpp'), '-o', str(BUILD / 'artwork_test')], check=True)
+subprocess.run([str(BUILD / 'artwork_test')], check=True)
