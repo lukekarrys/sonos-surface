@@ -1,6 +1,7 @@
 #if defined(SURFACE_WAVESHARE)
 #include "SurfaceDevice.h"
 #include "TouchCoordinates.h"
+#include "WaveshareDrawing.h"
 #include <Arduino.h>
 #include <Wire.h>
 #include <Arduino_GFX_Library.h>
@@ -58,8 +59,11 @@ void loadCalibration() {
                 calibrationStored ? calibrationJson(calibration).c_str() : "identity fallback: missing/invalid/controller mismatch");
 }
 bool held = false;
-uint32_t lastTouch = 0;
+uint32_t lastTouch = 0, maxPollGap = 0;
+bool loggingContact = false;
 std::string lastScreen;
+WaveshareUi ui;
+BoardContext uiContext;
 int edgeInset = -1; // Temporary serial-controlled display diagnostic; never persisted.
 int edgeRadius = 0;
 struct Button { int x, y; const char* title; Input input; };
@@ -82,10 +86,6 @@ bool probe(uint8_t address) {
 bool writeRegister(uint8_t address, uint8_t reg, uint8_t value) {
   Wire.beginTransmission(address); Wire.write(reg); Wire.write(value);
   return Wire.endTransmission() == 0;
-}
-void button(int x, int y, const char* title) {
-  gfx->drawRoundRect(x, y, buttonWidth, buttonHeight, 8, RGB565_CYAN);
-  gfx->setCursor(x + 12, y + 20); gfx->print(title);
 }
 #if SURFACE_TOUCH_DIAGNOSTIC
 constexpr int calibrationTargets[][2] = {
@@ -200,7 +200,7 @@ bool boardBegin(std::string& notice) {
   loadCalibration();
   Serial.printf("[board] display=%dx%d touch=0x%02x SDA=15 SCL=14\n", gfx->width(), gfx->height(), touchAddress);
   ready = true;
-  held = true; // Require a release after boot/recovery/calibration changes.
+  ui.cancelTouch(); held = true; // Require a release after boot/recovery/calibration changes.
   lastScreen.clear();
 #if SURFACE_TOUCH_DIAGNOSTIC
   diagnosticScreen(-1, -1, 0, 0);
@@ -209,6 +209,17 @@ bool boardBegin(std::string& notice) {
   return true;
 }
 bool boardCommand(const std::string& line) {
+#if !SURFACE_TOUCH_DIAGNOSTIC
+  // Read-only navigation aid for serial layout/performance inspection. It emits
+  // no intent and does not inject physical touch samples.
+  if (line == "ui-screen now" || line == "ui-screen rooms" || line == "ui-screen queue") {
+    ui.cancelTouch(); held = true;
+    ui.screen = line == "ui-screen now" ? WaveshareScreen::NowPlaying :
+      line == "ui-screen rooms" ? WaveshareScreen::Rooms : WaveshareScreen::Queue;
+    Serial.printf("[ui] navigation screen=%d (no playback intent)\n",int(ui.screen));
+    return true;
+  }
+#endif
   if (line.compare(0, 13, "display-edge ") == 0) {
     const auto value = line.substr(13);
     if (value == "off") edgeInset = -1;
@@ -226,12 +237,12 @@ bool boardCommand(const std::string& line) {
       edgeInset = std::stoi(inset);
       edgeRadius = std::stoi(radius);
     }
-    held = true; lastScreen.clear();
+    ui.cancelTouch(); held = true; lastScreen.clear();
     Serial.printf("DISPLAY_EDGE inset=%d radius=%d (touch actions disabled while visible)\n", edgeInset, edgeRadius);
     return true;
   }
   if (line == "peripherals-retry") {
-    ready = false; held = true; lastInit = millis() - 5000;
+    ready = false; ui.cancelTouch(); held = true; lastInit = millis() - 5000;
     Serial.println("[board] peripheral retry requested; networking continues");
     return true;
   }
@@ -250,11 +261,15 @@ bool boardCommand(const std::string& line) {
   const auto saved = prefs.putString("touch", calibrationJson(next).c_str());
   prefs.end();
   if (!saved) { Serial.println("CALIBRATION_SAVE_FAILED"); return true; }
-  calibration = next; calibrationStored = true; held = true;
+  calibration = next; calibrationStored = true; ui.cancelTouch(); held = true;
   Serial.printf("CALIBRATION_SAVED %s\n", calibrationJson(calibration).c_str());
   return true;
 }
 BoardEvent boardPoll() {
+  static uint32_t lastPoll = 0;
+  const auto now = millis();
+  if (lastPoll) maxPollGap = std::max(maxPollGap, uint32_t(now-lastPoll));
+  lastPoll = now;
   if (!ready && millis() - lastInit >= 5000) {
     std::string notice;
     const bool recovered = boardBegin(notice);
@@ -263,14 +278,14 @@ BoardEvent boardPoll() {
   }
   if (!ready || millis() - lastTouch < 30) return {};
   lastTouch = millis();
-  if (edgeInset >= 0) { held = true; return {}; }
+  if (edgeInset >= 0) { ui.cancelTouch(); held = true; return {}; }
   // Both vendor drivers read finger count at 0x02 and XY at 0x03..0x06.
   Wire.beginTransmission(touchAddress); Wire.write(0x02);
   static uint32_t lastError = 0;
   static unsigned readErrors = 0;
   if (Wire.endTransmission(false) || Wire.requestFrom(touchAddress, uint8_t(5)) != 5) {
     if (millis() - lastError >= 5000) { Serial.println("[touch] I2C read failed"); lastError = millis(); }
-    held = true;
+    ui.cancelTouch(); held = true;
 #if SURFACE_TOUCH_DIAGNOSTIC
     calibrationContact = false; calibrationArmed = false;
 #endif
@@ -301,17 +316,31 @@ BoardEvent boardPoll() {
   }
   return {};
 #endif
-  if (!fingers) { held = false; return {}; }
-  const auto point = waveshareTouchPoint(x, y, calibration);
-  if (fingers != 1 || point.x < 0 || point.y < 0) return {};
+  if (!fingers) {
+    if (loggingContact) Serial.printf("[touch] release raw=%d,%d\n",x,y);
+    loggingContact = false;
+    held = false;
+    auto event = ui.touch(0, 0, 0, millis());
+    if (event.input != Input::None) {
+      Serial.printf("[ui] release action=%d target=%s offset=%lu\n", int(event.input), event.targetId.c_str(), event.start);
+      return event;
+    }
+    return ui.requestQueue();
+  }
   if (held) return {};
-  held = true;
-  const auto* hit = buttonAt(point.x, point.y);
-  Serial.printf("[touch] raw=%d,%d mapped=%d,%d fingers=%d hit=%s\n",
-                x, y, point.x, point.y, fingers, hit ? hit->title : "none");
-  if (hit) return {hit->input, ""};
-  return {};
+  const auto point = waveshareTouchPoint(x, y, calibration);
+  // Every normal gesture sample uses the saved fit; release uses its last preview.
+  static int loggedX = 0, loggedY = 0;
+  if (!loggingContact || abs(x-loggedX) >= 8 || abs(y-loggedY) >= 8) {
+    Serial.printf("[touch] raw=%d,%d mapped=%d,%d fingers=%d hit=%d\n",
+                  x, y, point.x, point.y, fingers, int(ui.hit(point.x, point.y)));
+    loggedX = x; loggedY = y;
+  }
+  loggingContact = true;
+  return ui.touch(point.x, point.y, fingers, millis());
 }
+void boardContext(const BoardContext& context) { uiContext = context; }
+
 void boardRender(const AppState& state, const std::string& notice) {
   if (!displayReady) return;
   if (edgeInset >= 0) {
@@ -338,23 +367,21 @@ void boardRender(const AppState& state, const std::string& notice) {
   (void)state; (void)notice;
   return;
 #endif
-  if (!displayReady) return;
-  const auto& observed = state.observed;
-  const auto detail = state.refreshError.empty() ? state.detail : "Refresh: " + state.refreshError;
-  std::string screen = notice + observed.playback + observed.title + state.status + detail + std::to_string(observed.stale);
-  if (screen == lastScreen) return;
-  lastScreen = screen;
-  gfx->fillScreen(RGB565_BLACK);
-  gfx->setTextColor(RGB565_WHITE);
-  gfx->setCursor(32, 32); gfx->println("sonos-surface");
-  gfx->setCursor(32, 64); gfx->println(notice.substr(0, 48).c_str());
-  gfx->setCursor(12, 96); gfx->printf("%s%s", observed.known ? observed.playback.c_str() : "Playback unknown", observed.stale ? " *" : "");
-  gfx->setCursor(12, 126); gfx->println(observed.title.substr(0, 54).c_str());
-  gfx->setCursor(12, 182); gfx->println(state.status.c_str());
-  gfx->setCursor(12, 210); gfx->println(detail.substr(0, 100).c_str());
-  for (const auto& b : buttons) button(b.x, b.y, b.title);
+  ui.update(state, uiContext, millis());
+  if (!ui.dirty) return;
+  ui.dirty = false;
+  const auto started = millis();
+  WaveshareDrawing drawing(*gfx);
+  drawing.draw(ui);
+  const auto drawn = millis();
   gfx->flush();
-  Serial.printf("[display] rendered status=%s playback=%s stale=%d\n", state.status.c_str(), observed.playback.c_str(), observed.stale);
+  Serial.printf("[ui] frame screen=%d room=%s title=%s transport=%s volume=%d position=%lu duration=%lu seek=%d queue-start=%lu readonly=%d busy=%d draw=%lu flush=%lu total=%lu poll-gap-max=%lu heap=%u psram-free=%u\n",
+    int(ui.screen), state.observed.room.c_str(), state.observed.title.c_str(), playbackLabel(state.observed.transport),
+    state.observed.volume.value_or(-1), state.observed.positionMs.value_or(0), state.observed.durationMs.value_or(0),
+    ui.canSeek(), ui.queueStart, uiContext.readOnly, uiContext.busy, drawn-started, millis()-drawn, millis()-started,
+    maxPollGap, ESP.getFreeHeap(), ESP.getFreePsram());
+  maxPollGap = 0;
+  (void)notice;
 }
 } // namespace surface::device
 #endif

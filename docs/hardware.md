@@ -1556,3 +1556,124 @@ resume control mode or proceed to a Waveshare UI milestone.
   This completes the smallest paused-state mutation checkpoint. Playing/stopped
   behavior remains a separate follow-up; returning to read-only mode has not yet
   been confirmed. No Waveshare UI or further capability milestone was started.
+
+## Waveshare frontend read-only development: 2026-09-06
+
+### Implementation and software checks
+
+- Replaced the four-button normal Waveshare screen with now-playing, room
+  selection, and a bounded four-item queue browser. Added explicit transport,
+  absolute volume/seek on release, and observed-state shuffle/repeat controls.
+  Artwork is a neutral placeholder; no download/decoder/cache was introduced.
+  [Frontend contracts and physical tests](waveshare-frontend.md) distinguish this
+  implementation from pending visible/finger acceptance.
+- UI interaction/hit rectangles and rendering live in two Waveshare device
+  headers. Runtime admits typed MusicIntent values through the existing
+  validation/policy/worker path, checks displayed target/content/revision, and
+  clears selected observations at direct room-selection admission. Neither
+  SurfaceCore nor SurfaceSonos source changed. Stick's UI/NFC code is unchanged;
+  acceptance logging moved outside the shared state lock to avoid serial
+  backpressure holding the UI task.
+- All **452 existing behavioral checks**, touch/calibration and pinned Stick
+  button suites pass under address/undefined sanitizers. New Waveshare host tests
+  exercise single-submit volume/seek drags (including zero and UINT32 timing),
+  explicit modes, room action versus playback, zero-based queue rows/pagination,
+  empty/shrunken queues, loading/error retry, source/revision mismatch, external
+  replacement, cancellation, busy/offline/stale/recovery handling, and read-only
+  feedback without invented success. Evidence: `.local/waveshare-ui-tests.log`.
+- Normal builds pass: Waveshare **1,395,743 bytes**, Stick **1,587,943 bytes**.
+  The raw touch-diagnostic variant also builds (**1,377,347 bytes**). Evidence:
+  `.local/waveshare-ui-{build,stick-build,diagnostic-build}.log`. Only Waveshare
+  was flashed; no new physical M5 NFC/button regression is claimed.
+
+### Device configuration and measured USB matrix
+
+- The connected Waveshare at `/dev/cu.usbmodem1101` was still running an older
+  hardcoded read-only image without `config-status`/room selection. Querying
+  calibration returned the exact saved CST820 fit. Its private household config
+  lacked `rooms` and `read_only`. Migrated that file to the existing household
+  Office/Living Room/Bedroom allowlist and Living Room playlist policy with
+  `read_only=true`, preserving private Wi-Fi/source values and separate touch NVS.
+  The new image initially defaulted the missing mode to true and selected no
+  rooms; after configuration upload, runtime queries verified true and the three
+  configured display IDs. No mode was changed to false.
+- Flash hash verification and application readiness passed with V2 CO5300 /
+  CST820, 368×448, the 329,728-byte PSRAM canvas, and the original calibration.
+  The USB matrix selected Bedroom → Living Room → Office and rendered independent
+  observations, with blank metadata/unknown controls between different targets.
+  Office showed **Fire**, Waxahatchee, **6,000 / 217,000 ms**, paused, volume 100.
+  Bedroom showed **Right Back to It (feat. MJ Lenderman)**, **57,000 / 273,000 ms**,
+  paused, volume 24. Living Room was stopped, volume 28, with unknown timing and
+  a stored queue of zero. These are rendered-state/USB observations, not proof
+  that physical text or hit targets are usable.
+- Bounded pages returned four items in Bedroom and Office, zero in Living Room;
+  Office offset 4 returned four, offset 24 returned three, and offset 27 returned
+  zero (total 27, revision 47). Six measured page fetches took **92–133 ms**,
+  excluding the preceding topology/state refresh. No entire queue was fetched.
+- Before every test intent, the script queried and asserted runtime read-only.
+  Play, Previous, Next, absolute Volume, Seek, queue selection, Shuffle, and
+  Repeat reached **eight dispatch guard blocks**. Pause was already satisfied
+  and needed no write. The capture contains **549 read SOAP dispatches and zero
+  mutating SOAP dispatches**; the script checked each dispatched action against
+  its read allowlist. This tests the runtime/guard using USB, while host tests
+  cover the touch-model intent generation. Physical gestures remain separate.
+- Across 96 rendered now-playing frames, draw time was **13–22 ms**, flush
+  **43–63 ms**, total **57–83 ms** (median **59 ms**). Free heap at those samples
+  ranged **179,912–205,716 bytes**; free PSRAM **8,036,640–8,050,216 bytes**, usually
+  8,050,216. These include transient network allocations, not allocation peaks
+  or a memory stress guarantee. No artwork memory/latency claim applies.
+- `peripherals-retry` completed with adapter ready=1, unchanged saved calibration,
+  continued independent Sonos reads, and no CPU reboot. The largest logged UI
+  polling gap was **448 ms**, during that deliberate peripheral reset; routine
+  frame-associated gaps were around 60–85 ms. Full-frame transfers remain the
+  main regular blocking portion of rendering. Physical short-tap usability and
+  subjective polling delay still require observation before any optimization.
+- Evidence: `.local/waveshare-ui-{before,mode,configure,matrix-flash}.log`,
+  `.local/waveshare-ui-device-{check,summary}.log`. The matrix ended with Office
+  selected and runtime true. No actual external playback change occurred in this
+  bounded capture; convergence after new external changes is host-tested and
+  remains a physical checklist item.
+
+### Final-image navigation and serial limitation
+
+- The final image, including the empty-queue offset correction and navigation-only
+  `ui-screen` diagnostic, flashed with hash verification and application readiness.
+  A later quiet serial open captured a partial ongoing read at uptime 109,861 ms
+  and then stopped producing output. A separate `config-status` query produced
+  no response over twelve seconds. This does not distinguish a silent/stalled
+  native USB interface from a stalled application; no physical screen observation
+  was available. No navigation or playback command had been sent by the failed
+  smoke check. Evidence: `.local/waveshare-ui-final-{flash,smoke}.log`,
+  `.local/waveshare-ui-smoke-diagnosis.log`.
+- The documented bounded watchdog `reset` succeeded without reflashing or erasing
+  NVS. The same image booted, reloaded its original calibration and read-only
+  configuration, and read Office independently. The stall's cause is unresolved;
+  this recovery is not a reliability fix or an assertion that the earlier
+  early-boot issue has the same cause. Evidence:
+  `.local/waveshare-ui-recovery-reset.log`.
+- After reset, USB navigation rendered Rooms → Queue → Now Playing on the actual
+  device. The queue screen fetched four items, then fetched exactly one further
+  four-item page during a 16-second window containing periodic reconciliation.
+  The test asserted that there was no rapid request loop and no mutating SOAP
+  dispatch. The room frame took **60 ms**; six queue frames took **56–87 ms**
+  including full flush, with sampled free heap **188,992–205,948 bytes** and free
+  PSRAM **8,041,764–8,050,216 bytes**. Its two page reads took **98 and 92 ms**.
+  This validates the device UI/page-worker integration, not physical navigation
+  gestures or the panel's visible pixels.
+- Final queries reverified runtime true, three configured rooms, exact saved
+  calibration, and Office selected. Evidence:
+  `.local/waveshare-ui-final-navigation{,-summary}.log`. A bounded physical
+  capture is prepared at `.local/waveshare-ui-physical.log`; its observations
+  must be reviewed separately before claiming owner acceptance.
+
+### Physical acceptance remains pending
+
+The normal frontend must still demonstrate readable pixels, calibrated centers,
+room/queue navigation, volume/seek previews and one release action, source-aware
+seek/queue selection, and response to new external changes with the owner's
+finger/visual confirmation. Serial navigation and portable gesture tests are not
+substitutes. Do not declare the frontend milestone complete or enable control
+mode from these autonomous checks. Use the
+[read-only checklist](waveshare-frontend.md#physical-read-only-checkpoint), then
+the [deliberate mutation plan](waveshare-frontend.md#deliberate-mutation-test-after-physical-acceptance)
+only after owner acceptance.

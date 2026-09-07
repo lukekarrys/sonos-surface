@@ -5,7 +5,9 @@
 This milestone adds normalized observations, absolute seek, bounded queue reads,
 and direct selection of an existing item in the active queue. M5StickS3 remains
 the development harness. No queue editor, grouping, service browser, artwork
-fetching, or new Waveshare UI is included.
+fetching, or new Waveshare UI is included in that backend milestone. The following
+[Waveshare frontend milestone](waveshare-frontend.md) consumes these contracts
+without adding UI concepts to the shared layers.
 
 The existing selected-room and policy contracts remain authoritative: configuration
 uses `roomDisplayId`, discovery resolves UUIDs, and acceptance freezes UUID and

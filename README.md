@@ -10,6 +10,10 @@ The shared core supports source selection, play/pause/next/previous, absolute an
 relative volume, shuffle, repeat, absolute seek, normalized playback metadata,
 and bounded queue reading/selection. Runtime `read_only` defaults true.
 See the [shared capability contract](docs/sonos-capabilities.md).
+The Waveshare now has a compact now-playing UI, room selector, release-to-submit
+volume/seek bars, and four-item queue pages. See the
+[frontend contract and physical checklist](docs/waveshare-frontend.md); physical
+acceptance of this new layout is pending.
 See the [Stick manual test](docs/stick-milestone-test.md) and latest
 [hardware evidence](docs/hardware.md) for measured versus pending behavior.
 
@@ -284,12 +288,16 @@ Expected application logs include `Waveshare V2 CO5300/CST820`,
 identity, and an observed title/state. Buffered rendering and calibrated center-button touches
 were owner-confirmed before this pass; repeat the short physical checklist after hardening.
 The adapter probes FT3168 at `0x38` (V1/SH8601) or CST820 at `0x15` (V2/CO5300).
-Confirm the serial revision matches the physical label. The screen has Source,
-Refresh, Play, and Pause buttons. Source submits the configured Apple Music URL
-through the same application path as NFC. Tap once per action and report touch
-coordinates, the operation log, visible state, and audible result. Begin with
-Refresh after boot recovery; test Source/Play/Pause only after confirming the
-selected configured room and `SONOS_MODE=CONTROL` in serial.
+Confirm the serial revision matches the physical label.
+
+The normal screen now shows selected room, title/artist, playback, volume, timing,
+shuffle/repeat, and runtime read-only status. Tap the room header to switch rooms;
+use Queue for four-item pages. Transport buttons and the volume/progress bars
+submit through the shared intent path on release. Artwork is a placeholder.
+See the [frontend physical checklist](docs/waveshare-frontend.md#physical-read-only-checkpoint)
+before enabling mutations on the new touch layout. USB `room-select office`
+selects without playback effects. The latest enumeration for this same Waveshare
+is `/dev/cu.usbmodem1101`; always recheck the actual port before flashing.
 
 ## Boot recovery and per-device calibration
 
@@ -404,7 +412,7 @@ Mac probe accepts `--queue-start`, `--queue-count`, `--samples`, and `--interval
 Metadata includes album, normalized artwork URL, millisecond position/duration,
 queue index/total, mute, and normalized modes/source. Artwork is never downloaded.
 
-USB commands (newline terminated): `rooms`, `room-next`, `status`, `source`,
+USB commands (newline terminated): `rooms`, `room-next`, `room-select DISPLAY_ID`, `status`, `source`,
 `play`, `pause`, `toggle`, `next`, `previous`, `reboot`, a bare Apple URL, or v1 intent JSON.
 Settings controls use v1 JSON, for example:
 

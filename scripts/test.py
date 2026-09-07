@@ -32,3 +32,11 @@ subprocess.run(['clang++', '-std=c++17', '-Wall', '-Wextra', '-Werror', '-g',
                 str(buttons / 'utility/Button_Class.cpp'),
                 str(ROOT / 'tests/stick_button_test.cpp'), '-o', str(BUILD / 'stick_button_test')], check=True)
 subprocess.run([str(BUILD / 'stick_button_test')], check=True)
+
+subprocess.run(['clang++', '-std=c++17', '-Wall', '-Wextra', '-Werror', '-g',
+                '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
+                '-I' + str(ROOT / 'libraries/SurfaceDevice/src'),
+                *['-I' + str(p) for p in includes],
+                *map(str, sorted((ROOT / 'libraries/SurfaceCore/src').glob('*.cpp'))),
+                str(ROOT / 'tests/waveshare_ui_test.cpp'), '-o', str(BUILD / 'waveshare_ui_test')], check=True)
+subprocess.run([str(BUILD / 'waveshare_ui_test')], check=True)

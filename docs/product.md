@@ -11,7 +11,9 @@ safe vertical slice and its extension points, not a complete Sonos library.
 Implementation progress and measured evidence live in [hardware.md](hardware.md).
 The current [shared capability milestone](sonos-capabilities.md) adds timing,
 metadata/artwork references, bounded queue reads, seek, and active-queue selection
-without new physical UI work.
+as the shared backend. The [Waveshare frontend](waveshare-frontend.md) now adds
+now-playing, room selection, volume/seek, and bounded queue selection; its new
+physical visual/touch acceptance is pending.
 Playback state uses polling; topology notifications invalidate the selectable-room list.
 Unsupported explicit v1 capabilities reject before mutation. Both device playback paths now have physical evidence:
 M5 NFC playback and calibrated Waveshare button control are owner-confirmed.
@@ -24,7 +26,7 @@ validation of the hardened adapters remain limitations. See
 | Available target | Product capability | Later expansion |
 | --- | --- | --- |
 | M5StickS3 + M5Stack NFC Universal Unit (ST25R3916) | NFC music-card reading/writing, small playback UI, local browser editor/configuration | More family card features |
-| Waveshare ESP32-S3-Touch-AMOLED-1.8 | Touch controller, playback state, artwork, volume, transport, queue browsing | Queue selection/editing; microphone voice input |
+| Waveshare ESP32-S3-Touch-AMOLED-1.8 | Touch controller, playback state, artwork, volume, transport, queue browsing/selection | Queue editing; microphone voice input |
 | Real household Sonos speakers | Direct device control and empirical validation | Multiple controllers targeting the same speaker |
 | Optional Mac mini | Mac tests and diagnostic/reference tools | Speech-to-text and curated Apple Music name resolution |
 
