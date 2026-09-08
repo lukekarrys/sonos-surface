@@ -1,4 +1,4 @@
-#if defined(SURFACE_WAVESHARE) && !SURFACE_TOUCH_DIAGNOSTIC
+#if defined(SURFACE_WAVESHARE_1_8) && !SURFACE_TOUCH_DIAGNOSTIC
 #include "WaveshareArtwork.h"
 #include "ArtworkState.h"
 #include <Arduino.h>

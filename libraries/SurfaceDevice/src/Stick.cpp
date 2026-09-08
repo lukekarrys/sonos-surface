@@ -1,4 +1,4 @@
-#if defined(SURFACE_STICK)
+#if defined(SURFACE_STICK_S3)
 #include "SurfaceDevice.h"
 #include <M5Unified.h>
 #include <M5UnitUnified.h>

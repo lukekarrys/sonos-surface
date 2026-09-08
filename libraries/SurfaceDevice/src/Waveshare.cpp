@@ -1,4 +1,4 @@
-#if defined(SURFACE_WAVESHARE)
+#if defined(SURFACE_WAVESHARE_1_8)
 #include "SurfaceDevice.h"
 #include "TouchCoordinates.h"
 #include "WaveshareDrawing.h"

@@ -843,7 +843,7 @@ void loop() {
     lastRender = millis();
     xSemaphoreTake(stateMutex, portMAX_DELAY);
     auto state = sharedState;
-#if defined(SURFACE_WAVESHARE)
+#if defined(SURFACE_WAVESHARE_1_8)
     BoardContext context;
     context.rooms = selection.rooms;
 #endif
@@ -853,7 +853,7 @@ void loop() {
       notice = "Ready";
       transientNotice = false;
     }
-#if defined(SURFACE_WAVESHARE)
+#if defined(SURFACE_WAVESHARE_1_8)
     context.readOnly = config.readOnly;
     context.online = online;
     context.busy = busy.load();

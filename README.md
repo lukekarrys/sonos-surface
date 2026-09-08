@@ -40,12 +40,12 @@ npm installs TypeScript, Node type definitions, Prettier, and serialport. Setup 
 | Task | Purpose |
 | --- | --- |
 | `node --run check` | Typecheck, Prettier check, clang-format check, host fixtures and C++ tests under address/undefined-behavior sanitizers; host warnings are errors |
-| `node --run check:full` | Everything in check, then Stick and Waveshare firmware builds with Arduino `--warnings more` |
+| `node --run check:full` | Everything in check, then `stick-s3` and `ws-1.8` firmware builds with Arduino `--warnings more` |
 | `node --run test` | Host TypeScript fixtures and sanitizer-backed portable C++ tests; no Sonos or physical devices |
 | `node --run typecheck` | Static TypeScript checking with no emit |
 | `node --run format`, `node --run format:check` | Write/check Prettier formatting for supported text formats |
 | `node --run format:cpp`, `node --run format:cpp:check` | Write/check clang-format for owned C++, headers, and sketch |
-| `node --run build:stick`, `node --run build:waveshare` | Build the selected firmware |
+| `node --run build:stick-s3`, `node --run build:ws-1.8` | Build the selected firmware |
 
 Prettier owns all repository Markdown with `proseWrap: "never"`, so paragraphs are not hard wrapped. Formatting excludes generated, private, and vendor trees. Check tasks never rewrite files. Both firmware targets must build without warnings in owned code. Pinned M5Unified 0.2.21 and M5GFX 0.2.28 emit unused-function/unused-variable warnings in their own sources under `more`; these remain visible and do not fail the owned-code warning check. All commands live in package.json and run through `node --run`; VS Code is optional.
 
@@ -59,11 +59,11 @@ Install the recommended Microsoft C/C++ extension. Run:
 
 ```sh
 node --run cpp:configure
-node --run cpp:configure -- stick
-node --run cpp:configure -- waveshare
+node --run cpp:configure -- stick-s3
+node --run cpp:configure -- ws-1.8
 ```
 
-Each command replaces `.build/compile_commands.json` with Arduino CLI's real compiler commands for one active target. Stick is the default. Choose Waveshare when editing its hardware/UI code; the target defines intentionally differ. The generator maps Arduino's copied library sources and generated sketch back to the owned files so the editor uses their actual compiler, response files, defines, and includes. GCC response files are expanded, and prefix-relative include flags become equivalent absolute include paths for Microsoft C/C++. VS Code consumes that exact canonical path. Regenerate after changing toolchain pins or compiler options; quick checks do not regenerate it.
+Each command replaces `.build/compile_commands.json` with Arduino CLI's real compiler commands for one active target. `stick-s3` is the default. Choose `ws-1.8` when editing its hardware/UI code; the target defines intentionally differ. The generator maps Arduino's copied library sources and generated sketch back to the owned files so the editor uses their actual compiler, response files, defines, and includes. GCC response files are expanded, and prefix-relative include flags become equivalent absolute include paths for Microsoft C/C++. VS Code consumes that exact canonical path. Regenerate after changing toolchain pins or compiler options; quick checks do not regenerate it.
 
 ## Configuration
 
@@ -76,7 +76,7 @@ node --run probe -- --ip SPEAKER_IP --uid RINCON_SPEAKER_ID
 
 `node --run probe` uses the shared C++ adapter and permanently blocks mutations. Discovery requires multicast replies and a readable Sonos topology. If discovery fails, the controller reports an error and blocks playback. Allow local network access if macOS prompts. `node --run probe -- --ip` is a separate read-only diagnostic.
 
-Environment profiles live in `config/`: `default.json` is read-only and `luke.json` describes the shared household environment with `read_only: false`. Either profile can configure either board. The board argument selects firmware; `--config` selects the environment. Speaker addresses come from discovery.
+Environment profiles live in `config/`: `default.json` is read-only and `luke.json` describes the shared household environment with `read_only: false`. Either profile can configure either hardware target. Speaker addresses come from discovery.
 
 To define another environment, copy a profile to any filename. Filenames are arbitrary labels and have no runtime semantics. Only `rooms` inside the JSON determines Sonos targeting. Profiles use the current device config shape:
 
@@ -112,18 +112,27 @@ Deployment guidance: configure Sonos's own per-room maximum-volume setting as th
 
 ## Flash and configure
 
-Connect the intended board, close other serial monitors, and enumerate ports:
+Hardware target = hardware model (`stick-s3` for M5StickS3, `ws-1.8` for Waveshare ESP32-S3-Touch-AMOLED-1.8); `--config` = runtime/device profile; `--port` = physical connected unit. Profile filenames such as `config/luke.json`, `config/kids-room.json`, or `config/kids-room-2.json` are arbitrary and do not select hardware, USB devices, or Sonos rooms. The same profile can be used with either target. Build facts live in the typed registry in `scripts/hardware-targets.ts`; generated output uses `.build/stick-s3-runtime`, `.build/ws-1.8-runtime`, and `.build/ws-1.8-touch`.
+
+Connect the intended units, close other serial monitors, and enumerate ports:
 
 ```sh
 node --run ports
-node --run flash:stick -- --port STICK_PORT --config config/luke.json
-node --run flash:waveshare -- --port WAVESHARE_PORT --config config/luke.json
+node --run flash:stick-s3 -- --port STICK_PORT --config config/luke.json
+node --run flash:ws-1.8 -- --port WAVESHARE_PORT --config config/luke.json
+```
+
+`ports` lists serial paths and available USB metadata, including manufacturer and serial number. Choose each port explicitly; tooling does not match ports to targets or profiles. Two identical models use the same target and are flashed sequentially, for example:
+
+```sh
+node --run flash:ws-1.8 -- --port /dev/cu.usbmodem101 --config config/foo.json
+node --run flash:ws-1.8 -- --port /dev/cu.usbmodem102 --config config/bar.json
 ```
 
 `flash --config PATH` resolves and checks the profile first, builds the selected firmware, flashes, waits for application readiness, uploads the resolved profile, then queries and verifies config status after reboot. Any profile path is accepted, including paths outside `config/`. `--env-file PATH` works with either command:
 
 ```sh
-node --run flash:stick -- --port STICK_PORT --config config/test-environment.json --env-file /path/to/secrets.env
+node --run flash:stick-s3 -- --port STICK_PORT --config config/test-environment.json --env-file /path/to/secrets.env
 ```
 
 Configure an already running device without flashing:
@@ -136,9 +145,9 @@ node --run configure -- --port STICK_PORT --config /path/to/profile.json --env-f
 
 `node --run configure` defaults to repo-root `config/default.json`, which is read-only. The default environment-file path is also relative to the repository, independent of the working directory. Explicit relative paths resolve from the working directory.
 
-**Flash always builds the requested current firmware before uploading and waiting for application readiness. Without `--config`, it preserves the current device configuration.** When `--config` is supplied, profile/env preflight runs before the build or any USB access, and the profile is applied and verified after readiness. To inspect the application afterward, use `node --run monitor -- --device BOARD --port PORT`.
+**Flash always builds the requested current firmware before uploading and waiting for application readiness. Without `--config`, it preserves the current device configuration.** When `--config` is supplied, profile/env preflight runs before the build or any USB access, and the profile is applied and verified after readiness. To inspect the application afterward, use `node --run monitor -- TARGET --port PORT`.
 
-Ports can change; identify the board before flashing. Flash verifies hashes, uses watchdog reset at 115200 baud, then checks application READY or an idle heartbeat. Application readiness does not by itself prove working peripherals or visible pixels. A failed build/flash never proceeds to profile upload.
+Ports can change; identify the connected unit before flashing. Flash verifies hashes, uses watchdog reset at 115200 baud, then checks application READY or an idle heartbeat. Application readiness does not by itself prove working peripherals or visible pixels. A failed build/flash never proceeds to profile upload.
 
 Config upload validates before replacement, advances the local revision, and reboots. Busy/invalid updates reject. The host verifies the new revision, read-only mode, and room exceptions through a fresh `config-status` query; that response does not expose Wi-Fi credentials, so credentials are not read back for comparison. Household JSON persists in `surface/config`; preferred display ID in `surface/preferred-id`; calibration separately in `surface/touch`. Upload does not erase calibration. Credentials are not printed or compiled into firmware; prototype NVS is not encrypted. `.local/` holds private logs and temporary captures.
 
@@ -183,15 +192,15 @@ M5 A single-click refreshes; A double-click cycles rooms; B toggles using a fres
 
 Waveshare uses release-to-submit transport/mode/volume/seek controls and four-item queue pages. USB `ui-screen now|rooms|queue` navigates its normal screens without touch or playback. Hardware diagnostics include `touch-calibration`, `touch-calibration {JSON}`, `peripherals-retry`, `display-edge N [R]`, and `display-edge off`. See the [frontend contract](docs/waveshare-frontend.md).
 
-Logs stream over USB only; there is no stored history after unplugging. For a bounded capture use `node --run monitor -- --device BOARD --port PORT --seconds 30`, redirecting output to a private `.local` log. Live laptop capture is needed for battery tests.
+Logs stream over USB only; there is no stored history after unplugging. For a bounded capture use `node --run monitor -- TARGET --port PORT --seconds 30`, redirecting output to a private `.local` log. Live laptop capture is needed for battery tests.
 
 ## Boot recovery and per-device calibration
 
 The serial helper avoids explicit DTR/RTS writes and disables hangup-on-close through serialport; control-line changes have caused native USB resets on this Mac. Other monitors may reset on open. For an idle app use `reboot`; for a stalled interface use the bounded watchdog-reset tool without flash writes:
 
 ```sh
-node --run reboot -- --device waveshare --port BOARD_PORT
-node --run reset -- --device waveshare --port BOARD_PORT
+node --run reboot -- ws-1.8 --port BOARD_PORT
+node --run reset -- ws-1.8 --port BOARD_PORT
 ```
 
 If serial already reports `waiting for download`, use `reset ... --download-mode`. A ROM entry line does not prove application startup. If bounded reset cannot connect, physical power recovery may be required; see [hardware](docs/hardware.md#usb-boot-power-and-networking-limits). Do not erase NVS or repeatedly flash to diagnose a pre-application stall.
@@ -207,9 +216,9 @@ node --run calibrate -- --port BOARD_PORT
 To calibrate another unit, keep runtime read_only true and flash raw diagnostics:
 
 ```sh
-node --run build:waveshare -- --touch-diagnostic
-node --run flash:waveshare -- --touch-diagnostic --port BOARD_PORT
-node --run monitor -- --device waveshare --port BOARD_PORT > .local/touch-samples.log
+node --run build:ws-1.8 -- --touch-diagnostic
+node --run flash:ws-1.8 -- --touch-diagnostic --port BOARD_PORT
+node --run monitor -- ws-1.8 --port BOARD_PORT > .local/touch-samples.log
 ```
 
 Tap and release each of six white plus centers; stop capture after Done. Diagnostics stay raw and disable touch actions; USB commands still use the normal runtime gate. Fit, review the residual/JSON, upload, and verify retention:
@@ -217,7 +226,7 @@ Tap and release each of six white plus centers; stop capture after Done. Diagnos
 ```sh
 node --run calibrate -- --samples .local/touch-samples.log --controller 0x15 --output .local/touch.json
 node --run calibrate -- --port BOARD_PORT --file .local/touch.json
-node --run reboot -- --device waveshare --port BOARD_PORT
+node --run reboot -- ws-1.8 --port BOARD_PORT
 node --run calibrate -- --port BOARD_PORT
 ```
 

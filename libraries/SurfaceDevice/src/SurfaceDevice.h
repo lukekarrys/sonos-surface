@@ -30,7 +30,7 @@ struct BoardContext {
   bool readOnly = true, online = false, busy = false;
   std::string feedback;
 };
-#if defined(SURFACE_WAVESHARE)
+#if defined(SURFACE_WAVESHARE_1_8)
 void boardContext(const BoardContext& context);
 #endif
 bool boardBegin(std::string& notice);

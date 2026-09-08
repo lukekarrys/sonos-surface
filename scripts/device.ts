@@ -18,26 +18,17 @@ import type { Profile } from "./config-profile.ts";
 import { configureDevice } from "./configure.ts";
 import { listPorts, openPort, readyPort, request } from "./serial-device.ts";
 
-export type Board = "stick" | "waveshare";
-export function boardName(value: string): Board {
-  if (value !== "stick" && value !== "waveshare")
-    throw new Error("Device must be stick or waveshare");
-  return value;
-}
-export function buildPath(board: Board, touch = false) {
-  return join(ROOT, ".build", `${board}-${touch ? "touch" : "runtime"}`);
-}
-export function fqbn(board: Board) {
-  return (
-    "esp32:esp32:esp32s3:USBMode=hwcdc,CDCOnBoot=cdc,PSRAM=opi,UploadSpeed=460800," +
-    (board === "stick"
-      ? "FlashSize=8M,PartitionScheme=default_8MB"
-      : "FlashSize=16M,PartitionScheme=app3M_fat9M_16MB")
-  );
-}
+import {
+  hardwareTargets,
+  hardwareTargetId,
+  buildPath,
+  fqbn,
+} from "./hardware-targets.ts";
+import type { HardwareTargetId } from "./hardware-targets.ts";
+
 const sketch = join(ROOT, "firmware/sonos_surface");
 export function compileArguments(
-  board: Board,
+  targetId: HardwareTargetId,
   touch = false,
   database = false,
 ) {
@@ -46,15 +37,15 @@ export function compileArguments(
     CONFIG,
     "compile",
     "--fqbn",
-    fqbn(board),
+    fqbn(targetId),
     "--libraries",
     join(ROOT, "libraries"),
     "--build-path",
-    buildPath(board, touch),
+    buildPath(targetId, touch),
     "--warnings",
     "more",
     "--build-property",
-    `compiler.cpp.extra_flags=-std=gnu++17 -DSURFACE_${board.toUpperCase()} -DSURFACE_TOUCH_DIAGNOSTIC=${Number(touch)}`,
+    `compiler.cpp.extra_flags=-std=gnu++17 -D${hardwareTargets[targetId].define} -DSURFACE_TOUCH_DIAGNOSTIC=${Number(touch)}`,
     "--build-property",
     'compiler.cpp.flags=-MMD -c "@{compiler.sdk.path}/flags/cpp_flags" {compiler.warning_flags} {compiler.optimization_flags} {compiler.common_werror_flags} -std=gnu++17',
     "--build-property",
@@ -63,9 +54,9 @@ export function compileArguments(
     sketch,
   ];
 }
-export async function build(board: Board, touch = false) {
+export async function build(targetId: HardwareTargetId, touch = false) {
   let diagnostics = "";
-  await run("arduino-cli", compileArguments(board, touch), {
+  await run("arduino-cli", compileArguments(targetId, touch), {
     onOutput: (text) => {
       diagnostics += text;
     },
@@ -77,7 +68,7 @@ export async function build(board: Board, touch = false) {
         (line) =>
           (line.includes(`${ROOT}/libraries/`) ||
             line.includes(`${ROOT}/firmware/`) ||
-            line.includes(`${buildPath(board, touch)}/sketch/`)) &&
+            line.includes(`${buildPath(targetId, touch)}/sketch/`)) &&
           line.includes("warning:"),
       )
   )
@@ -155,7 +146,7 @@ export function editorArguments(
 }
 export function editorDatabase(
   entries: CompileCommand[],
-  board: Board,
+  targetId: HardwareTargetId,
 ): CompileCommand[] {
   entries = entries.map((entry) => ({
     ...entry,
@@ -205,7 +196,7 @@ export function editorDatabase(
     const flags = entry.arguments.join(" ");
     if (
       !entry.arguments[0].includes("xtensa-esp32s3-elf-g++") ||
-      !flags.includes(`-DSURFACE_${board.toUpperCase()}`) ||
+      !entry.arguments.includes(`-D${hardwareTargets[targetId].define}`) ||
       !flags.includes("/cores/esp32") ||
       !flags.includes("SurfaceJson")
     )
@@ -215,9 +206,9 @@ export function editorDatabase(
   }
   return mapped;
 }
-export async function configureCpp(board: Board) {
+export async function configureCpp(targetId: HardwareTargetId) {
   let diagnostics = "";
-  await run("arduino-cli", compileArguments(board, false, true), {
+  await run("arduino-cli", compileArguments(targetId, false, true), {
     onOutput: (text) => {
       diagnostics += text;
     },
@@ -228,33 +219,42 @@ export async function configureCpp(board: Board) {
       "Arduino library discovery failed; editor database was not replaced",
     );
   const entries = JSON.parse(
-    readFileSync(join(buildPath(board), "compile_commands.json"), "utf8"),
+    readFileSync(join(buildPath(targetId), "compile_commands.json"), "utf8"),
   ) as CompileCommand[];
-  const database = editorDatabase(entries, board);
+  const database = editorDatabase(entries, targetId);
   const target = join(ROOT, ".build/compile_commands.json");
   writeFileSync(`${target}.tmp`, JSON.stringify(database, null, 2) + "\n");
   renameSync(`${target}.tmp`, target);
   console.log(
-    `C++ editor target: ${board}. Verified owned library and firmware entries in .build/compile_commands.json.`,
+    `C++ editor target: ${targetId}. Verified owned library and firmware entries in .build/compile_commands.json.`,
   );
 }
-function hardwareDirectory(board: Board, touch = false): string {
+function hardwareDirectory(targetId: HardwareTargetId, touch = false): string {
   const options = JSON.parse(
-    readFileSync(join(buildPath(board, touch), "build.options.json"), "utf8"),
+    readFileSync(
+      join(buildPath(targetId, touch), "build.options.json"),
+      "utf8",
+    ),
   ) as { hardwareFolders: string; customBuildProperties: string };
   if (
     !options.customBuildProperties
       .split(/[ ,]+/)
-      .includes(`-DSURFACE_${board.toUpperCase()}`)
+      .includes(`-D${hardwareTargets[targetId].define}`)
   )
-    throw new Error("Built image board differs; rebuild before flashing");
+    throw new Error(
+      "Built image hardware target differs; rebuild before flashing",
+    );
   return options.hardwareFolders.split(",")[0];
 }
-export async function upload(board: Board, port: string, touch = false) {
-  if (!existsSync(join(buildPath(board, touch), "sonos_surface.ino.bin")))
-    throw new Error(`Build first: node --run build:${board}`);
+export async function upload(
+  targetId: HardwareTargetId,
+  port: string,
+  touch = false,
+) {
+  if (!existsSync(join(buildPath(targetId, touch), "sonos_surface.ino.bin")))
+    throw new Error(`Build first: node --run build:${targetId}`);
   const platform = join(
-    hardwareDirectory(board, touch),
+    hardwareDirectory(targetId, touch),
     `esp32/hardware/esp32/${CORE_VERSION}/platform.txt`,
   );
   const prefix = "tools.esptool_py.upload.pattern_args=";
@@ -270,11 +270,11 @@ export async function upload(board: Board, port: string, touch = false) {
     CONFIG,
     "upload",
     "--fqbn",
-    fqbn(board),
+    fqbn(targetId),
     "--port",
     port,
     "--input-dir",
-    buildPath(board, touch),
+    buildPath(targetId, touch),
     "--upload-property",
     recipe
       .replace(prefix, "upload.pattern_args=")
@@ -302,7 +302,7 @@ const operations: FlashOperations = {
   configure: configureDevice,
 };
 export async function flash(
-  board: Board,
+  targetId: HardwareTargetId,
   port: string,
   config?: string,
   envFile?: string,
@@ -313,10 +313,10 @@ export async function flash(
     throw new Error("--env-file requires --config when flashing");
   // Resolve before builds, USB access, or writes. Never place credentials in process args.
   const profile = config ? loadProfile(config, envFile) : undefined;
-  await ops.build(board, touch);
+  await ops.build(targetId, touch);
   let uploadError: unknown;
   try {
-    await ops.upload(board, port, touch);
+    await ops.upload(targetId, port, touch);
   } catch (error) {
     uploadError = error;
   }
@@ -370,15 +370,15 @@ export async function monitor(name: string, seconds: number) {
 }
 export async function device(argv = process.argv.slice(2)) {
   const { values, positionals } = cli(
-    ["port", "device", "seconds", "config", "env-file"],
+    ["port", "seconds", "config", "env-file"],
     ["download-mode", "touch-diagnostic"],
     argv,
   );
   if (values.help)
     return console.log(
-      "node --run build:stick|build:waveshare|flash:stick|flash:waveshare -- [--port PORT] [--config PATH] [--env-file PATH] [--touch-diagnostic]\nnode --run cpp:configure -- [stick|waveshare]\nnode --run monitor|reset|reboot -- --device stick|waveshare --port PORT [--seconds N] [--download-mode]\nnode --run ports",
+      `node --run build:TARGET|flash:TARGET -- [--port PORT] [--config PATH] [--env-file PATH] [--touch-diagnostic]\nnode --run cpp:configure -- [TARGET]\nnode --run monitor|reset|reboot -- TARGET --port PORT [--seconds N] [--download-mode]\nnode --run ports\nHardware targets: ${Object.keys(hardwareTargets).join(", ")}`,
     );
-  const [action, positionalBoard, ...extra] = positionals;
+  const [action, positionalTarget, ...extra] = positionals;
   if (
     ![
       "build",
@@ -391,32 +391,37 @@ export async function device(argv = process.argv.slice(2)) {
     ].includes(action)
   )
     throw new Error("Unknown device action");
-  if (extra.length || (positionalBoard && values.device))
-    throw new Error("Unexpected or duplicate device argument");
+  if (extra.length) throw new Error("Unexpected hardware target argument");
   if (action === "ports") {
+    if (positionalTarget)
+      throw new Error("ports does not take a hardware target");
     console.log(JSON.stringify(await listPorts(), null, 2));
     return;
   }
-  const board = boardName(
-    positionalBoard ??
-      stringOption(values.device) ??
-      (action === "cpp:configure" ? "stick" : ""),
+  const targetId = hardwareTargetId(
+    positionalTarget ?? (action === "cpp:configure" ? "stick-s3" : ""),
   );
   const touch = Boolean(values["touch-diagnostic"]);
-  if (touch && (board !== "waveshare" || !["build", "flash"].includes(action)))
-    throw new Error("--touch-diagnostic requires a Waveshare build or flash");
+  if (
+    touch &&
+    (!hardwareTargets[targetId].touchDiagnostic ||
+      !["build", "flash"].includes(action))
+  )
+    throw new Error(
+      "--touch-diagnostic requires a supported hardware target build or flash",
+    );
   if (values["download-mode"] && action !== "reset")
     throw new Error("--download-mode is only for reset");
   if ((values.config || values["env-file"]) && action !== "flash")
     throw new Error("--config and --env-file are only for flash");
   if (values.seconds !== undefined && action !== "monitor")
     throw new Error("--seconds is only for monitor");
-  if (action === "build") return build(board, touch);
-  if (action === "cpp:configure") return configureCpp(board);
+  if (action === "build") return build(targetId, touch);
+  if (action === "cpp:configure") return configureCpp(targetId);
   const port = required(values.port, "port");
   if (action === "flash")
     return flash(
-      board,
+      targetId,
       port,
       stringOption(values.config),
       stringOption(values["env-file"]),
@@ -435,7 +440,7 @@ export async function device(argv = process.argv.slice(2)) {
           "board",
           "details",
           "--fqbn",
-          fqbn(board),
+          fqbn(targetId),
           "--format",
           "json",
         ],
