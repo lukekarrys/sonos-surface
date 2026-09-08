@@ -29,12 +29,13 @@ struct Completed {
 };
 QueueHandle_t requests = nullptr, completions = nullptr;
 std::atomic<uint32_t> wanted{0};
+std::atomic<bool> stopping{false};
 ArtworkState state;
 Buffer<uint16_t> visible;
 bool running = false, started = false;
 uint32_t startRetry = 0;
 
-bool current(uint32_t token) { return wanted.load() == token; }
+bool current(uint32_t token) { return !stopping.load() && wanted.load() == token; }
 class Download : public Stream {
   uint8_t* buffer;
   uint32_t token, deadline;
@@ -88,7 +89,7 @@ Buffer<uint16_t> load(const Request& request) {
       error = "HTTP begin";
       break;
     }
-    const auto status = http.GET();
+    const auto status = current(request.token) ? http.GET() : 0;
     Download sink(input.get(), request.token, began + 6000);
     const int expected = http.getSize();
     const auto read =
@@ -166,6 +167,8 @@ Buffer<uint16_t> load(const Request& request) {
 }
 void worker(void*) {
   for (;;) {
+    if (stopping.load())
+      vTaskSuspend(nullptr);
     Request* request = nullptr;
     if (xQueueReceive(requests, &request, portMAX_DELAY) != pdTRUE)
       continue;
@@ -200,6 +203,8 @@ bool beginWorker(uint32_t now) {
 }
 } // namespace
 bool artworkUpdate(const PlaybackState& observed, bool online, uint32_t now) {
+  if (stopping.load())
+    return false;
   bool changed = state.select(observed);
   if (changed) {
     wanted.store(state.generation);
@@ -231,5 +236,6 @@ bool artworkUpdate(const PlaybackState& observed, bool online, uint32_t now) {
   return changed;
 }
 const uint16_t* artworkPixels() { return visible.get(); }
+void artworkStop() { stopping.store(true); }
 } // namespace surface::device
 #endif

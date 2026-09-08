@@ -17,6 +17,11 @@ export function hostTestTargets(): HostTarget[] {
     : join(DEPS, "host/M5Buttons/src");
   return [
     { name: "core_test", sources: sharedSources(), includes },
+    {
+      name: "power_test",
+      sources: coreSources(),
+      includes: [deviceInclude, ...includes],
+    },
     { name: "touch_test", sources: [], includes: [deviceInclude, includes[2]] },
     {
       name: "stick_button_test",

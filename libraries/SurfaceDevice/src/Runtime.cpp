@@ -1,5 +1,8 @@
 #include "SurfaceDevice.h"
 #include "RoomConfig.h"
+#if defined(SURFACE_WAVESHARE_1_8) && !SURFACE_TOUCH_DIAGNOSTIC
+#include "WaveshareArtwork.h"
+#endif
 #include <SurfaceSonos.h>
 #include <surface_json.hpp>
 #include <Arduino.h>
@@ -20,6 +23,7 @@ using Json = nlohmann::json;
 struct Config {
   std::string ssid, password, appleRegion = "52231";
   bool readOnly = true;
+  uint32_t sleepTimeoutSeconds = defaultSleepTimeoutSeconds;
   uint32_t revision = 1;
   RoomConfig rooms;
   SourcePolicy policy;
@@ -28,6 +32,8 @@ Preferences preferences;
 SemaphoreHandle_t stateMutex;
 QueueHandle_t jobs;
 std::atomic<bool> busy{false};
+std::atomic<bool> stopping{false};
+DevicePower power;
 AppState sharedState;
 RoomSelection selection;
 std::string savedPreference;
@@ -48,6 +54,8 @@ struct Job {
 };
 void log(const std::string& message) { Serial.printf("[%lu] %s\n", millis(), message.c_str()); }
 void publish(const AppState& state) {
+  if (stopping.load())
+    return;
   xSemaphoreTake(stateMutex, portMAX_DELAY);
   // An accepted request may finish after topology switches the selection.
   // Keep its outcome in its Session; never publish it as the new room's state.
@@ -66,7 +74,8 @@ bool parseConfig(const std::string& text, Config& output) {
   Config c;
   c.ssid = json.value("wifi_ssid", "");
   c.password = json.value("wifi_password", "");
-  if (!parseDeviceRooms(json, c.readOnly, c.rooms, c.policy))
+  if (!parseDeviceRooms(json, c.readOnly, c.rooms, c.policy) ||
+      !parseSleepTimeout(json, c.sleepTimeoutSeconds))
     return false;
   c.appleRegion = json.value("apple_region", "52231");
   if (c.ssid.size() > 32 || c.password.size() > 63)
@@ -89,6 +98,8 @@ protected:
   }
   HttpResponse dispatch(const std::string& path, const std::string& action,
                         const std::string& body) override {
+    if (stopping.load())
+      return {0, "", "Device entering sleep", true};
     if (WiFi.status() != WL_CONNECTED)
       return {0, "", "WiFi disconnected", true};
     if (host.empty())
@@ -101,6 +112,12 @@ protected:
     if (!http.begin(url.c_str()))
       return {0, "", "HTTP begin failed", true};
     log("Sonos " + host + " " + (action.empty() ? "GET " + path : action));
+    // This is the last admission boundary, including identity reads. A request
+    // admitted before shutdown can already be on the wire; never replay it.
+    if (stopping.load()) {
+      http.end();
+      return {0, "", "Device entering sleep", true};
+    }
     int status;
     if (action.empty())
       status = http.GET();
@@ -145,7 +162,7 @@ protected:
 // current names, addresses, and eligibility; configured room keys select targets.
 std::vector<std::string> discoverAddresses() {
   // A manual status/rooms request must also be safe before configuration.
-  if (WiFi.status() != WL_CONNECTED)
+  if (stopping.load() || WiFi.status() != WL_CONNECTED)
     return {};
   std::set<std::string> hosts;
   WiFiUDP udp;
@@ -157,7 +174,7 @@ std::vector<std::string> discoverAddresses() {
     udp.write(reinterpret_cast<const uint8_t*>(search), strlen(search));
     udp.endPacket();
     const auto start = millis();
-    while (millis() - start < 1800) {
+    while (!stopping.load() && millis() - start < 1800) {
       if (udp.parsePacket()) {
         char packet[2049]{};
         const int n = udp.read(packet, 2048);
@@ -195,7 +212,7 @@ public:
   bool poll() {
     // Invalid/missing configuration must remain recoverable over USB. The ESP
     // network socket locks do not exist until Wi-Fi has initialized the stack.
-    if (WiFi.status() != WL_CONNECTED)
+    if (stopping.load() || WiFi.status() != WL_CONNECTED)
       return false;
     if (!listening) {
       server.begin();
@@ -235,7 +252,7 @@ public:
     return valid;
   }
   void ensure(const std::string& address) {
-    if (address.empty() || WiFi.status() != WL_CONNECTED) {
+    if (stopping.load() || address.empty() || WiFi.status() != WL_CONNECTED) {
       sid.clear();
       renewAt = 0;
       return;
@@ -259,7 +276,7 @@ public:
       http.addHeader("NT", "upnp:event");
     } else
       http.addHeader("SID", sid.c_str());
-    const int status = http.sendRequest("SUBSCRIBE");
+    const int status = stopping.load() ? 0 : http.sendRequest("SUBSCRIBE");
     if (status == 200) {
       sid = http.header("SID").c_str();
       const String timeout = http.header("TIMEOUT");
@@ -274,6 +291,12 @@ public:
     log("topology subscription http=" + std::to_string(status));
     http.end();
   }
+  void stop() {
+    if (listening)
+      server.end();
+    listening = false;
+    sid.clear(); // No blocking UNSUBSCRIBE; publisher's lease expires normally.
+  }
 };
 void worker(void*) {
   TopologyEvents events;
@@ -281,6 +304,10 @@ void worker(void*) {
   std::map<std::string, std::unique_ptr<Session>> sessions;
   std::string discoveryHost; // Learned by SSDP in this process; never configured or persisted.
   for (;;) {
+    if (stopping.load()) {
+      events.stop();
+      vTaskSuspend(nullptr); // Deep sleep ends this task; it is never resumed.
+    }
     Job* job = nullptr;
     if (WiFi.status() != WL_CONNECTED)
       events.ensure("");
@@ -431,6 +458,8 @@ void submit(const std::string& payload, bool refresh = false, bool cycle = false
             bool announce = true,
             std::optional<std::pair<uint32_t, uint32_t>> queuePage = std::nullopt,
             const BoardEvent* uiEvent = nullptr) {
+  if (stopping.load())
+    return;
   const std::string input = cycle ? "room-next" : refresh ? "refresh" : "intent";
   if (busy.exchange(true)) {
     if (announce) {
@@ -509,6 +538,8 @@ void submit(const std::string& payload, bool refresh = false, bool cycle = false
 // Direct room selection uses only the existing configured/eligible projection.
 // Admission clears displayed state immediately; discovery/read runs on the worker.
 void selectRoom(const std::string& displayId) {
+  if (stopping.load())
+    return;
   if (busy.exchange(true)) {
     notice = "Busy - try again";
     transientNotice = true;
@@ -553,6 +584,8 @@ void selectRoom(const std::string& displayId) {
   transientNotice = true;
 }
 void submitToggle() {
+  if (stopping.load())
+    return;
   if (busy.exchange(true)) {
     notice = "Busy; input ignored";
     transientNotice = true;
@@ -622,6 +655,8 @@ void preview(const std::string& payload) {
   log("PREVIEW_ONLY planned effects=" + effects);
 }
 void handle(const std::string& line) {
+  if (stopping.load())
+    return;
   if (line == "reboot") {
     if (busy.load()) {
       log("REBOOT_BUSY");
@@ -670,6 +705,7 @@ void handle(const std::string& line) {
     preview(line.substr(8));
   else if (line == "config-status") {
     log("device-config " + Json{{"read_only", config.readOnly},
+                                {"sleep_timeout_seconds", config.sleepTimeoutSeconds},
                                 {"rooms", roomConfigJson(config.rooms)},
                                 {"policy", sourcePolicyJson(config.policy)},
                                 {"policyRevision", config.revision}}
@@ -730,6 +766,7 @@ void begin() {
   auto stored = preferences.getString("config", "{}");
   if (!parseConfig(stored.c_str(), config))
     log("Stored config invalid; USB config required");
+  power = DevicePower(esp_timer_get_time() / 1000, config.sleepTimeoutSeconds);
   config.revision = preferences.getUInt("config-rev", 1);
   log(config.readOnly ? "SONOS_MODE=READ_ONLY (runtime; all mutations blocked before HTTP)"
                       : "SONOS_MODE=CONTROL (configured eligible rooms)");
@@ -756,6 +793,24 @@ void loop() {
     vTaskDelay(1);
     return;
   }
+  // Sample physical activity before admission or background work. USB commands
+  // do not extend appliance uptime (use timeout=0 during development).
+  const auto event = boardPoll();
+  if (power.poll(esp_timer_get_time() / 1000, event.activity)) {
+    stopping.store(true);
+    log("SLEEP_REQUESTED: local inactivity; cancelling device work");
+#if defined(SURFACE_WAVESHARE_1_8) && !SURFACE_TOUCH_DIAGNOSTIC
+    artworkStop();
+#endif
+    // No forced task deletion while a worker might hold a network/state lock.
+    // Close networking and enter deep sleep promptly; in-flight work is
+    // abandoned, with no transient state writes or automatic replay on boot.
+    WiFi.setAutoReconnect(false);
+    WiFi.disconnect(true, false);
+    WiFi.mode(WIFI_OFF);
+    boardPrepareSleep();
+    boardSleep();
+  }
   while (Serial.available()) {
     char c = Serial.read();
     if (c == '\n') {
@@ -772,7 +827,6 @@ void loop() {
         serialOverflow = true;
     }
   }
-  const auto event = boardPoll();
   switch (event.input) {
   case Input::Play:
     handle("play");

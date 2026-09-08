@@ -8,6 +8,10 @@ export const hardwareTargets = {
     flashSize: "8M",
     partitionScheme: "default_8MB",
     touchDiagnostic: false,
+    power: {
+      mechanism: "esp32-deep-sleep",
+      wakeButton: "front (KEY1 / M5 BtnA)",
+    },
   },
   "ws-1.8": {
     id: "ws-1.8",
@@ -15,6 +19,7 @@ export const hardwareTargets = {
     flashSize: "16M",
     partitionScheme: "app3M_fat9M_16MB",
     touchDiagnostic: true,
+    power: { mechanism: "esp32-deep-sleep", wakeButton: "BOOT" },
   },
 } as const;
 

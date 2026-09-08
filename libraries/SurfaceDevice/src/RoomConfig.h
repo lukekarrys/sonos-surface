@@ -2,8 +2,22 @@
 #include <SurfaceCore.h>
 #include <set>
 #include <surface_json.hpp>
+#include "DevicePower.h"
 
 namespace surface::device {
+inline bool parseSleepTimeout(const nlohmann::json& config, uint32_t& seconds) {
+  if (!config.is_object())
+    return false;
+  if (!config.contains("sleep_timeout_seconds")) {
+    seconds = defaultSleepTimeoutSeconds;
+    return true;
+  }
+  const auto& value = config["sleep_timeout_seconds"];
+  if (!value.is_number_integer() || value < 0 || value > UINT32_MAX)
+    return false;
+  seconds = value.get<uint32_t>();
+  return true;
+}
 // Device wire format; shared with host tests without any hardware SDK.
 inline bool parseModePolicy(const nlohmann::json& json, SourceKind kind, ModePolicy& output) {
   if (!json.is_object())
@@ -150,7 +164,7 @@ inline bool parseConfigDocument(const std::string& text, nlohmann::json& output)
     return false;
   for (auto it = json.begin(); it != json.end(); ++it) {
     const auto& k = it.key();
-    if (k == "read_only" || k == "rooms" || k == "policy")
+    if (k == "read_only" || k == "rooms" || k == "policy" || k == "sleep_timeout_seconds")
       continue;
     if (k != "wifi_ssid" && k != "wifi_password" && k != "apple_region")
       return false;
@@ -160,7 +174,8 @@ inline bool parseConfigDocument(const std::string& text, nlohmann::json& output)
   bool mode;
   RoomConfig rooms;
   SourcePolicy policy;
-  if (!parseDeviceRooms(json, mode, rooms, policy))
+  uint32_t timeout;
+  if (!parseDeviceRooms(json, mode, rooms, policy) || !parseSleepTimeout(json, timeout))
     return false;
   output = std::move(json);
   return true;

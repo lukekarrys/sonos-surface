@@ -1,5 +1,6 @@
 #pragma once
 #include <SurfaceCore.h>
+#include "DevicePower.h"
 
 namespace surface::device {
 enum class Input {
@@ -19,6 +20,7 @@ struct BoardEvent {
   BoardEvent(Input value = Input::None, std::string message = {})
       : input(value), text(std::move(message)) {}
   Input input = Input::None;
+  LocalActivity activity = LocalActivity::None;
   std::string text;
   MusicIntent intent;
   std::string targetId, trackIdentity;
@@ -37,6 +39,8 @@ bool boardBegin(std::string& notice);
 BoardEvent boardPoll();
 bool boardCommand(const std::string& line);
 void boardRender(const AppState& state, const std::string& notice);
+void boardPrepareSleep();
+[[noreturn]] void boardSleep();
 void begin();
 void loop();
 } // namespace surface::device

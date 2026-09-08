@@ -13,6 +13,7 @@ async function status(port: DevicePort) {
     !object(result) ||
     !Number.isSafeInteger(result.policyRevision) ||
     typeof result.read_only !== "boolean" ||
+    !Number.isInteger(result.sleep_timeout_seconds) ||
     !object(result.rooms) ||
     !object(result.policy)
   )
@@ -64,6 +65,8 @@ export async function configureDevice(
     if (
       after.policyRevision !== Number(before.policyRevision) + 1 ||
       after.read_only !== (profile.config.read_only ?? true) ||
+      after.sleep_timeout_seconds !==
+        (profile.config.sleep_timeout_seconds ?? 300) ||
       !isDeepStrictEqual(after.rooms, expected) ||
       !isDeepStrictEqual(
         after.policy,
@@ -81,7 +84,7 @@ export async function configureDevice(
     );
   }
   console.log(
-    "Configuration saved; revision, read-only mode, and device/room policies verified.",
+    "Configuration saved; revision, read-only mode, sleep timeout, and device/room policies verified.",
   );
 }
 export async function configure(

@@ -78,7 +78,7 @@ node --run probe -- --ip SPEAKER_IP --uid RINCON_SPEAKER_ID
 
 `node --run probe` uses the shared C++ adapter and permanently blocks mutations. Discovery requires multicast replies and a readable Sonos topology. If discovery fails, the controller reports an error and blocks playback. Allow local network access if macOS prompts. `node --run probe -- --ip` is a separate read-only diagnostic.
 
-Environment profiles live in `config/`: `default.json` is read-only and `luke.json` describes the shared household environment with `read_only: false`. Either profile can configure either hardware target. Speaker addresses come from discovery.
+Environment profiles live in `config/`: `default.json` is the default profile and `luke.json` describes the shared household environment. Each profile's `read_only` field controls Sonos mutation permission. Either profile can configure either hardware target. Speaker addresses come from discovery.
 
 To define another environment, copy a profile to any filename. Filenames are arbitrary labels and have no runtime semantics. Only `rooms` inside the JSON determines Sonos targeting. Profiles use the current device config shape:
 
@@ -88,6 +88,7 @@ To define another environment, copy a profile to any filename. Filenames are arb
   "wifi_password": "${WIFI_PASSWORD}",
   "apple_region": "52231",
   "read_only": true,
+  "sleep_timeout_seconds": 300,
   "policy": { "playlist": { "shuffle": true } },
   "rooms": {
     "office": {},
@@ -110,6 +111,8 @@ Host checks reject invalid/duplicate JSON, unknown or wrongly typed top-level fi
 `rooms` keys are both the allowlist and home for room-specific exceptions. Empty values allow a room with device policy and code-owned source defaults. Optional top-level `policy` uses the same source-policy schema and applies only to configured rooms; it cannot enroll rooms. Each field resolves explicit intent → room policy → device policy → code-owned source default → absent/preserve. Only current, uniquely resolved, independently eligible rooms are selectable. New discovered rooms are not enrolled; missing/ambiguous/invalid entries fail resolution. Valid configured rooms stay usable; if none resolves to an eligible target, playback is blocked. Renames require editing the display ID. See [policy](docs/policy.md) for the exact identity, defaults, and override contract.
 
 `read_only=true` blocks all Sonos mutations at HTTP dispatch. False permits requested effects in configured/selectable rooms with identity/topology safeguards. Room configuration controls availability, not permission. Missing mode defaults true and missing rooms selects nothing. Normal firmware has no room-specific mutation build flags. Keep autonomous testing read-only or use pure `preview`.
+
+`sleep_timeout_seconds` defaults to 300; zero disables automatic sleep. Only physical buttons, touch, and newly presented NFC cards reset inactivity. USB and background Sonos/network work do not. Sleep also applies while charging; wake with the Stick's front key or Waveshare's BOOT button. See [power and button states](docs/hardware.md#inactivity-power-and-physical-buttons). Disable sleep through ordinary configuration when a long USB development session is needed.
 
 Deployment guidance: configure Sonos's own per-room maximum-volume setting as the hard safety limit. The owner's 1.8-inch slider is experimental; the shared logical volume range remains 0–100, and a future larger kids-room UI is expected to use +/- buttons. This project does not add a software volume limiter.
 
@@ -152,7 +155,7 @@ node --run configure -- --port STICK_PORT --config /path/to/profile.json --env-f
 
 Ports can change; identify the connected unit before flashing. Flash verifies hashes, uses watchdog reset at 115200 baud, then checks application READY or an idle heartbeat. Application readiness does not by itself prove working peripherals or visible pixels. A failed build/flash never proceeds to profile upload.
 
-Config upload validates before replacement, advances the local revision, and reboots. Busy/invalid updates reject. The host verifies the new revision, read-only mode, and room exceptions through a fresh `config-status` query; that response does not expose Wi-Fi credentials, so credentials are not read back for comparison. Household JSON persists in `surface/config`; preferred display ID in `surface/preferred-id`; calibration separately in `surface/touch`. Upload does not erase calibration. Credentials are not printed or compiled into firmware; prototype NVS is not encrypted. `.local/` holds private logs and temporary captures.
+Config upload validates before replacement, advances the local revision, and reboots. Busy/invalid updates reject. The host verifies the new revision, read-only mode, sleep timeout, and room exceptions through a fresh `config-status` query; that response does not expose Wi-Fi credentials, so credentials are not read back for comparison. Household JSON persists in `surface/config`; preferred display ID in `surface/preferred-id`; calibration separately in `surface/touch`. Upload does not erase calibration. Credentials are not printed or compiled into firmware; prototype NVS is not encrypted. `.local/` holds private logs and temporary captures.
 
 Boot reads existing Sonos state without input. Expect `SONOS_MODE`, `device-config`, room resolution, and state logs. Playback polls nominally every ten seconds; topology events invalidate discovery. Input during worker activity rejects as busy. An interactive monitor forwards newline-terminated commands; Ctrl-C closes it.
 
@@ -160,7 +163,7 @@ Boot reads existing Sonos state without input. Expect `SONOS_MODE`, `device-conf
 
 | USB command | Effect |
 | --- | --- |
-| `config-status` | Print mode, device policy, room exceptions, policy revision; no credentials |
+| `config-status` | Print mode, sleep timeout, device policy, room exceptions, policy revision; no credentials |
 | `rooms`, `status` | Refresh discovery/selected-room observations |
 | `room-next`, `room-select DISPLAY_ID` | Select configured eligible room and read it; no playback effect |
 | `preview URL`, `preview {v1 JSON}` | Parse, validate, resolve policy, print plan only; never submit or contact Sonos |

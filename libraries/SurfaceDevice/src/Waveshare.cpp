@@ -8,6 +8,9 @@
 #include <Arduino_GFX_Library.h>
 #include <esp_heap_caps.h>
 #include <Preferences.h>
+#include <esp_sleep.h>
+#include <driver/rtc_io.h>
+#include <driver/gpio.h>
 
 namespace surface::device {
 namespace {
@@ -65,6 +68,7 @@ void loadCalibration() {
 bool held = false;
 uint32_t lastTouch = 0, maxPollGap = 0;
 bool loggingContact = false;
+LocalActivity activity = LocalActivity::None;
 std::string lastScreen;
 WaveshareUi ui;
 BoardContext uiContext;
@@ -99,6 +103,18 @@ bool writeRegister(uint8_t address, uint8_t reg, uint8_t value) {
   Wire.write(reg);
   Wire.write(value);
   return Wire.endTransmission() == 0;
+}
+bool readRegister(uint8_t address, uint8_t reg, uint8_t& value) {
+  Wire.beginTransmission(address);
+  Wire.write(reg);
+  if (Wire.endTransmission(false) || Wire.requestFrom(address, uint8_t(1)) != 1)
+    return false;
+  value = Wire.read();
+  return true;
+}
+bool clearRegisterBits(uint8_t address, uint8_t reg, uint8_t mask) {
+  uint8_t value;
+  return readRegister(address, reg, value) && writeRegister(address, reg, value & ~mask);
 }
 #if SURFACE_TOUCH_DIAGNOSTIC
 constexpr int calibrationTargets[][2] = {{92, 140},  {276, 140}, {92, 270},
@@ -180,6 +196,13 @@ void diagnosticScreen(int x, int y, int fingers, int event) {
 #endif
 } // namespace
 bool boardBegin(std::string& notice) {
+  rtc_gpio_deinit(GPIO_NUM_0);
+  pinMode(0, INPUT_PULLUP);
+  gpio_deep_sleep_hold_dis();
+  for (int pin : {4, 5, 6, 7, 11, 12, 46})
+    gpio_hold_dis(static_cast<gpio_num_t>(pin));
+  pinMode(46, OUTPUT);
+  digitalWrite(46, LOW); // Audio amplifier is unused.
   lastInit = millis();
   displayReady = false;
   // Retry only a failed adapter, never reboot the networking/Sonos runtime.
@@ -349,7 +372,9 @@ bool boardCommand(const std::string& line) {
   Serial.printf("CALIBRATION_SAVED %s\n", calibrationJson(calibration).c_str());
   return true;
 }
-BoardEvent boardPoll() {
+static BoardEvent pollInput() {
+  if (digitalRead(0) == LOW)
+    activity = LocalActivity::Button;
   static uint32_t lastPoll = 0;
   const auto now = millis();
   if (lastPoll)
@@ -364,11 +389,10 @@ BoardEvent boardPoll() {
   if (!ready || millis() - lastTouch < 30)
     return {};
   lastTouch = millis();
-  if (edgeInset >= 0) {
-    ui.cancelTouch();
-    held = true;
-    return {};
-  }
+  // PWR is PMIC-owned, with an inverted copy on expander input 4.
+  uint8_t inputs;
+  if (readRegister(0x20, 0x00, inputs) && (inputs & (1 << 4)))
+    activity = LocalActivity::Button;
   // Both vendor drivers read finger count at 0x02 and XY at 0x03..0x06.
   Wire.beginTransmission(touchAddress);
   Wire.write(0x02);
@@ -396,6 +420,13 @@ BoardEvent boardPoll() {
   readErrors = 0;
   uint8_t fingers = Wire.read() & 0x0F;
   uint8_t xh = Wire.read(), xl = Wire.read(), yh = Wire.read(), yl = Wire.read();
+  if (fingers > 0 && fingers <= 2)
+    activity = LocalActivity::Touch;
+  if (edgeInset >= 0) {
+    ui.cancelTouch();
+    held = true;
+    return {};
+  }
   static bool loggedRead = false;
   if (!loggedRead) {
     Serial.printf("[touch] first register read OK fingers=%u xy-bytes=%02x %02x %02x %02x\n",
@@ -446,6 +477,53 @@ BoardEvent boardPoll() {
 }
 void boardContext(const BoardContext& context) { uiContext = context; }
 
+BoardEvent boardPoll() {
+  activity = LocalActivity::None;
+  auto event = pollInput();
+  event.activity = activity;
+  return event;
+}
+void boardPrepareSleep() {
+  ui.cancelTouch();
+  if (displayReady)
+    panel->displayOff(); // Both pinned panel drivers send DISPOFF then SLPIN.
+  // Vendor V2 CST816x-family driver uses E5=3 for the fitted CST820.
+  // V1 FT3168 uses A5=3 (hibernate); peripheral reset on boot exits it.
+  bool ok = !touchAddress || writeRegister(touchAddress, touchAddress == 0x15 ? 0xE5 : 0xA5, 3);
+  // XCA9554: output 0=LCD reset, 1=DSI power enable, 2=touch reset.
+  // Leave touch out of reset after its sleep command; cut the panel supply.
+  ok = clearRegisterBits(0x20, 0x01, 0x03) && ok;
+  // QMI8658 vendor powerDown: disable accel/gyro then CTRL1.sensor_disable.
+  ok = clearRegisterBits(0x6B, 0x08, 0x03) && ok;
+  uint8_t ctrl;
+  ok = (readRegister(0x6B, 0x02, ctrl) && writeRegister(0x6B, 0x02, ctrl | 0x02)) && ok;
+  // ALDO1 supplies analog audio/microphone. DCDC1 is shared by ESP, touch,
+  // IMU and codec digital power; it must remain on for GPIO0 wake.
+  // Reset codec to its power-down defaults before removing analog supply.
+  ok = writeRegister(0x18, 0x00, 0x1F) && ok;
+  ok = writeRegister(0x18, 0x00, 0x00) && ok;
+  ok = clearRegisterBits(0x34, 0x90, 0x01) && ok;
+  // Disable PMIC ADC work and watchdog; retain charging and the RTC rail.
+  ok = writeRegister(0x34, 0x30, 0x00) && ok;
+  ok = clearRegisterBits(0x34, 0x18, 0x01) && ok;
+  for (int pin : {4, 5, 6, 7, 11, 12, 46}) {
+    pinMode(pin, OUTPUT);
+    digitalWrite(pin, LOW);
+    gpio_hold_en(static_cast<gpio_num_t>(pin));
+  }
+  gpio_deep_sleep_hold_en();
+  Serial.printf("[power] Waveshare peripherals-off=%d; deep sleep; wake=BOOT GPIO0 low\n", ok);
+  Wire.end();
+}
+[[noreturn]] void boardSleep() {
+  // BOOT has a 10k external pull-up. PWR/AXP IRQ are expander inputs, not
+  // direct RTC GPIOs. Never arm the shared touch/expander interrupt as wake.
+  esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
+  ESP_ERROR_CHECK(esp_sleep_enable_ext0_wakeup(GPIO_NUM_0, 0));
+  rtc_gpio_pullup_en(GPIO_NUM_0);
+  rtc_gpio_pulldown_dis(GPIO_NUM_0);
+  esp_deep_sleep_start();
+}
 void boardRender(const AppState& state, const std::string& notice) {
   if (!displayReady)
     return;

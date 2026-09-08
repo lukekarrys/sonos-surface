@@ -7,6 +7,7 @@
 ```json
 {
   "read_only": true,
+  "sleep_timeout_seconds": 300,
   "policy": { "playlist": { "shuffle": true } },
   "rooms": {
     "office": {},
@@ -19,6 +20,8 @@
 Office and Bedroom inherit playlist shuffle=true from device policy; Living Room overrides it to false. Settings are local to each controller; there is no automatic policy distribution or general rules language.
 
 `read_only` is the sole Sonos mutation switch: true blocks all mutations at HTTP dispatch; false permits requested effects for configured, uniquely resolved, topology-eligible targets. Room configuration controls target availability, not mutation permission. Missing `read_only` defaults true; missing/empty `rooms` selects nothing even when `policy` is present. [Execution](planner-executor.md) owns dispatch/identity safeguards.
+
+The top-level device field `sleep_timeout_seconds` controls [local inactivity sleep](product.md#inactivity-and-physical-wake): integer 0–4294967295, omitted default 300 seconds, zero disables automatic sleep. It persists with household configuration and appears in `config-status`. It is independent of room/source policy and `read_only`; it is not accepted inside `policy` or a room entry.
 
 ## Room identity and selection
 

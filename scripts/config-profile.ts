@@ -128,9 +128,14 @@ export function loadProfile(
       ? typeof value === "string"
       : key === "read_only"
         ? typeof value === "boolean"
-        : key === "rooms" || key === "policy"
-          ? object(value)
-          : false;
+        : key === "sleep_timeout_seconds"
+          ? typeof value === "number" &&
+            Number.isInteger(value) &&
+            value >= 0 &&
+            value <= 0xffffffff
+          : key === "rooms" || key === "policy"
+            ? object(value)
+            : false;
     if (!valid)
       throw new ProfileError(
         "Unknown configuration field or invalid top-level type",

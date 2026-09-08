@@ -50,6 +50,14 @@ The future browser writer must pair locally and prevent cross-origin writes. The
 
 AppState distinguishes observed facts from pending/requested values and outcomes. Boot/reconnect fetches existing playback without input. Unknown/stale data must remain visibly unknown/stale, not fabricated zero volume or stopped state. Controllers independently converge on Sonos through polling and topology invalidation; concurrent external control is best effort. Commands are one-shot, never a standing desired state to enforce continuously. Artwork and queue work are bounded and do not become prerequisites for basic control.
 
+## Inactivity and physical wake
+
+Device configuration `sleep_timeout_seconds` is an integer from 0 to 4294967295, defaulting to 300 when omitted. Positive values request sleep after that many seconds without local interaction; zero disables automatic sleep for development. Profiles choose the timeout independently of target, room policy, and `read_only`. USB power does not suppress sleep.
+
+One monotonic device timer consumes physical activity from board adapters: pressed buttons, touchscreen contact (including diagnostic screens), and a newly presented NFC card while awake. Activity counts even if an action is rejected, no control is hit, or the card cannot be decoded. A held card counts once until removal and retap; it cannot keep the device awake indefinitely. Held buttons/touch contacts continue counting as interaction. USB commands, Sonos polling/events, track/position/queue changes, artwork, topology/availability, retries, Wi-Fi traffic, and rendering do not count.
+
+At timeout the runtime stops accepting actions, closes HTTP admission, cancels artwork, shuts down networking/peripherals, and enters the board's sleep state. It does not save transient application state. Physical wake runs normal boot, loads configuration and the existing preferred room, reconnects/discovers, and fetches authoritative state. Connections, subscriptions, caches, and pending actions are never restored or replayed. Only physical buttons are configured to wake the CPU; touch, NFC, network, and timer wake are disabled. See the [hardware button/state tables](hardware.md#inactivity-power-and-physical-buttons) for electrical controls and power-loss limitations.
+
 ## Evidence and remaining boundaries
 
 The owner has confirmed M5 NFC album/playlist/station playback, physical room cycling, calibrated Waveshare center-button control, frontend appearance/usability, and artwork following an external album change. Both boards independently read Sonos. These observations do not establish production reliability or every protocol combination. Native USB/early-boot recovery, intermittent NFC preparation, battery operation, and full-screen calibration limits remain in the hardware document.

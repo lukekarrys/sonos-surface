@@ -2,6 +2,7 @@
   "wifi_ssid": "${WIFI_SSID}",
   "wifi_password": "${WIFI_PASSWORD}",
   "apple_region": "52231",
+  "sleep_timeout_seconds": 300,
   "read_only": false,
   "rooms": {
     "office": {}

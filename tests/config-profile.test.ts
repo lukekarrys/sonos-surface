@@ -64,7 +64,7 @@ test("profiles, arbitrary external paths, filename independence and environment 
   );
   assert.equal(f.load({ WIFI_SSID: "Process" }).config.wifi_ssid, "Process");
   assert.equal(DEFAULT_CONFIG.endsWith("/config/default.json"), true);
-  assert.equal(loadProfile(undefined, f.env, {}).config.read_only, true);
+  assert.equal(loadProfile(undefined, f.env, {}).config.read_only, false);
   assert.equal(
     loadProfile(join(DEFAULT_CONFIG, "../luke.json"), f.env, {}).config
       .read_only,
@@ -152,6 +152,9 @@ test("JSON structure, duplicates, nesting, Unicode byte limits and injection rej
     { policy: "playlist" },
     { policy: { x: [[[[[[[{}]]]]]]] } },
     { read_only: "false" },
+    ...[-1, 1.5, 0x100000000, "300", true, null].map((value) => ({
+      sleep_timeout_seconds: value,
+    })),
     { wifi_password: 2 },
     { unexpected: true },
     { "${WIFI_SSID}": "value" },
@@ -168,6 +171,24 @@ test("JSON structure, duplicates, nesting, Unicode byte limits and injection rej
     parseJson('{"rooms":{"__proto__":{}}}'),
     JSON.parse('{"rooms":{"__proto__":{}}}'),
   );
+});
+test("sleep timeout framing preserves omitted, disabled, and bounded integer values", (t) => {
+  const f = fixture(t);
+  assert.equal(f.load().config.sleep_timeout_seconds, undefined);
+  for (const seconds of [0, 15, 300, 0xffffffff]) {
+    writeFileSync(
+      f.path,
+      JSON.stringify({ ...f.config, sleep_timeout_seconds: seconds }),
+    );
+    assert.equal(JSON.parse(f.load().payload).sleep_timeout_seconds, seconds);
+  }
+  for (const file of ["default.json", "luke.json"]) {
+    assert.equal(
+      loadProfile(join(DEFAULT_CONFIG, "..", file), f.env, {}).config
+        .sleep_timeout_seconds,
+      300,
+    );
+  }
 });
 test("optional device policy framing preserves overrides without enrolling rooms", (t) => {
   const f = fixture(t);
@@ -223,10 +244,17 @@ test("configuration verifies new revision, gate and normalized policies after re
   profile.config.rooms = { office: { album: {} } };
   profile.config.policy = { album: {}, playlist: { shuffle: true } };
   profile.payload = JSON.stringify(profile.config);
-  const before = { policyRevision: 7, read_only: false, rooms: {}, policy: {} };
+  const before = {
+    policyRevision: 7,
+    read_only: false,
+    sleep_timeout_seconds: 300,
+    rooms: {},
+    policy: {},
+  };
   const after = {
     policyRevision: 8,
     read_only: true,
+    sleep_timeout_seconds: 300,
     rooms: { office: {} },
     policy: { playlist: { shuffle: true } },
   };
@@ -244,6 +272,8 @@ test("configuration verifies new revision, gate and normalized policies after re
     { ...after, policy: { playlist: { shuffle: false } } },
     { ...after, policy: null },
     { ...after, read_only: false },
+    { ...after, sleep_timeout_seconds: 0 },
+    { ...after, sleep_timeout_seconds: undefined },
     null,
   ]) {
     const ports = [new Port(before), new Port(result)];

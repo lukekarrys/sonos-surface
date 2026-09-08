@@ -6,6 +6,9 @@
 #include "StickDisplay.h"
 #include "StickButtons.h"
 #include <Wire.h>
+#include <esp_sleep.h>
+#include <driver/rtc_io.h>
+#include <driver/gpio.h>
 
 namespace surface::device {
 namespace {
@@ -21,8 +24,14 @@ bool latched = false;
 unsigned misses = 0;
 uint32_t lastPoll = 0;
 std::string lastScreen;
+LocalActivity activity = LocalActivity::None;
+bool releaseAfterBoot = true;
 } // namespace
 bool boardBegin(std::string& notice) {
+  rtc_gpio_deinit(GPIO_NUM_11);
+  gpio_deep_sleep_hold_dis();
+  for (int pin : {9, 10, 21, 38, 39, 40, 41, 45})
+    gpio_hold_dis(static_cast<gpio_num_t>(pin));
   displayReady = display.beginFixed();
   M5.Display = display;
   auto cfg = M5.config();
@@ -57,13 +66,22 @@ bool boardBegin(std::string& notice) {
 }
 bool boardCommand(const std::string&) { return false; }
 
-BoardEvent boardPoll() {
+static BoardEvent pollInput() {
   static uint32_t lastButtons = 0, buttonReport = 0, maxButtonGap = 0;
   const auto now = millis();
   const auto gap = lastButtons ? now - lastButtons : 0;
   maxButtonGap = std::max<uint32_t>(maxButtonGap, gap);
   lastButtons = now;
   M5.update();
+  if (M5.BtnA.isPressed() || M5.BtnB.isPressed())
+    activity = LocalActivity::Button;
+  // A wake press is consumed by boot, not turned into a refresh/toggle. Wait
+  // for release and for the M5 click decision window to expire before actions.
+  if (releaseAfterBoot) {
+    if (!stickButtonPending(M5.BtnA, M5.BtnB))
+      releaseAfterBoot = false;
+    return {};
+  }
   if (M5.BtnA.wasChangePressed())
     Serial.printf("[button] A %s clicks=%u poll-gap-ms=%lu\n",
                   M5.BtnA.isPressed() ? "pressed" : "released", M5.BtnA.getClickCount(), gap);
@@ -128,6 +146,7 @@ BoardEvent boardPoll() {
     return {};
   }
   latched = true;
+  activity = LocalActivity::Nfc;
   Serial.printf("[nfc] detected uid=%s\n", picc.uidAsString().c_str());
   // identify() itself reactivates/probes and then halts the card. Keep the
   // required post-identification reactivation, but distinguish its failure
@@ -189,6 +208,58 @@ BoardEvent boardPoll() {
   Serial.printf("[nfc] decoded payload-bytes=%u (accepted fields logged by core)\n",
                 unsigned(payload.size()));
   return {Input::Payload, payload};
+}
+BoardEvent boardPoll() {
+  activity = LocalActivity::None;
+  auto event = pollInput();
+  event.activity = activity;
+  return event;
+}
+void boardPrepareSleep() {
+  M5.Speaker.end();
+  M5.Mic.end();
+  if (displayReady) {
+    M5.Display.setBrightness(0);
+    M5.Display.sleep();
+  }
+  // PM1 rails are independent: L3B LCD/codec/mic, L1 IMU, Grove NFC/IR.
+  // The amplifier is on L0, so explicitly keep its SHDN low as well.
+  auto& pm = M5.Power.M5pm1;
+  bool ok = pm.setGPIOOutput(m5::M5PM1_Class::gpio3, false);
+  ok = pm.setGPIOFunction(m5::M5PM1_Class::gpio3, m5::M5PM1_Class::gpio) && ok;
+  ok = pm.setGPIOMode(m5::M5PM1_Class::gpio3, m5::M5PM1_Class::output) && ok;
+  ok = pm.setGPIOOutput(m5::M5PM1_Class::gpio2, false) && ok;
+  // BMI270 shares the retained PM1 bus without the codec's I2C isolation.
+  // Keep L1/IO supply on and suspend all sensors to avoid back-powering it
+  // through the L2 I2C pull-ups (schematic sheet 3).
+  ok = pm.setLDOOutput(true) && ok;
+  ok = M5.In_I2C.writeRegister8(0x68, 0x7d, 0, 100000) && ok;
+  delayMicroseconds(500); // BMI270 advanced-power-save inter-write requirement.
+  ok = M5.In_I2C.writeRegister8(0x68, 0x7c, 1, 100000) && ok;
+  Wire.end();
+  ok = pm.setExtOutput(false) && ok;
+  ok = pm.setLedEnLevel(false) && ok;
+  // Clear PM1 timer/watchdog and external wake settings left across ESP resets.
+  ok = M5.In_I2C.writeRegister8(0x6e, 0x0a, 0, 100000) && ok;
+  ok = M5.In_I2C.writeRegister8(0x6e, 0x18, 0, 100000) && ok;
+  ok = M5.In_I2C.writeRegister8(0x6e, 0x3c, 0, 100000) && ok;
+  // Prevent SPI/I2C pins back-powering switched-off peripherals during deep sleep.
+  for (int pin : {9, 10, 21, 38, 39, 40, 41, 45}) {
+    pinMode(pin, OUTPUT);
+    digitalWrite(pin, LOW);
+    gpio_hold_en(static_cast<gpio_num_t>(pin));
+  }
+  gpio_deep_sleep_hold_en();
+  Serial.printf("[power] Stick peripherals-off=%d; deep sleep; wake=A GPIO11 low\n", ok);
+}
+[[noreturn]] void boardSleep() {
+  // A has a 10k pull-up to retained L2. Do not use the PM1 IRQ: it also
+  // aggregates charging/IMU events. PM1 power-off admits VIN insertion wake.
+  esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
+  ESP_ERROR_CHECK(esp_sleep_enable_ext0_wakeup(GPIO_NUM_11, 0));
+  rtc_gpio_pullup_en(GPIO_NUM_11);
+  rtc_gpio_pulldown_dis(GPIO_NUM_11);
+  esp_deep_sleep_start();
 }
 void boardRender(const AppState& state, const std::string& notice) {
   if (!displayReady)
