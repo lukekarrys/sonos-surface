@@ -76,8 +76,11 @@ unavailable; never control their coordinator or change grouping as a workaround.
 
 ## Configuration and state
 
-Household configuration is local to each controller, imported over USB and stored
-with validate-then-replace semantics. Ordinary configuration changes need no build.
+Committed environment profiles define household configuration shared by controllers.
+Board selection and environment selection are independent. Host tools resolve local
+environment secrets and import ordinary JSON over USB; each controller stores it
+with validate-then-replace semantics. Profile filenames have no targeting semantics.
+Ordinary configuration changes need no build.
 Room object keys define target availability; the single runtime mutation switch is
 specified in [policy](policy.md#device-configuration). Keep household credentials
 private and off cards; treat incoming JSON/cards as untrusted data.

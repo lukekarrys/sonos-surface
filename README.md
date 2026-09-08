@@ -29,12 +29,13 @@ Arduino CLI (tested with 1.1.1). Install missing tools with `xcode-select --inst
 and `brew install arduino-cli`, then:
 
 ```sh
+cp .env.example .env
+# Edit .env with this computer's Wi-Fi credentials.
 python3 scripts/setup.py
 python3 scripts/test.py
-python3 scripts/device.py build stick
-python3 scripts/device.py build waveshare
 python3 -m venv .deps/venv
 .deps/venv/bin/python -m pip install pyserial==3.5
+source .deps/venv/bin/activate
 ```
 
 Setup pins Arduino-ESP32 3.3.11 and library versions in `scripts/setup.py`.
@@ -53,17 +54,24 @@ python3 scripts/probe.py --ip SPEAKER_IP --uid RINCON_SPEAKER_ID
 ```
 
 `probe.py` uses the shared C++ adapter and permanently blocks mutations.
-`discover.py --ip SPEAKER_IP` works without multicast; an absent multicast reply
-does not imply the speaker is offline. Allow local network access if macOS prompts.
+Discovery requires multicast replies and a readable Sonos topology. If discovery
+fails, the controller reports an error and blocks playback. Allow local network
+access if macOS prompts. `probe.py --ip` is a separate read-only diagnostic.
 
-For a new device, copy `config.example.json` into `.local/config.json` (use a
-separate `.local/waveshare-config.json` for Waveshare). Never overwrite a working
-private config with the example. Set Wi-Fi credentials and intended room policies.
-Apple Music must already work in Sonos;
-`apple_region: "52231"` is a Sonos service descriptor, not a storefront country code.
+Environment profiles live in `config/`: `default.json` is read-only and
+`luke.json` describes the shared household environment with `read_only: false`.
+Either profile can configure either board. The board argument selects firmware;
+`--config` selects the environment. Speaker addresses come from discovery.
+
+To define another environment, copy a profile to any filename. Filenames are
+arbitrary labels and have no runtime semantics. Only `rooms` inside the JSON
+determines Sonos targeting. Profiles use the current device config shape:
 
 ```json
 {
+  "wifi_ssid": "${WIFI_SSID}",
+  "wifi_password": "${WIFI_PASSWORD}",
+  "apple_region": "52231",
   "read_only": true,
   "rooms": {
     "office": {},
@@ -73,10 +81,43 @@ Apple Music must already work in Sonos;
 }
 ```
 
+Commit profiles with placeholders for credentials. Keep the repo-root `.env`
+local and ignored by Git; `.env.example` lists the Wi-Fi variable names. On another
+computer, clone the repo, create `.env`, and run the setup commands above. Keep
+credentials out of profiles, command-line arguments, and logs. Apple Music must
+already work in Sonos; `apple_region: "52231"` is a Sonos service descriptor, not
+a storefront country code.
+
+The host loader reads `.env` by default; `--env-file PATH` selects another file.
+Process environment values override file values, including explicitly empty values.
+A missing default `.env` is allowed when the process environment supplies every
+referenced variable; an explicitly selected missing file rejects.
+
+Environment files use one `KEY=VALUE` per line. Blank lines and lines beginning
+with `#` are ignored. Surrounding whitespace is trimmed; matching single or double
+quotes preserve whitespace inside a value. Quotes are stripped, and their contents
+are literal: no escape processing, inline comments, shell execution, or expansion
+inside the environment file. Values can contain spaces, `=`, `#`, and dollar signs.
+
+Only `${NAME}` placeholders in JSON string values are expanded, once, on the host.
+Multiple placeholders in one string are allowed. Quotes and backslashes in values
+are JSON-escaped safely; variables cannot inject JSON fields or change field types.
+Missing variables, unresolved `${...}`, default expressions, and placeholders in
+object keys reject. The device receives ordinary JSON and knows nothing about
+environment files or variable names. Resolved JSON stays in memory and is never
+written to a file by these tools.
+
+Host checks reject invalid/duplicate JSON, unknown or wrongly typed top-level
+fields, excessive nesting, and payloads exceeding 4,088 UTF-8 bytes after expansion.
+These checks run before serial access or flashing. Firmware remains authoritative
+for full room-policy and configuration validation.
+
 `rooms` keys are both the allowlist and home for room-specific exceptions. Empty
 values allow a room with shared defaults. Only current, uniquely resolved,
 independently eligible rooms are selectable. New discovered rooms are not enrolled;
-missing/ambiguous/invalid entries warn. Renames require editing the display ID.
+missing/ambiguous/invalid entries fail resolution. Valid configured rooms stay
+usable; if none resolves to an eligible target, playback is blocked.
+Renames require editing the display ID.
 See [policy](docs/policy.md) for the exact identity, defaults, and override contract.
 
 `read_only=true` blocks all Sonos mutations at HTTP dispatch. False permits
@@ -92,32 +133,53 @@ volume range remains 0–100, and a future larger kids-room UI is expected to us
 
 ## Flash and configure
 
-Connect the intended board, close other serial monitors, and enumerate ports:
+With the setup virtual environment active, connect the intended board, close
+other serial monitors, and enumerate ports:
 
 ```sh
 arduino-cli board list
-.deps/venv/bin/python scripts/device.py flash stick --port STICK_PORT
-.deps/venv/bin/python scripts/configure.py --port STICK_PORT --file .local/config.json
-.deps/venv/bin/python scripts/device.py monitor stick --port STICK_PORT
+python3 scripts/device.py flash stick --port STICK_PORT --config config/luke.json
+python3 scripts/device.py flash waveshare --port WAVESHARE_PORT --config config/luke.json
 ```
 
-For Waveshare, after building its normal image:
+`flash --config PATH` resolves and checks the profile first, builds the selected
+firmware, flashes, waits for application readiness, uploads the resolved profile,
+then queries and verifies config status after reboot. Any profile path is accepted,
+including paths outside `config/`. `--env-file PATH` works with either command:
 
 ```sh
-.deps/venv/bin/python scripts/device.py flash waveshare --port WAVESHARE_PORT
-.deps/venv/bin/python scripts/configure.py --port WAVESHARE_PORT --file .local/waveshare-config.json
-.deps/venv/bin/python scripts/device.py monitor waveshare --port WAVESHARE_PORT
+python3 scripts/device.py flash stick --port STICK_PORT --config config/test-environment.json --env-file /path/to/secrets.env
 ```
+
+Configure an already running device without flashing:
+
+```sh
+python3 scripts/configure.py --port STICK_PORT
+python3 scripts/configure.py --port WAVESHARE_PORT --config config/luke.json
+python3 scripts/configure.py --port STICK_PORT --config /path/to/profile.json --env-file /path/to/secrets.env
+```
+
+`configure.py` defaults to repo-root `config/default.json`, which is read-only.
+The default environment-file path is also relative to the repository, independent
+of the working directory. Explicit relative paths resolve from the working directory.
+
+**Flash without `--config` only flashes an already built image and preserves the
+current device configuration.** Build it first with `device.py build BOARD`.
+To inspect the application afterward, use `device.py monitor BOARD --port PORT`.
 
 Ports can change; identify the board before flashing. Flash verifies hashes, uses
 watchdog reset at 115200 baud, then checks application READY or an idle heartbeat.
 Application readiness does not by itself prove working peripherals or visible pixels.
+A failed build/flash never proceeds to profile upload.
 
 Config upload validates before replacement, advances the local revision, and
-reboots. Busy/invalid updates reject. Household JSON persists in `surface/config`;
-preferred display ID in `surface/preferred-id`; calibration separately in
-`surface/touch`. Upload does not erase calibration. Credentials are not printed
-or compiled into firmware; prototype NVS is not encrypted. Keep `.local` private.
+reboots. Busy/invalid updates reject. The host verifies the new revision, read-only
+mode, and room exceptions through a fresh `config-status` query; that response does
+not expose Wi-Fi credentials, so credentials are not read back for comparison.
+Household JSON persists in `surface/config`; preferred display ID in
+`surface/preferred-id`; calibration separately in `surface/touch`. Upload does not
+erase calibration. Credentials are not printed or compiled into firmware;
+prototype NVS is not encrypted. `.local/` holds private logs and temporary captures.
 
 Boot reads existing Sonos state without input. Expect `SONOS_MODE`, `device-config`,
 room resolution, and state logs. Playback polls nominally every ten seconds;
@@ -135,8 +197,8 @@ An interactive monitor forwards newline-terminated commands; Ctrl-C closes it.
 | `queue [start,count]` | Read a bounded selected-room page; count 1–20 |
 | `play`, `pause`, `toggle`, `next`, `previous` | Submit one transport request |
 | Bare Apple URL, v1 JSON | Submit the supplied intent |
-| `read-only true`, `read-only false` | Persist mode and reboot; update the private config to match |
-| `config {JSON}` | Replace full device config and reboot; prefer the private-file uploader |
+| `read-only true`, `read-only false` | Persist mode and reboot; update the committed profile to match |
+| `config {JSON}` | Replace full device config and reboot; prefer the profile uploader |
 | `reboot` | Reboot an idle application |
 
 Example pure policy check (catalog ID is illustrative):
@@ -242,6 +304,7 @@ another unit's fit merely because its controller matches.
 - `libraries/SurfaceSonos/src/`: SOAP/Apple metadata behind `LocalHttp`.
 - `libraries/SurfaceDevice/src/`: ESP32 runtime, config parser, board adapters.
 - `firmware/sonos_surface/`: shared Arduino entry point.
+- `config/`: committed environment profiles; `.env.example`: local secret-file template.
 - `tests/`, `scripts/`: portable/protocol fixtures and setup/device tooling.
 
 Keep network/hardware SDKs out of portable layers and generated/private files

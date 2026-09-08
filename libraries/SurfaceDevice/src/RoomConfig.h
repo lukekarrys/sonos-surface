@@ -97,8 +97,7 @@ inline bool parseConfigDocument(const std::string& text, nlohmann::json& output)
   for (auto it = json.begin(); it != json.end(); ++it) {
     const auto& k = it.key();
     if (k == "read_only" || k == "rooms") continue;
-    if (k != "wifi_ssid" && k != "wifi_password" && k != "sonos_ip" &&
-        k != "apple_region") return false;
+    if (k != "wifi_ssid" && k != "wifi_password" && k != "apple_region") return false;
     if (!it.value().is_string()) return false;
   }
   bool mode;

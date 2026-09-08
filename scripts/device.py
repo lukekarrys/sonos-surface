@@ -8,6 +8,8 @@ import select
 import sys
 from serial_device import open_port, wait_ready
 from pathlib import Path
+from config_profile import ProfileError, add_profile_arguments, load_profile
+from configure import configure_device
 
 ROOT = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser()
@@ -18,6 +20,7 @@ parser.add_argument('--seconds', type=float, default=0, help='Bound monitor dura
 parser.add_argument('--download-mode', action='store_true', help='reset only: serial already shows waiting for download')
 parser.add_argument('--touch-diagnostic', action='store_true',
                     help='Waveshare coordinate display; touch actions disabled (set runtime read_only=true)')
+add_profile_arguments(parser, default=None)
 args = parser.parse_args()
 if args.touch_diagnostic and args.board != 'waveshare':
     parser.error('--touch-diagnostic requires waveshare')
@@ -25,6 +28,16 @@ if args.action != 'build' and not args.port:
     parser.error('--port is required for USB commands')
 if args.download_mode and args.action != 'reset':
     parser.error('--download-mode is only for reset')
+if (args.config is not None or args.env_file is not None) and args.action != 'flash':
+    parser.error('--config and --env-file are only for flash')
+if args.env_file is not None and args.config is None:
+    parser.error('--env-file requires --config when flashing')
+profile = None
+if args.config is not None:
+    try:
+        profile = load_profile(args.config, args.env_file)
+    except ProfileError as error:
+        parser.error(str(error))
 fqbn = 'esp32:esp32:esp32s3:USBMode=hwcdc,CDCOnBoot=cdc,PSRAM=opi,UploadSpeed=460800,'
 fqbn += 'FlashSize=8M,PartitionScheme=default_8MB' if args.board == 'stick' else 'FlashSize=16M,PartitionScheme=app3M_fat9M_16MB'
 base = ['arduino-cli', '--config-file', str(ROOT / '.deps/arduino-cli.yaml')]
@@ -37,6 +50,18 @@ if args.action == 'build':
                       ' -DSURFACE_TOUCH_DIAGNOSTIC=' + str(int(args.touch_diagnostic)),
                       str(sketch)]
 elif args.action == 'flash':
+    # Check serial support before any build/flash; profiles were resolved above.
+    try:
+        import serial
+    except ImportError:
+        parser.error('Use .deps/venv/bin/python for USB commands; see README')
+    if profile is not None:
+        build_command = [sys.executable, str(ROOT / 'scripts/device.py'), 'build', args.board]
+        if args.touch_diagnostic:
+            build_command.append('--touch-diagnostic')
+        built = subprocess.run(build_command, cwd=ROOT)
+        if built.returncode:
+            raise SystemExit(built.returncode)
     if not (build / 'sonos_surface.ino.bin').exists():
         parser.error('Build this board first')
     # Keep Arduino's pinned upload recipe, overriding reset and native USB baud.
@@ -53,11 +78,6 @@ elif args.action == 'flash':
     recipe = recipe.replace('--after hard-reset', '--after watchdog-reset')
     # CLI 1.1.1 has already promoted tool properties to upload.* at override time.
     recipe = recipe.replace('tools.esptool_py.upload.pattern_args=', 'upload.pattern_args=', 1)
-    # Check pyserial availability before writing flash; required for boot verification.
-    try:
-        import serial
-    except ImportError:
-        parser.error('Use .deps/venv/bin/python for USB commands; see README')
     command = base + ['upload', '--fqbn', fqbn, '--port', args.port, '--input-dir', str(build),
                       '--upload-property', recipe, '--upload-property', 'upload.speed=115200', str(sketch)]
 elif args.action == 'reset':
@@ -116,7 +136,12 @@ if args.action in ('flash', 'reset'):
                 raise SystemExit('USB port did not return; list ports, then inspect/power-cycle the board.')
             time.sleep(0.25)
     with port:
-        wait_ready(port, echo=True)
+        wait_ready(port, echo=profile is None)
     print('Application ready (peripheral readiness is reported separately).')
 if result.returncode:
     raise SystemExit('Tool failed, but application readiness was observed; inspect the tool output above. This does not certify a new image.')
+if profile is not None:
+    try:
+        configure_device(args.port, *profile)
+    except ProfileError as error:
+        parser.error(str(error))

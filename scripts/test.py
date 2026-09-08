@@ -3,6 +3,8 @@ import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+subprocess.run(['python3', '-B', str(ROOT / 'tests/config_profile_test.py')], check=True)
+subprocess.run(['python3', '-B', str(ROOT / 'tests/discover_test.py')], check=True)
 BUILD = ROOT / '.build/host'
 BUILD.mkdir(parents=True, exist_ok=True)
 includes = [ROOT / 'libraries/SurfaceCore/src', ROOT / 'libraries/SurfaceSonos/src',

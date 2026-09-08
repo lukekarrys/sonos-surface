@@ -48,6 +48,26 @@ unsigned policyTests() {
   }
   Json document;
   assert(parseConfigDocument(config.dump(), document) && document == config); ++cases;
+  // Discovery must resolve configured keys. A failed key does not enroll a
+  // different speaker or prevent another valid configured room from working.
+  {
+    RoomSelection discovered;
+    discovered.configured = {{"office", {}}, {"living-room", {}}};
+    const Room office{"RINCON_A", "Office", "192.0.2.1", "RINCON_A", "a", true, ""};
+    discovered.update({office});
+    assert(discovered.selected() && discovered.selectedId == office.id);
+    assert(discovered.rooms.size() == 1 && discovered.resolvedPolicies.size() == 1);
+    assert(discovered.warning == "ROOM MISSING: living-room"); ++cases;
+    for (const auto& snapshot : std::vector<std::vector<Room>>{
+        {}, {{"RINCON_B", "Unconfigured", "192.0.2.2", "RINCON_B", "b", true, ""}}}) {
+      discovered.update(snapshot);
+      assert(!discovered.selected() && discovered.selectedId.empty());
+      assert(discovered.rooms.empty() && discovered.resolvedPolicies.empty() && !discovered.cycle());
+      assert(!discovered.warning.empty()); ++cases;
+    }
+    discovered.update({office});
+    assert(discovered.selected() && discovered.selectedId == office.id); ++cases;
+  }
   // Every product-valid combination and every invalid sourced combination uses
   // the same invariant in JSON, direct typed calls, room config, and planning.
   const std::vector<std::string> urls{album, playlist, album + "?i=111", station};

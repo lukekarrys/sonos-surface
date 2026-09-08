@@ -18,7 +18,7 @@ namespace surface::device {
 namespace {
 using Json = nlohmann::json;
 struct Config {
-  std::string ssid, password, host, appleRegion = "52231";
+  std::string ssid, password, appleRegion = "52231";
   bool readOnly = true;
   uint32_t revision = 1;
   RoomConfig rooms;
@@ -60,11 +60,9 @@ bool parseConfig(const std::string& text, Config& output) {
   if (!parseConfigDocument(text, json)) return false;
   Config c;
   c.ssid = json.value("wifi_ssid", ""); c.password = json.value("wifi_password", "");
-  c.host = json.value("sonos_ip", "");
   if (!parseDeviceRooms(json, c.readOnly, c.rooms)) return false;
   c.appleRegion = json.value("apple_region", "52231");
-  IPAddress address;
-  if (c.ssid.size() > 32 || c.password.size() > 63 || (!c.host.empty() && !address.fromString(c.host.c_str()))) return false;
+  if (c.ssid.size() > 32 || c.password.size() > 63) return false;
   if (c.appleRegion.empty() || c.appleRegion.find_first_not_of("0123456789") != std::string::npos) return false;
   output = std::move(c);
   return true;
@@ -123,8 +121,8 @@ protected:
   uint64_t nowMs() override { return esp_timer_get_time() / 1000; }
   void pollWait(uint32_t ms) override { vTaskDelay(pdMS_TO_TICKS(ms)); }
 };
-// SSDP finds a bootstrap player, never an authoritative target. Topology supplies
-// the current names/addresses/eligibility; the optional old IP is only a hint.
+// SSDP discovers a player from which to read household topology. Topology supplies
+// current names, addresses, and eligibility; configured room keys select targets.
 std::vector<std::string> discoverAddresses() {
   // A manual status/rooms request must also be safe before configuration.
   if (WiFi.status() != WL_CONNECTED) return {};
@@ -220,7 +218,7 @@ void worker(void*) {
   TopologyEvents events;
   bool eventPending = false;
   std::map<std::string, std::unique_ptr<Session>> sessions;
-  std::string bootstrap = config.host;
+  std::string discoveryHost; // Learned by SSDP in this process; never configured or persisted.
   for (;;) {
     Job* job = nullptr;
     if (WiFi.status() != WL_CONNECTED) events.ensure("");
@@ -237,14 +235,15 @@ void worker(void*) {
       DirectSonos sonos(http, {"", config.appleRegion}, log);
       return sonos.discover(rooms);
     };
-    if (!bootstrap.empty()) discovered = probe(bootstrap);
+    if (!discoveryHost.empty()) discovered = probe(discoveryHost);
     if (!discovered.ok) {
       for (const auto& host : discoverAddresses()) {
         discovered = probe(host);
-        if (discovered.ok) { bootstrap = host; break; }
+        if (discovered.ok) { discoveryHost = host; break; }
       }
     }
-    events.ensure(discovered.ok ? bootstrap : "");
+    if (!discovered.ok) discoveryHost.clear();
+    events.ensure(discoveryHost);
     // Serial backpressure must never hold the UI's state lock: button polling
     // needs to observe both releases in a double-click even without a monitor.
     if (discovered.ok) for (const auto& room : rooms)
@@ -255,7 +254,9 @@ void worker(void*) {
     else {
       selection.rooms.clear();
       selection.resolvedPolicies.clear();
-      selection.warning = "Topology unavailable; mutations blocked";
+      selection.selectedId.clear();
+      selection.problems = {"DISCOVERY FAILED: " + discovered.error};
+      selection.warning = selection.problems.front();
     }
     if (job->cycle && discovered.ok) selection.cycle();
     const Room* selected = selection.selected();
@@ -527,7 +528,6 @@ void begin() {
   savedPreference = preferences.getString("preferred-id", "").c_str();
   selection.configured = config.rooms;
   selection.preferredId = savedPreference;
-  log("speaker-ip=" + config.host);
   if (!config.ssid.empty()) {
     WiFi.mode(WIFI_STA);
     WiFi.setAutoReconnect(true);

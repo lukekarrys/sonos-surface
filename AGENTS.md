@@ -10,6 +10,22 @@
 
 Run `python3 scripts/setup.py` for pinned Arduino-ESP32 dependencies, or add `--host-only` for portable tests. Run `python3 scripts/test.py`, then `python3 scripts/device.py build stick` or `build waveshare`. README documents exact flash/monitor commands. Keep generated `.deps/`, `.build/`, and private `.local/` files untracked. Update dependency pins and setup instructions together.
 
+## Environment profiles and local secrets
+
+`config/*.json` are the durable environment profiles, shared by any devices in that
+environment. Board selection chooses firmware, independently of the profile. Filenames are arbitrary human
+labels and never imply Sonos room identity; only JSON `rooms` keys select targets.
+The host tools expand `${NAME}` in JSON string values using process environment
+values over repo-root `.env` (or `--env-file`). Keep `.env` ignored and use
+`.env.example` for variable names. Never log or save resolved credential-bearing
+JSON. `.local/` is for logs, captures, and temporary/generated data.
+
+`configure.py --port PORT` uses `config/default.json`; `--config PATH` selects any
+profile path. `device.py flash BOARD --port PORT --config PATH` preflights the
+profile before building/flashing, then configures and verifies status. Without
+`--config`, flash preserves device configuration. Firmware receives current JSON
+only; environment expansion belongs solely to the host.
+
 ## Coding Style & Naming Conventions
 
 C++17 uses two-space indentation, PascalCase types, and camelCase functions/fields. Python uses four spaces. No formatter is configured. Use descriptive Markdown headings, relative links, and valid JSON examples; keep wire names consistent with the specifications.
@@ -24,7 +40,7 @@ Portable assertion tests run with address/undefined behavior sanitizers; no cove
 
 Use focused commits with imperative subjects. No broader commit convention has been established.
 
-PRs should explain behavior, validation, and unresolved risks; link issues when available and include screenshots for UI changes. Update affected specifications together. Keep household credentials and personal configuration out of commits.
+PRs should explain behavior, validation, and unresolved risks; link issues when available and include screenshots for UI changes. Update affected specifications together. Commit environment profiles with environment placeholders; keep household credentials out of Git.
 
 ## Agent Working Style
 
@@ -51,7 +67,7 @@ Unless the owner explicitly requests otherwise for a specific change:
 - do not write migration guides or upgrade procedures
 - do not document obsolete configuration shapes
 - when a persisted format changes, update the current implementation, examples,
-  tests, and private development-device config as needed, and remove the superseded path
+  tests, committed environment profiles, and local environment values as needed, and remove the superseded path
 - old private configuration may simply be replaced
 - all controlled devices may be flashed/configured together
 

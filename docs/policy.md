@@ -42,14 +42,18 @@ invalid. There is no transliteration; configured keys must already be canonical.
 
 At topology refresh, each config key must match exactly one discovered room across
 the entire snapshot, including ineligible players. Missing, invalid, or ambiguous
-IDs warn and never bind. Grouped, bonded, invisible, addressless, or otherwise
-ineligible targets warn as unavailable. Valid entries continue; discovered but
+IDs fail resolution and report an error. Grouped, bonded, invisible, addressless,
+or otherwise ineligible targets fail as unavailable. Valid entries continue; discovered but
 unconfigured rooms never enter selection. Only selectable UUIDs receive resolved
 room policies. There is no separate policy map capable of enrolling another room.
+If no configured room resolves to an eligible target, playback is blocked.
 
 Resolution is `config display ID → discovered room → UUID`. A rename intentionally
 breaks the old binding until configuration is edited. UUIDs are internal identities,
-never human config keys. `sonos_ip` is an optional discovery bootstrap hint only.
+never human config keys. Speaker addresses come from SSDP and live topology.
+A successfully discovered player address may be reused in memory to read fresh
+topology; it is never configured or persisted. Failed topology reads trigger SSDP
+again. If discovery fails, all room bindings are cleared and playback is blocked.
 
 Selection sorts by case-insensitive human name then UUID. A room switch persists
 its display ID in `surface/preferred-id`. Boot restores it if eligible; otherwise
