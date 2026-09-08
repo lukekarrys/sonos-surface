@@ -128,7 +128,7 @@ export function loadProfile(
       ? typeof value === "string"
       : key === "read_only"
         ? typeof value === "boolean"
-        : key === "rooms"
+        : key === "rooms" || key === "policy"
           ? object(value)
           : false;
     if (!valid)

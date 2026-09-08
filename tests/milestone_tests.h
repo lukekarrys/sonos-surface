@@ -450,8 +450,9 @@ unsigned milestoneTests() {
   extra.name = "Bedroom";
   bool mode = false;
   RoomConfig ids;
+  SourcePolicy devicePolicy;
   using surface::device::parseDeviceRooms;
-  assert(parseDeviceRooms(Json::object(), mode, ids) && mode && ids.empty());
+  assert(parseDeviceRooms(Json::object(), mode, ids, devicePolicy) && mode && ids.empty());
   ++cases;
   for (bool readOnly : {true, false}) {
     assert(parseDeviceRooms(Json{{"read_only", readOnly},
@@ -459,7 +460,7 @@ unsigned milestoneTests() {
                                   {{"office", Json::object()},
                                    {"missing", Json::object()},
                                    {"Bad ID", Json::object()}}}},
-                            mode, ids));
+                            mode, ids, devicePolicy));
     selected.configured = ids;
     selected.update({a, b, extra});
     assert(mode == readOnly && selected.rooms.size() == 1 && selected.selectedId == a.id);
@@ -472,7 +473,7 @@ unsigned milestoneTests() {
                                                {{"rooms", {1}}}}) {
     auto before = surface::device::roomConfigJson(ids);
     auto oldMode = mode;
-    assert(!parseDeviceRooms(invalid, mode, ids) &&
+    assert(!parseDeviceRooms(invalid, mode, ids, devicePolicy) &&
            surface::device::roomConfigJson(ids) == before && mode == oldMode);
     ++cases;
   }

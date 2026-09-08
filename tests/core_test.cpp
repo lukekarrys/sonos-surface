@@ -24,8 +24,8 @@ MusicIntent parsed(const std::string& text) {
   return intent;
 }
 // Compact fixtures for tests whose subject is transport rather than room parsing.
-RoomPolicy playlistPolicy(bool shuffle) {
-  RoomPolicy policy;
+SourcePolicy playlistPolicy(bool shuffle) {
+  SourcePolicy policy;
   policy.playlist.shuffle = shuffle;
   return policy;
 }

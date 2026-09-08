@@ -102,7 +102,7 @@ Writing and its web server are not implemented yet. The simple family-facing wri
 | Track / single song | Hidden             | Default / Off / One |
 | Station             | Hidden             | Hidden              |
 
-`Default` omits the field from the card and lets selected-room overrides plus code-owned source defaults resolve it later. Do not label it “Preserve”: a new album, playlist, or track normally derives repeat=off, and an album derives shuffle=false. Explicit On/Off/All/One choices serialize their exact values.
+`Default` omits the field from the card and lets room overrides, device policy, then code-owned source defaults resolve it later. Do not label it “Preserve”: a new album, playlist, or track normally derives repeat=off, and an album derives shuffle=false. Explicit On/Off/All/One choices serialize their exact values.
 
 Every card created by this simple writer includes **`transport: "play"`** with its source. Transport is fixed, not presented as an option. Source-and-stay-paused, play/pause-only commands, and queue manipulation are outside this family workflow.
 

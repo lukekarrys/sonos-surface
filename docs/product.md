@@ -18,7 +18,7 @@ NFC tag writing and a simple local family writer are specified for future work, 
 ```text
 NFC / USB JSON / touch / buttons / future writer or voice
   -> normalize and validate MusicIntent
-  -> bind selected UUID and resolve source/room policy once
+  -> bind selected UUID and resolve source/device/room policy once
   -> plan -> execute -> verify/reconcile through direct Sonos adapter
 
 Sonos observations + separate request outcomes
@@ -38,7 +38,7 @@ Sonos observations + separate request outcomes
 
 One continuous card presentation creates one request; removal and retapping create another. Supported NFC inputs are Apple Music URLs in Text, URI, or empty-type records, and declarative v1 JSON Text cards. URL-only cards normalize to source plus explicit play. A deliberate new source card replaces/restarts its source even if already selected. Music sources enter through explicit intents from NFC, USB URLs/JSON, or future writer/voice inputs.
 
-The future simple writer exposes only Apple Music source, source-valid shuffle, and repeat. It always writes explicit `transport: "play"`. Its `Default` choice omits a mode field so the selected room and shared source defaults resolve it when tapped. It never bakes room policies into cards. A single card can shuffle in one room, play in order in another, or repeat a single song only in a designated room. Volume and other advanced commands remain schema capabilities outside this UI. Detailed controls, write arming, capacity, and readback requirements live in intent.
+The future simple writer exposes only Apple Music source, source-valid shuffle, and repeat. It always writes explicit `transport: "play"`. Its `Default` choice omits a mode field so device/room policy and shared source defaults resolve it when tapped. It never bakes device or room policies into cards. A single card can shuffle in one room, play in order in another, or repeat a single song only in a designated room. Volume and other advanced commands remain schema capabilities outside this UI. Detailed controls, write arming, capacity, and readback requirements live in intent.
 
 Target, request identity, device origin, policy revision, and provenance are not card fields. Accepting work freezes the resolved target UUID and policy. Room selection is a device action and has no playback effect. Grouped targets are unavailable; never control their coordinator or change grouping as a workaround.
 

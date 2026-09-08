@@ -146,6 +146,11 @@ test("JSON structure, duplicates, nesting, Unicode byte limits and injection rej
   for (const value of [
     [],
     { rooms: [] },
+    { policy: [] },
+    { policy: null },
+    { policy: true },
+    { policy: "playlist" },
+    { policy: { x: [[[[[[[{}]]]]]]] } },
     { read_only: "false" },
     { wifi_password: 2 },
     { unexpected: true },
@@ -163,6 +168,28 @@ test("JSON structure, duplicates, nesting, Unicode byte limits and injection rej
     parseJson('{"rooms":{"__proto__":{}}}'),
     JSON.parse('{"rooms":{"__proto__":{}}}'),
   );
+});
+test("optional device policy framing preserves overrides without enrolling rooms", (t) => {
+  const f = fixture(t);
+  for (const policy of [undefined, {}, { playlist: { shuffle: true } }]) {
+    writeFileSync(f.path, JSON.stringify({ ...f.config, rooms: {}, policy }));
+    const profile = f.load();
+    assert.deepEqual(profile.config.rooms, {});
+    assert.deepEqual(profile.config.policy, policy);
+    assert.deepEqual(JSON.parse(profile.payload), profile.config);
+  }
+  for (const text of [
+    '{"policy":{},"policy":{}}',
+    '{"policy":{"playlist":{"shuffle":true,"shuffle":false}}}',
+  ]) {
+    writeFileSync(f.path, text);
+    assert.throws(() => f.load());
+  }
+  writeFileSync(
+    f.path,
+    JSON.stringify({ policy: { playlist: { shuffle: "x".repeat(4100) } } }),
+  );
+  assert.throws(() => f.load());
 });
 class Port implements DevicePort {
   writes: string[] = [];
@@ -194,9 +221,15 @@ test("configuration verifies new revision, gate and normalized policies after re
   const f = fixture(t);
   const profile = f.load();
   profile.config.rooms = { office: { album: {} } };
+  profile.config.policy = { album: {}, playlist: { shuffle: true } };
   profile.payload = JSON.stringify(profile.config);
-  const before = { policyRevision: 7, read_only: false, rooms: {} };
-  const after = { policyRevision: 8, read_only: true, rooms: { office: {} } };
+  const before = { policyRevision: 7, read_only: false, rooms: {}, policy: {} };
+  const after = {
+    policyRevision: 8,
+    read_only: true,
+    rooms: { office: {} },
+    policy: { playlist: { shuffle: true } },
+  };
   const snapshot = () =>
     readdirSync(f.root).map((file) => [
       file,
@@ -207,6 +240,9 @@ test("configuration verifies new revision, gate and normalized policies after re
     after,
     { ...after, policyRevision: 7 },
     { ...after, rooms: {} },
+    { ...after, policy: {} },
+    { ...after, policy: { playlist: { shuffle: false } } },
+    { ...after, policy: null },
     { ...after, read_only: false },
     null,
   ]) {

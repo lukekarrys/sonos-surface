@@ -22,6 +22,7 @@ struct Config {
   bool readOnly = true;
   uint32_t revision = 1;
   RoomConfig rooms;
+  SourcePolicy policy;
 } config;
 Preferences preferences;
 SemaphoreHandle_t stateMutex;
@@ -65,7 +66,7 @@ bool parseConfig(const std::string& text, Config& output) {
   Config c;
   c.ssid = json.value("wifi_ssid", "");
   c.password = json.value("wifi_password", "");
-  if (!parseDeviceRooms(json, c.readOnly, c.rooms))
+  if (!parseDeviceRooms(json, c.readOnly, c.rooms, c.policy))
     return false;
   c.appleRegion = json.value("apple_region", "52231");
   if (c.ssid.size() > 32 || c.password.size() > 63)
@@ -475,8 +476,8 @@ void submit(const std::string& payload, bool refresh = false, bool cycle = false
       result = Result::fail("Selected room unavailable; refresh targets");
     const Room acceptedRoom = room ? *room : Room{};
     if (result.ok)
-      job->accepted =
-          resolvePolicy(intent, {room->id, selection.resolvedPolicies, config.revision});
+      job->accepted = resolvePolicy(
+          intent, {room->id, selection.resolvedPolicies, config.revision, config.policy});
     xSemaphoreGive(stateMutex);
     if (result.ok) {
       log("accepted room=" + acceptedRoom.name + " roomDisplayId=" + acceptedRoom.displayId + " " +
@@ -563,7 +564,8 @@ void submitToggle() {
   const auto* selected = selection.selected();
   const Room room = selected ? *selected : Room{};
   if (room.eligible)
-    job->toggleContext = PolicyContext{room.id, selection.resolvedPolicies, config.revision};
+    job->toggleContext =
+        PolicyContext{room.id, selection.resolvedPolicies, config.revision, config.policy};
   xSemaphoreGive(stateMutex);
   if (!job->toggleContext) {
     delete job;
@@ -602,7 +604,8 @@ void preview(const std::string& payload) {
     result = Result::fail("Selected room unavailable; refresh targets");
   if (result.ok) {
     room = *selected;
-    accepted = resolvePolicy(input, {room.id, selection.resolvedPolicies, config.revision});
+    accepted =
+        resolvePolicy(input, {room.id, selection.resolvedPolicies, config.revision, config.policy});
   }
   xSemaphoreGive(stateMutex);
   Plan plan;
@@ -668,6 +671,7 @@ void handle(const std::string& line) {
   else if (line == "config-status") {
     log("device-config " + Json{{"read_only", config.readOnly},
                                 {"rooms", roomConfigJson(config.rooms)},
+                                {"policy", sourcePolicyJson(config.policy)},
                                 {"policyRevision", config.revision}}
                                .dump());
   } else if (line == "rooms" || line == "room-next")

@@ -39,20 +39,20 @@ struct ModePolicy {
   std::optional<bool> shuffle;
   std::optional<Repeat> repeat;
 };
-struct RoomPolicy {
+struct SourcePolicy {
   ModePolicy album, playlist, track;
 };
-using RoomConfig = std::map<std::string, RoomPolicy>; // Display IDs; authoritative allowlist.
+using RoomConfig = std::map<std::string, SourcePolicy>; // Display IDs; authoritative allowlist.
 struct ResolvedRoomPolicy {
   std::string displayId;
-  RoomPolicy policy;
+  SourcePolicy policy;
 };
 using ResolvedRoomPolicies = std::map<std::string, ResolvedRoomPolicy>; // Eligible UUIDs only.
 enum class PolicyField { Shuffle, Repeat };
-enum class PolicyOrigin { Preserved, Explicit, RoomPolicy, SourceDefault };
+enum class PolicyOrigin { Preserved, Explicit, RoomPolicy, DevicePolicy, SourceDefault };
 struct FieldProvenance {
   PolicyOrigin origin = PolicyOrigin::Preserved;
-  std::string key; // Display ID or source kind; empty for explicit/preserved.
+  std::string key; // Display ID or source kind; empty for explicit/device/preserved.
   bool operator==(const FieldProvenance& other) const {
     return origin == other.origin && key == other.key;
   }
@@ -63,11 +63,12 @@ const char* repeatName(Repeat repeat);
 std::string describeOrigin(const FieldProvenance& provenance);
 Result validateSourceModes(SourceKind kind, const ModePolicy& modes);
 ModePolicy sourceDefaults(SourceKind kind);
-ModePolicy roomSourcePolicy(const RoomPolicy& policy, SourceKind kind);
+ModePolicy sourcePolicyModes(const SourcePolicy& policy, SourceKind kind);
 struct PolicyContext {
   std::string targetId;
   ResolvedRoomPolicies rooms;
   uint32_t revision = 1;
+  SourcePolicy policy{};
 };
 struct ResolvedIntent {
   MusicIntent intent;

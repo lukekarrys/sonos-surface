@@ -2,7 +2,7 @@
 
 Physical Apple Music/Sonos controls for M5StickS3 + ST25R3916 NFC and Waveshare ESP32-S3-Touch-AMOLED-1.8. Both boards use the same portable C++ application and direct Sonos adapter; no server is required.
 
-The current system reads NFC cards, selects configured rooms, controls playback, and observes metadata/modes/volume/timing. Waveshare adds its accepted touch UI, background artwork, and bounded queue browsing/selection. Source policy is shared: new albums play in order once; playlists preserve shuffle and repeat off; tracks repeat off unless their room overrides it. NFC writing is specified, not implemented.
+The current system reads NFC cards, selects configured rooms, controls playback, and observes metadata/modes/volume/timing. Waveshare adds its accepted touch UI, background artwork, and bounded queue browsing/selection. Source policy is shared: new albums play in order once; playlists preserve shuffle and repeat off; tracks repeat off. Persisted device and room policy can override these code-owned defaults. NFC writing is specified, not implemented.
 
 ## Current contracts
 
@@ -88,9 +88,10 @@ To define another environment, copy a profile to any filename. Filenames are arb
   "wifi_password": "${WIFI_PASSWORD}",
   "apple_region": "52231",
   "read_only": true,
+  "policy": { "playlist": { "shuffle": true } },
   "rooms": {
     "office": {},
-    "living-room": { "playlist": { "shuffle": true } },
+    "living-room": { "playlist": { "shuffle": false } },
     "bedroom": {}
   }
 }
@@ -104,9 +105,9 @@ Environment files use one `KEY=VALUE` per line. Blank lines and lines beginning 
 
 Only `${NAME}` placeholders in JSON string values are expanded, once, on the host. Multiple placeholders in one string are allowed. Quotes and backslashes in values are JSON-escaped safely; variables cannot inject JSON fields or change field types. Missing variables, unresolved `${...}`, default expressions, and placeholders in object keys reject. The device receives ordinary JSON and knows nothing about environment files or variable names. Resolved JSON stays in memory and is never written to a file by these tools.
 
-Host checks reject invalid/duplicate JSON, unknown or wrongly typed top-level fields, excessive nesting, and payloads exceeding 4,088 UTF-8 bytes after expansion. These checks run before serial access or flashing. Firmware remains authoritative for full room-policy and configuration validation.
+Host checks reject invalid/duplicate JSON, unknown or wrongly typed top-level fields, excessive nesting, and payloads exceeding 4,088 UTF-8 bytes after expansion. These checks run before serial access or flashing. Firmware remains authoritative for full device/room-policy and configuration validation.
 
-`rooms` keys are both the allowlist and home for room-specific exceptions. Empty values allow a room with shared defaults. Only current, uniquely resolved, independently eligible rooms are selectable. New discovered rooms are not enrolled; missing/ambiguous/invalid entries fail resolution. Valid configured rooms stay usable; if none resolves to an eligible target, playback is blocked. Renames require editing the display ID. See [policy](docs/policy.md) for the exact identity, defaults, and override contract.
+`rooms` keys are both the allowlist and home for room-specific exceptions. Empty values allow a room with device policy and code-owned source defaults. Optional top-level `policy` uses the same source-policy schema and applies only to configured rooms; it cannot enroll rooms. Each field resolves explicit intent → room policy → device policy → code-owned source default → absent/preserve. Only current, uniquely resolved, independently eligible rooms are selectable. New discovered rooms are not enrolled; missing/ambiguous/invalid entries fail resolution. Valid configured rooms stay usable; if none resolves to an eligible target, playback is blocked. Renames require editing the display ID. See [policy](docs/policy.md) for the exact identity, defaults, and override contract.
 
 `read_only=true` blocks all Sonos mutations at HTTP dispatch. False permits requested effects in configured/selectable rooms with identity/topology safeguards. Room configuration controls availability, not permission. Missing mode defaults true and missing rooms selects nothing. Normal firmware has no room-specific mutation build flags. Keep autonomous testing read-only or use pure `preview`.
 
@@ -159,7 +160,7 @@ Boot reads existing Sonos state without input. Expect `SONOS_MODE`, `device-conf
 
 | USB command | Effect |
 | --- | --- |
-| `config-status` | Print mode, room exceptions, policy revision; no credentials |
+| `config-status` | Print mode, device policy, room exceptions, policy revision; no credentials |
 | `rooms`, `status` | Refresh discovery/selected-room observations |
 | `room-next`, `room-select DISPLAY_ID` | Select configured eligible room and read it; no playback effect |
 | `preview URL`, `preview {v1 JSON}` | Parse, validate, resolve policy, print plan only; never submit or contact Sonos |
@@ -176,7 +177,7 @@ Example pure policy check (catalog ID is illustrative):
 preview https://music.apple.com/us/album/example/12345
 ```
 
-Expect shuffle=false/repeat=off with `source-default:album` in an ordinary room. A playlist preview shows the selected room's shuffle exception or preservation, and repeat=off. `policy` diagnostics carry independent `{value, origin}` entries for shuffle and repeat; null/preserve differs from false/off. Invalid sourced combinations print PREVIEW_INVALID and never create a worker job.
+Without device/room overrides, expect album shuffle=false/repeat=off with `source-default:album`; playlists preserve shuffle and resolve repeat=off. Configured overrides show `device-policy` or `room-policy:<display-id>` origins. `policy` diagnostics carry independent `{value, origin}` entries for shuffle and repeat; null/preserve differs from false/off. Invalid sourced combinations print PREVIEW_INVALID and never create a worker job.
 
 Advanced intent example, sent directly to submit or after `preview ` to inspect:
 

@@ -10,9 +10,10 @@ unsigned policyTests() {
                           {{"album", {{"shuffle", true}}},
                            {"playlist", {{"shuffle", true}}},
                            {"track", {{"repeat", "one"}}}}}}}};
+  SourcePolicy devicePolicy;
   bool readOnly = true;
   RoomSelection selection;
-  assert(parseDeviceRooms(config, readOnly, selection.configured) && !readOnly);
+  assert(parseDeviceRooms(config, readOnly, selection.configured, devicePolicy) && !readOnly);
   assert(roomConfigJson(selection.configured) == config["rooms"]);
   ++cases;
   selection.preferredId = "office";
@@ -36,14 +37,14 @@ unsigned policyTests() {
                          {{"rooms", {{"office", {{"track", {{"repeat", nullptr}}}}}}}},
                          {{"rooms", {{"office", {{"album", {{"volume", 20}}}}}}}},
                          {{"rooms", {{std::string(65, 'a'), Json::object()}}}}}) {
-    assert(!parseDeviceRooms(invalid, readOnly, selection.configured));
+    assert(!parseDeviceRooms(invalid, readOnly, selection.configured, devicePolicy));
     assert(!readOnly && roomConfigJson(selection.configured) == saved);
     ++cases;
   }
   Json many = Json::object();
   for (int n = 0; n < 33; ++n)
     many["room-" + std::to_string(n)] = Json::object();
-  assert(!parseDeviceRooms(Json{{"rooms", many}}, readOnly, selection.configured));
+  assert(!parseDeviceRooms(Json{{"rooms", many}}, readOnly, selection.configured, devicePolicy));
   ++cases;
   for (const std::string& text :
        {R"({"rooms":{"office":{},"office":{"track":{"repeat":"one"}}}})",
@@ -114,10 +115,16 @@ unsigned policyTests() {
                parseIntent(card(fields), parsedInput).ok == valid);
         ModePolicy policy;
         assert(parseModePolicy(modes, kind, policy) == valid);
-        if (k < 3) {
+        for (bool deviceLayer : {false, true}) {
           RoomConfig rooms;
-          assert(parseDeviceRooms(Json{{"rooms", {{"test", {{sourceKindName(kind), modes}}}}}},
-                                  readOnly, rooms) == valid);
+          SourcePolicy configuredPolicy;
+          const Json sources = {{sourceKindName(kind), modes}};
+          const Json configPolicy =
+              deviceLayer ? Json{{"policy", sources}} : Json{{"rooms", {{"test", sources}}}};
+          assert(parseDeviceRooms(configPolicy, readOnly, rooms, configuredPolicy) ==
+                 (k < 3 && valid));
+          Json document;
+          assert(parseConfigDocument(configPolicy.dump(), document) == (k < 3 && valid));
         }
         FakeSonos transport;
         Application app(transport, {"RINCON_A", selection.resolvedPolicies, 42});
@@ -245,5 +252,167 @@ unsigned policyTests() {
   assert(later.intent.shuffle == false && later.intent.repeat == Repeat::Off &&
          later.policyRevision == 45);
   ++cases;
+  // Device overrides apply only to resolved allowlisted UUIDs, field by field.
+  {
+    const Json shared = {{"album", {{"shuffle", true}}},
+                         {"playlist", {{"shuffle", true}, {"repeat", "all"}}},
+                         {"track", {{"repeat", "one"}}}};
+    const Json config = {
+        {"read_only", false},
+        {"policy", shared},
+        {"rooms",
+         {{"office", Json::object()},
+          {"kitchen", Json::object()},
+          {"bedroom", {{"playlist", {{"shuffle", false}}}, {"track", {{"repeat", "off"}}}}}}}};
+    const std::vector<Room> discovered{
+        {"RINCON_A", "Office", "1", "RINCON_A", "a", true, ""},
+        {"RINCON_B", "Kitchen", "2", "RINCON_B", "b", true, ""},
+        {"RINCON_C", "Bedroom", "3", "RINCON_C", "c", true, ""},
+        {"RINCON_D", "Unconfigured", "4", "RINCON_D", "d", true, ""}};
+    RoomSelection rooms;
+    SourcePolicy device;
+    bool mode = true;
+    Json document;
+    assert(parseConfigDocument(config.dump(), document) && document == config);
+    assert(parseDeviceRooms(config, mode, rooms.configured, device) && !mode);
+    assert(sourcePolicyJson(device) == shared &&
+           roomConfigJson(rooms.configured) == config["rooms"]);
+    rooms.update(discovered);
+    assert(rooms.rooms.size() == 3 && rooms.resolvedPolicies.count("RINCON_D") == 0);
+    for (const auto& room : rooms.rooms) {
+      const PolicyContext context{room.id, rooms.resolvedPolicies, 50, device};
+      const bool exception = room.displayId == "bedroom";
+      auto result = resolvePolicy(parsed(playlist), context);
+      assert(result.intent.shuffle == !exception && result.intent.repeat == Repeat::All);
+      assert(shuffleOrigin(result) == (exception ? "room-policy:bedroom" : "device-policy"));
+      assert(describeOrigin(result.provenance.at(PolicyField::Repeat)) == "device-policy");
+      auto diagnostics = Json::parse(describeIntent(parsed(playlist), result))["policy"];
+      assert(diagnostics["shuffle"]["value"] == !exception);
+      assert(diagnostics["repeat"] == Json({{"value", "all"}, {"origin", "device-policy"}}));
+      result = resolvePolicy(parsed(album), context);
+      assert(result.intent.shuffle == true && shuffleOrigin(result) == "device-policy");
+      assert(result.intent.repeat == Repeat::Off &&
+             describeOrigin(result.provenance.at(PolicyField::Repeat)) == "source-default:album");
+      result = resolvePolicy(parsed(album + "?i=111"), context);
+      assert(!result.intent.shuffle && shuffleOrigin(result) == "preserve");
+      assert(result.intent.repeat == (exception ? Repeat::Off : Repeat::One));
+      assert(describeOrigin(result.provenance.at(PolicyField::Repeat)) ==
+             (exception ? "room-policy:bedroom" : "device-policy"));
+      for (const auto& url : {album, playlist, album + "?i=111"}) {
+        auto input = parsed(url);
+        input.repeat = Repeat::Off;
+        if (input.source->kind != SourceKind::Track)
+          input.shuffle = false;
+        result = resolvePolicy(input, context);
+        assert(result.intent.repeat == Repeat::Off &&
+               describeOrigin(result.provenance.at(PolicyField::Repeat)) == "explicit");
+        if (input.shuffle.has_value()) {
+          assert(result.intent.shuffle == false && shuffleOrigin(result) == "explicit");
+          input.shuffle = true;
+          input.repeat = Repeat::All;
+          result = resolvePolicy(input, context);
+          assert(result.intent.shuffle == true && shuffleOrigin(result) == "explicit");
+          assert(result.intent.repeat == Repeat::All &&
+                 describeOrigin(result.provenance.at(PolicyField::Repeat)) == "explicit");
+        }
+        ++cases;
+      }
+      // No policy uses observed media or fills omitted fields without a source.
+      for (const Json& fields :
+           std::vector<Json>{{{"repeat", "one"}}, {{"shuffle", false}}, {{"transport", "pause"}}}) {
+        auto input = parsed(card(fields));
+        result = resolvePolicy(input, context);
+        assert(result.intent.shuffle == input.shuffle && result.intent.repeat == input.repeat);
+        assert(shuffleOrigin(result) == (input.shuffle.has_value() ? "explicit" : "preserve"));
+        assert(describeOrigin(result.provenance.at(PolicyField::Repeat)) ==
+               (input.repeat ? "explicit" : "preserve"));
+        ++cases;
+      }
+      result = resolvePolicy(parsed(station), context);
+      assert(!result.intent.shuffle && !result.intent.repeat);
+      assert(shuffleOrigin(result) == "preserve" &&
+             describeOrigin(result.provenance.at(PolicyField::Repeat)) == "preserve");
+      ++cases;
+    }
+    auto unconfigured =
+        resolvePolicy(parsed(playlist), {"RINCON_D", rooms.resolvedPolicies, 50, device});
+    assert(!unconfigured.intent.shuffle && shuffleOrigin(unconfigured) == "preserve");
+    // Rejected replacement leaves the entire device/room/mutation configuration intact.
+    for (const Json& invalid : std::vector<Json>{nullptr,
+                                                 true,
+                                                 "policy",
+                                                 Json::array(),
+                                                 {{"unknown", Json::object()}},
+                                                 {{"station", Json::object()}},
+                                                 {{"album", nullptr}},
+                                                 {{"playlist", {{"shuffle", "true"}}}},
+                                                 {{"album", {{"volume", 10}}}},
+                                                 {{"track", {{"shuffle", false}}}},
+                                                 {{"track", {{"repeat", "all"}}}},
+                                                 {{"album", {{"repeat", "one"}}}},
+                                                 {{"playlist", {{"repeat", "one"}}}},
+                                                 {{"track", {{"repeat", nullptr}}}}}) {
+      Json replacement = {{"read_only", true}, {"policy", invalid}, {"rooms", Json::object()}};
+      assert(!parseDeviceRooms(replacement, mode, rooms.configured, device));
+      assert(!mode && sourcePolicyJson(device) == shared &&
+             roomConfigJson(rooms.configured) == config["rooms"]);
+      document = config;
+      assert(!parseConfigDocument(replacement.dump(), document) && document == config);
+      ++cases;
+    }
+    for (const auto& text :
+         std::vector<std::string>{R"({"policy":{},"policy":{}})",
+                                  R"({"policy":{"playlist":{"shuffle":true,"shuffle":false}}})",
+                                  R"({"policy":{"playlist":{"shuffle":[[[[[[true]]]]]]}}})",
+                                  std::string("{\"policy\":{\"playlist\":{\"shuffle\":\"") +
+                                      std::string(4088, 'x') + "\"}}}"}) {
+      document = config;
+      assert(!parseConfigDocument(text, document) && document == config);
+      ++cases;
+    }
+    Json badRooms = {{"read_only", true}, {"policy", Json::object()}, {"rooms", nullptr}};
+    assert(!parseDeviceRooms(badRooms, mode, rooms.configured, device));
+    assert(!mode && sourcePolicyJson(device) == shared &&
+           roomConfigJson(rooms.configured) == config["rooms"]);
+    // Execution consumes the accepted mixture even after both layers are replaced.
+    auto frozen = resolvePolicy(parsed(playlist), {"RINCON_C", rooms.resolvedPolicies, 50, device});
+    const auto diagnostics = describeIntent(parsed(playlist), frozen);
+    for (bool emptyPolicy : {false, true}) {
+      Json replacement = {{"rooms", config["rooms"]}};
+      if (emptyPolicy)
+        replacement["policy"] = Json::object();
+      assert(parseDeviceRooms(replacement, mode, rooms.configured, device));
+      assert(sourcePolicyJson(device).empty());
+      ++cases;
+    }
+    rooms.configured["bedroom"] = {};
+    rooms.update(discovered);
+    ControlHttp http;
+    http.id = "RINCON_C";
+    http.room = "Bedroom";
+    http.uri = "x-rincon-queue:RINCON_C#0";
+    DirectSonos sonos(http, {http.id, "52231"});
+    Application app(sonos, {http.id, rooms.resolvedPolicies, 51, device});
+    assert(app.submit(frozen).ok && http.mode == "REPEAT_ALL");
+    assert(frozen.targetId == "RINCON_C" && frozen.policyRevision == 50 &&
+           describeIntent(parsed(playlist), frozen) == diagnostics &&
+           app.state().provenance == frozen.provenance);
+    auto later = resolvePolicy(parsed(playlist), {http.id, rooms.resolvedPolicies, 51, device});
+    assert(!later.intent.shuffle && shuffleOrigin(later) == "preserve" &&
+           later.intent.repeat == Repeat::Off && later.policyRevision == 51);
+    ++cases;
+    for (bool emptyRooms : {false, true}) {
+      Json replacement = {{"policy", shared}};
+      if (emptyRooms)
+        replacement["rooms"] = Json::object();
+      assert(parseDeviceRooms(replacement, mode, rooms.configured, device));
+      rooms.update(discovered);
+      assert(rooms.rooms.empty() && rooms.resolvedPolicies.empty() && !rooms.selected() &&
+             !rooms.cycle());
+      assert(!resolvePolicy(parsed(playlist), {"RINCON_A", rooms.resolvedPolicies, 52, device})
+                  .intent.shuffle);
+      ++cases;
+    }
+  }
   return cases;
 }

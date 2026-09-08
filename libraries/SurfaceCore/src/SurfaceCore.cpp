@@ -428,7 +428,7 @@ ModePolicy sourceDefaults(SourceKind kind) {
   }
   return {};
 }
-ModePolicy roomSourcePolicy(const RoomPolicy& policy, SourceKind kind) {
+ModePolicy sourcePolicyModes(const SourcePolicy& policy, SourceKind kind) {
   switch (kind) {
   case SourceKind::Album:
     return policy.album;
@@ -449,6 +449,8 @@ std::string describeOrigin(const FieldProvenance& provenance) {
     return "explicit";
   case PolicyOrigin::RoomPolicy:
     return "room-policy:" + provenance.key;
+  case PolicyOrigin::DevicePolicy:
+    return "device-policy";
   case PolicyOrigin::SourceDefault:
     return "source-default:" + provenance.key;
   }
@@ -458,31 +460,38 @@ ResolvedIntent resolvePolicy(const MusicIntent& intent, const PolicyContext& con
   // Callers validate incoming intents first. Execution validates the frozen result
   // again; neither observations nor later configuration participate in resolution.
   ResolvedIntent result{intent, {}, context.revision, context.targetId};
-  ModePolicy defaults, overrides;
+  ModePolicy defaults, device, overrides;
   std::string displayId;
   if (intent.source) {
     defaults = sourceDefaults(intent.source->kind);
     const auto room = context.rooms.find(context.targetId);
+    // Persisted policy applies only to configured, eligible UUIDs.
     if (room != context.rooms.end()) {
-      overrides = roomSourcePolicy(room->second.policy, intent.source->kind);
+      device = sourcePolicyModes(context.policy, intent.source->kind);
+      overrides = sourcePolicyModes(room->second.policy, intent.source->kind);
       displayId = room->second.displayId;
     }
   }
-  auto resolve = [&](auto& value, const auto& overrideValue, const auto& defaultValue,
-                     PolicyField field) {
+  auto resolve = [&](auto& value, const auto& overrideValue, const auto& deviceValue,
+                     const auto& defaultValue, PolicyField field) {
     auto& origin = result.provenance[field];
     if (value.has_value())
       origin = {PolicyOrigin::Explicit, ""};
     else if (overrideValue.has_value()) {
       value = overrideValue;
       origin = {PolicyOrigin::RoomPolicy, displayId};
+    } else if (deviceValue.has_value()) {
+      value = deviceValue;
+      origin = {PolicyOrigin::DevicePolicy, ""};
     } else if (defaultValue.has_value()) {
       value = defaultValue;
       origin = {PolicyOrigin::SourceDefault, sourceKindName(intent.source->kind)};
     }
   };
-  resolve(result.intent.shuffle, overrides.shuffle, defaults.shuffle, PolicyField::Shuffle);
-  resolve(result.intent.repeat, overrides.repeat, defaults.repeat, PolicyField::Repeat);
+  resolve(result.intent.shuffle, overrides.shuffle, device.shuffle, defaults.shuffle,
+          PolicyField::Shuffle);
+  resolve(result.intent.repeat, overrides.repeat, device.repeat, defaults.repeat,
+          PolicyField::Repeat);
   return result;
 }
 

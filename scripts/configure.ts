@@ -13,7 +13,8 @@ async function status(port: DevicePort) {
     !object(result) ||
     !Number.isSafeInteger(result.policyRevision) ||
     typeof result.read_only !== "boolean" ||
-    !object(result.rooms)
+    !object(result.rooms) ||
+    !object(result.policy)
   )
     throw new Error();
   return result;
@@ -46,23 +47,28 @@ export async function configureDevice(
     }
     const rooms = profile.config.rooms ?? {};
     if (!object(rooms)) throw new Error();
+    const normalizePolicy = (policies: unknown) => {
+      if (!object(policies)) throw new Error();
+      return Object.fromEntries(
+        Object.entries(policies).filter(
+          ([, fields]) => object(fields) && Object.keys(fields).length,
+        ),
+      );
+    };
     const expected = Object.fromEntries(
-      Object.entries(rooms).map(([room, policies]) => {
-        if (!object(policies)) throw new Error();
-        return [
-          room,
-          Object.fromEntries(
-            Object.entries(policies).filter(
-              ([, fields]) => object(fields) && Object.keys(fields).length,
-            ),
-          ),
-        ];
-      }),
+      Object.entries(rooms).map(([room, policies]) => [
+        room,
+        normalizePolicy(policies),
+      ]),
     );
     if (
       after.policyRevision !== Number(before.policyRevision) + 1 ||
       after.read_only !== (profile.config.read_only ?? true) ||
-      !isDeepStrictEqual(after.rooms, expected)
+      !isDeepStrictEqual(after.rooms, expected) ||
+      !isDeepStrictEqual(
+        after.policy,
+        normalizePolicy(profile.config.policy ?? {}),
+      )
     )
       throw new ProfileError(
         "Device configuration status does not match submitted profile",
@@ -75,7 +81,7 @@ export async function configureDevice(
     );
   }
   console.log(
-    "Configuration saved; revision, read-only mode, and room policies verified.",
+    "Configuration saved; revision, read-only mode, and device/room policies verified.",
   );
 }
 export async function configure(

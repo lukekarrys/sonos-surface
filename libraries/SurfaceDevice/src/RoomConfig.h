@@ -29,63 +29,78 @@ inline bool parseModePolicy(const nlohmann::json& json, SourceKind kind, ModePol
   output = next;
   return true;
 }
+// Both persisted layers use exactly the same source schema and invariants.
+inline bool parseSourcePolicy(const nlohmann::json& json, SourcePolicy& output) {
+  if (!json.is_object())
+    return false;
+  SourcePolicy next;
+  for (auto source = json.begin(); source != json.end(); ++source) {
+    if (source.key() == "album") {
+      if (!parseModePolicy(source.value(), SourceKind::Album, next.album))
+        return false;
+    } else if (source.key() == "playlist") {
+      if (!parseModePolicy(source.value(), SourceKind::Playlist, next.playlist))
+        return false;
+    } else if (source.key() == "track") {
+      if (!parseModePolicy(source.value(), SourceKind::Track, next.track))
+        return false;
+    } else
+      return false; // No station policy or generic rules language.
+  }
+  output = next;
+  return true;
+}
 // Structural replacement is atomic. Invalid display ID strings stay visible for
 // topology diagnostics and never bind; defaults are never inserted into config.
-inline bool parseDeviceRooms(const nlohmann::json& config, bool& readOnly, RoomConfig& rooms) {
+inline bool parseDeviceRooms(const nlohmann::json& config, bool& readOnly, RoomConfig& rooms,
+                             SourcePolicy& policy) {
   if (!config.is_object())
     return false;
   bool mode = true;
   RoomConfig next;
+  SourcePolicy nextPolicy;
   if (config.contains("read_only")) {
     if (!config["read_only"].is_boolean())
       return false;
     mode = config["read_only"].get<bool>();
   }
+  if (config.contains("policy") && !parseSourcePolicy(config["policy"], nextPolicy))
+    return false;
   if (config.contains("rooms")) {
     const auto& entries = config["rooms"];
     if (!entries.is_object() || entries.size() > 32)
       return false;
     for (auto it = entries.begin(); it != entries.end(); ++it) {
-      if (it.key().size() > 64 || !it.value().is_object())
+      SourcePolicy roomPolicy;
+      if (it.key().size() > 64 || !parseSourcePolicy(it.value(), roomPolicy))
         return false;
-      RoomPolicy policy;
-      for (auto source = it.value().begin(); source != it.value().end(); ++source) {
-        if (source.key() == "album") {
-          if (!parseModePolicy(source.value(), SourceKind::Album, policy.album))
-            return false;
-        } else if (source.key() == "playlist") {
-          if (!parseModePolicy(source.value(), SourceKind::Playlist, policy.playlist))
-            return false;
-        } else if (source.key() == "track") {
-          if (!parseModePolicy(source.value(), SourceKind::Track, policy.track))
-            return false;
-        } else
-          return false; // No station policy or generic rules language.
-      }
-      next.emplace(it.key(), policy);
+      next.emplace(it.key(), roomPolicy);
     }
   }
   readOnly = mode;
   rooms = std::move(next);
+  policy = nextPolicy;
   return true;
 }
-inline nlohmann::json roomConfigJson(const RoomConfig& rooms) {
+inline nlohmann::json sourcePolicyJson(const SourcePolicy& policy) {
   using Json = nlohmann::json;
-  Json result = Json::object();
-  for (const auto& room : rooms) {
-    Json sources = Json::object();
-    for (auto kind : {SourceKind::Album, SourceKind::Playlist, SourceKind::Track}) {
-      const auto modes = roomSourcePolicy(room.second, kind);
-      Json fields = Json::object();
-      if (modes.shuffle.has_value())
-        fields["shuffle"] = *modes.shuffle;
-      if (modes.repeat)
-        fields["repeat"] = repeatName(*modes.repeat);
-      if (!fields.empty())
-        sources[sourceKindName(kind)] = fields;
-    }
-    result[room.first] = sources;
+  Json sources = Json::object();
+  for (auto kind : {SourceKind::Album, SourceKind::Playlist, SourceKind::Track}) {
+    const auto modes = sourcePolicyModes(policy, kind);
+    Json fields = Json::object();
+    if (modes.shuffle.has_value())
+      fields["shuffle"] = *modes.shuffle;
+    if (modes.repeat)
+      fields["repeat"] = repeatName(*modes.repeat);
+    if (!fields.empty())
+      sources[sourceKindName(kind)] = fields;
   }
+  return sources;
+}
+inline nlohmann::json roomConfigJson(const RoomConfig& rooms) {
+  nlohmann::json result = nlohmann::json::object();
+  for (const auto& room : rooms)
+    result[room.first] = sourcePolicyJson(room.second);
   return result;
 }
 // Reject duplicates before JSON's object representation can erase them. Bound
@@ -135,7 +150,7 @@ inline bool parseConfigDocument(const std::string& text, nlohmann::json& output)
     return false;
   for (auto it = json.begin(); it != json.end(); ++it) {
     const auto& k = it.key();
-    if (k == "read_only" || k == "rooms")
+    if (k == "read_only" || k == "rooms" || k == "policy")
       continue;
     if (k != "wifi_ssid" && k != "wifi_password" && k != "apple_region")
       return false;
@@ -144,7 +159,8 @@ inline bool parseConfigDocument(const std::string& text, nlohmann::json& output)
   }
   bool mode;
   RoomConfig rooms;
-  if (!parseDeviceRooms(json, mode, rooms))
+  SourcePolicy policy;
+  if (!parseDeviceRooms(json, mode, rooms, policy))
     return false;
   output = std::move(json);
   return true;

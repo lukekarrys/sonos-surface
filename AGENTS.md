@@ -38,7 +38,7 @@ PRs should explain behavior, validation, and unresolved risks; link issues when 
 
 ## Agent Working Style
 
-Device runtime `read_only=true` blocks all Sonos mutations at HTTP dispatch; `read_only=false` permits requested mutations only for configured, eligible rooms. The room-keyed config object is the allowlist and contains source-specific exceptions. Display IDs resolve from current names; accepted requests freeze UUID and policy. M5/Waveshare flashing and non-Sonos tests are authorized. Keep autonomous tests read-only; do not turn an existing true flag false to complete testing. Stop for physical gestures or intentional live playback tests.
+Device runtime `read_only=true` blocks all Sonos mutations at HTTP dispatch; `read_only=false` permits requested mutations only for configured, eligible rooms. `rooms` is always the authoritative room allowlist and contains source-specific exceptions. Top-level `policy` applies only to configured rooms and cannot enroll rooms. Display IDs resolve from current names; accepted requests freeze UUID and policy. M5/Waveshare flashing and non-Sonos tests are authorized. Keep autonomous tests read-only; do not turn an existing true flag false to complete testing. Stop for physical gestures or intentional live playback tests.
 
 Resolve reversible engineering choices autonomously. Involve the human for meaningful hardware tests or choices that materially change user-visible semantics, persisted formats, or architecture. Label deliberate contracts, reference evidence, and experimental assumptions separately. Prefer small working slices on both boards; measure Sonos/NFC behavior before adding abstractions. Stay within the current task's authorized scope.
 

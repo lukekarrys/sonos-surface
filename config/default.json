@@ -4,12 +4,6 @@
   "apple_region": "52231",
   "read_only": true,
   "rooms": {
-    "office": {},
-    "living-room": {
-      "playlist": {
-        "shuffle": true
-      }
-    },
-    "bedroom": {}
+    "office": {}
   }
 }
