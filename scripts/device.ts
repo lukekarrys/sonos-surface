@@ -15,6 +15,9 @@ import {
 } from "./common.ts";
 import { loadProfile } from "./config-profile.ts";
 import type { Profile } from "./config-profile.ts";
+import { hostCompilationDatabase } from "./host-build.ts";
+import type { HostTarget } from "./host-build.ts";
+import { hostTestTargets, hostProbeTarget } from "./host-test-targets.ts";
 import { configureDevice } from "./configure.ts";
 import { listPorts, openPort, readyPort, request } from "./serial-device.ts";
 
@@ -189,7 +192,7 @@ export function editorDatabase(
         .map((arg) => (arg === firmware.file ? ino : arg)),
     ],
   });
-  for (const source of owned) {
+  for (const source of [...owned, ino, firmware.file]) {
     const entry = mapped.find((command) => command.file === source);
     if (!entry)
       throw new Error(`Compilation database lacks ${basename(source)}`);
@@ -197,6 +200,11 @@ export function editorDatabase(
     if (
       !entry.arguments[0].includes("xtensa-esp32s3-elf-g++") ||
       !entry.arguments.includes(`-D${hardwareTargets[targetId].define}`) ||
+      Object.values(hardwareTargets).some(
+        (target) =>
+          target.id !== targetId &&
+          entry.arguments.includes(`-D${target.define}`),
+      ) ||
       !flags.includes("/cores/esp32") ||
       !flags.includes("SurfaceJson")
     )
@@ -205,6 +213,60 @@ export function editorDatabase(
       );
   }
   return mapped;
+}
+export function mergeEditorDatabase(
+  embedded: CompileCommand[],
+  host: CompileCommand[],
+): CompileCommand[] {
+  const merged = new Map<string, CompileCommand>();
+  const isTest = (file: string) => file.startsWith(join(ROOT, "tests") + "/");
+  for (const entry of embedded) {
+    const file = resolve(entry.directory, entry.file);
+    if (!isTest(file) && !merged.has(file))
+      merged.set(file, { ...entry, file });
+  }
+  for (const entry of host) {
+    const file = resolve(entry.directory, entry.file);
+    const previous = merged.get(file);
+    if (
+      previous &&
+      isTest(file) &&
+      JSON.stringify(previous.arguments) !== JSON.stringify(entry.arguments)
+    )
+      throw new Error(`Conflicting host compiler contexts for ${file}`);
+    if (!previous) merged.set(file, { ...entry, file });
+  }
+  return [...merged.values()];
+}
+export function validateHostEditorDatabase(
+  database: CompileCommand[],
+  targets: HostTarget[],
+  sources = sourceFiles(join(ROOT, "tests"), /\.cpp$/),
+) {
+  const expected = hostCompilationDatabase(targets);
+  for (const source of sources) {
+    const entries = database.filter((entry) => entry.file === source);
+    const context = expected.find((entry) => entry.file === source);
+    if (entries.length !== 1 || !context)
+      throw new Error(
+        `Compilation database lacks unique host test context for ${source}`,
+      );
+    const entry = entries[0];
+    if (
+      basename(entry.arguments[0]) !== "clang++" ||
+      !entry.arguments.includes("-std=c++17") ||
+      entry.arguments.some((arg) =>
+        /xtensa|SURFACE_STICK_S3|SURFACE_WAVESHARE_1_8|Arduino\.h|\/cores\/esp32|esp32-arduino-libs|\/esp32\/hardware\//.test(
+          arg,
+        ),
+      ) ||
+      entry.directory !== context.directory ||
+      JSON.stringify(entry.arguments) !== JSON.stringify(context.arguments)
+    )
+      throw new Error(
+        `Compilation database has incomplete host compiler context for ${source}`,
+      );
+  }
 }
 export async function configureCpp(targetId: HardwareTargetId) {
   let diagnostics = "";
@@ -221,12 +283,17 @@ export async function configureCpp(targetId: HardwareTargetId) {
   const entries = JSON.parse(
     readFileSync(join(buildPath(targetId), "compile_commands.json"), "utf8"),
   ) as CompileCommand[];
-  const database = editorDatabase(entries, targetId);
+  const targets = [...hostTestTargets(), hostProbeTarget()];
+  const database = mergeEditorDatabase(
+    editorDatabase(entries, targetId),
+    hostCompilationDatabase(targets),
+  );
+  validateHostEditorDatabase(database, targets);
   const target = join(ROOT, ".build/compile_commands.json");
   writeFileSync(`${target}.tmp`, JSON.stringify(database, null, 2) + "\n");
   renameSync(`${target}.tmp`, target);
   console.log(
-    `C++ editor target: ${targetId}. Verified owned library and firmware entries in .build/compile_commands.json.`,
+    `C++ editor target: ${targetId}. Verified firmware, owned libraries, and all host test translation units in .build/compile_commands.json.`,
   );
 }
 function hardwareDirectory(targetId: HardwareTargetId, touch = false): string {

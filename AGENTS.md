@@ -12,7 +12,7 @@ Node 24 (24.12 or later) is the host runtime. Run `npm install`, then `node --ru
 
 Leave `node --run check` green: static TypeScript checking, Prettier, clang-format, and portable tests with sanitizers and compiler warnings treated as errors. Firmware/tooling changes should also pass `node --run check:full`, which builds `stick-s3` and `ws-1.8` with Arduino warnings set to `more`.
 
-Run `node --run cpp:configure` (`stick-s3` default) or `node --run cpp:configure -- ws-1.8` to select one active editor target. The generated, ignored `.build/compile_commands.json` owns C++ editor/compiler context; do not add fake defines or disable diagnostics. Keep generated `.deps/`, `.build/`, `node_modules/`, and private `.local/` files untracked. Update dependency pins and setup instructions together.
+Run `node --run cpp:configure` (`stick-s3` default) or `node --run cpp:configure -- ws-1.8` to select one active embedded editor target; host-test clang++ context is always included from the real host target descriptions. The generated, ignored `.build/compile_commands.json` owns C++ editor/compiler context; do not add fake defines or disable diagnostics. Keep generated `.deps/`, `.build/`, `node_modules/`, and private `.local/` files untracked. Update dependency pins and setup instructions together.
 
 ## Environment profiles and local secrets
 

@@ -1,7 +1,5 @@
 import { isIPv4 } from "node:net";
-import { join } from "node:path";
 import {
-  ROOT,
   cli,
   main,
   numberOption,
@@ -9,15 +7,10 @@ import {
   run,
   stringOption,
 } from "./common.ts";
-import { compileHost, includes, sharedSources } from "./host-build.ts";
+import { compileHost } from "./host-build.ts";
+import { hostProbeTarget } from "./host-test-targets.ts";
 export async function buildProbe() {
-  return compileHost(
-    "sonos_read",
-    [...sharedSources(), join(ROOT, "tests/sonos_read.cpp")],
-    includes,
-    false,
-    ["-lcurl"],
-  );
+  return compileHost(hostProbeTarget());
 }
 export async function probeAddress(
   binary: string,

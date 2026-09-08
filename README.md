@@ -63,7 +63,9 @@ node --run cpp:configure -- stick-s3
 node --run cpp:configure -- ws-1.8
 ```
 
-Each command replaces `.build/compile_commands.json` with Arduino CLI's real compiler commands for one active target. `stick-s3` is the default. Choose `ws-1.8` when editing its hardware/UI code; the target defines intentionally differ. The generator maps Arduino's copied library sources and generated sketch back to the owned files so the editor uses their actual compiler, response files, defines, and includes. GCC response files are expanded, and prefix-relative include flags become equivalent absolute include paths for Microsoft C/C++. VS Code consumes that exact canonical path. Regenerate after changing toolchain pins or compiler options; quick checks do not regenerate it.
+Each command configures one active embedded target and always includes the actual host clang++ context for every C++ translation unit in `tests/`, including the read-only probe. `stick-s3` is the default. Switching to `ws-1.8` changes only the embedded context; host tests keep their own C++17 flags and includes. Test execution and database generation consume the same typed target descriptions in `scripts/host-test-targets.ts` and compiler arguments in `scripts/host-build.ts`. Test headers inherit their including host translation unit's context; no separate tests configuration is needed.
+
+The generator maps Arduino's copied library sources and generated sketch back to the owned files, expands GCC response files, and converts prefix-relative includes to equivalent absolute paths for Microsoft C/C++. Shared library implementations prefer the selected embedded context. Firmware and complete host-test coverage are validated before atomically replacing `.build/compile_commands.json`, the canonical path consumed by VS Code. Regenerate after adding test targets or changing toolchain pins or compiler options; quick checks do not regenerate it.
 
 ## Configuration
 

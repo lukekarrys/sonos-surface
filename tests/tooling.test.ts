@@ -4,7 +4,22 @@ import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { ROOT, run, sourceFiles } from "../scripts/common.ts";
 import { clangFormat } from "../scripts/format-cpp.ts";
-import { compileArguments, editorDatabase, device } from "../scripts/device.ts";
+import {
+  compileArguments,
+  editorArguments,
+  editorDatabase,
+  mergeEditorDatabase,
+  validateHostEditorDatabase,
+  device,
+} from "../scripts/device.ts";
+import {
+  hostCompilationDatabase,
+  hostCompileArguments,
+} from "../scripts/host-build.ts";
+import {
+  hostTestTargets,
+  hostProbeTarget,
+} from "../scripts/host-test-targets.ts";
 import {
   hardwareTargets,
   hardwareTargetId,
@@ -208,4 +223,132 @@ test("full checks build every current target through the matching package task",
   for (const alias of ["stick", "waveshare"])
     for (const action of ["build", "flash"])
       assert.equal(scripts[`${action}:${alias}`], undefined);
+});
+
+test("host editor coverage follows real build targets and survives embedded switching", () => {
+  const targets = [...hostTestTargets(), hostProbeTarget()];
+  const host = hostCompilationDatabase(targets);
+  const testFiles = sourceFiles(join(ROOT, "tests"), /\.cpp$/);
+  let previous;
+  for (const { define } of Object.values(hardwareTargets)) {
+    // Simulate stale Arduino test entries and duplicate shared implementations.
+    const embedded = host.map((entry) => ({
+      ...entry,
+      arguments: ["xtensa-esp32s3-elf-g++", `-D${define}`, entry.file],
+    }));
+    const merged = mergeEditorDatabase(embedded, host);
+    assert.equal(
+      new Set(merged.map((entry) => entry.file)).size,
+      merged.length,
+    );
+    validateHostEditorDatabase(merged, targets);
+    const tests = merged.filter((entry) => testFiles.includes(entry.file));
+    if (previous) assert.deepEqual(tests, previous);
+    previous = tests;
+    for (const entry of merged.filter((entry) =>
+      entry.file.startsWith(join(ROOT, "libraries") + "/"),
+    ))
+      assert.ok(entry.arguments.includes(`-D${define}`));
+    for (const target of targets) {
+      for (const source of target.sources.filter((file) =>
+        testFiles.includes(file),
+      )) {
+        const entry = tests.find((entry) => entry.file === source)!;
+        assert.deepEqual(
+          entry.arguments.slice(0, -2),
+          hostCompileArguments(target),
+        );
+        assert.equal(
+          entry.arguments.includes("-fsanitize=address,undefined"),
+          target.sanitize !== false,
+        );
+      }
+    }
+  }
+  // A target added to the normal build description is immediately editor eligible.
+  const added = {
+    name: "new_test",
+    sources: [join(ROOT, "tests/new_test.cpp")],
+    includes: [join(ROOT, "tests/fixture include")],
+    options: ["-DFIXTURE_VALUE=1"],
+  };
+  const updated = [...targets, added];
+  const database = mergeEditorDatabase([], hostCompilationDatabase(updated));
+  validateHostEditorDatabase(database, updated, [
+    ...testFiles,
+    ...added.sources,
+  ]);
+  assert.ok(
+    database
+      .find((entry) => entry.file === added.sources[0])
+      ?.arguments.includes("-DFIXTURE_VALUE=1"),
+  );
+});
+
+test("host editor validation rejects missing, conflicting, incomplete, and ESP32 contexts", () => {
+  const targets = [...hostTestTargets(), hostProbeTarget()];
+  const database = mergeEditorDatabase([], hostCompilationDatabase(targets));
+  const source = join(ROOT, "tests/core_test.cpp");
+  const original = database.find((entry) => entry.file === source)!;
+  const others = database.filter((entry) => entry.file !== source);
+  assert.throws(
+    () => validateHostEditorDatabase(others, targets),
+    /lacks unique host/,
+  );
+  assert.throws(
+    () => validateHostEditorDatabase([...database, original], targets),
+    /lacks unique host/,
+  );
+  assert.throws(
+    () =>
+      validateHostEditorDatabase(database, targets, [
+        join(ROOT, "tests/unregistered.cpp"),
+      ]),
+    /lacks unique host/,
+  );
+  const incomplete = [
+    original.arguments.slice(1),
+    original.arguments.filter((arg) => arg !== "-std=c++17"),
+    original.arguments.filter((arg) => !arg.startsWith("-I")),
+    ...[
+      "-DSURFACE_STICK_S3",
+      "-DSURFACE_WAVESHARE_1_8",
+      "-include",
+      "Arduino.h",
+      "-I/cores/esp32",
+    ].map((arg) => [...original.arguments, arg]),
+  ];
+  for (const args of incomplete) {
+    const broken = { ...original, arguments: args };
+    assert.throws(
+      () => validateHostEditorDatabase([...others, broken], targets),
+      /incomplete host/,
+    );
+    assert.throws(
+      () => mergeEditorDatabase([], [original, broken]),
+      /Conflicting host/,
+    );
+  }
+});
+
+test("editor response expansion preserves quoted paths and prefix-relative includes", (t) => {
+  const root = mkdtempSync(join(ROOT, ".build/response-fixture-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  writeFileSync(join(root, "nested"), '-DVALUE=1 -I"path with spaces"');
+  writeFileSync(
+    join(root, "flags"),
+    '@nested -iprefix "sdk root/" -iwithprefixbefore include',
+  );
+  assert.deepEqual(editorArguments(["clang++", "@flags", "source.cpp"], root), [
+    "clang++",
+    "-DVALUE=1",
+    "-Ipath with spaces",
+    `-I${join(root, "sdk root/include")}`,
+    "source.cpp",
+  ]);
+  writeFileSync(join(root, "flags"), '"unterminated');
+  assert.throws(
+    () => editorArguments(["@flags"], root),
+    /Malformed compiler response/,
+  );
 });
