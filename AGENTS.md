@@ -36,3 +36,66 @@ are authorized. Keep autonomous tests read-only; do not turn an existing true fl
 false to complete testing. Stop for physical gestures or intentional live playback tests.
 
 Resolve reversible engineering choices autonomously. Involve the human for meaningful hardware tests or choices that materially change user-visible semantics, persisted formats, or architecture. Label deliberate contracts, reference evidence, and experimental assumptions separately. Prefer small working slices on both boards; measure Sonos/NFC behavior before adding abstractions. Stay within the current task's authorized scope.
+
+## Documentation durability rule
+
+Repository documentation describes CURRENT durable architecture, contracts,
+hardware facts, setup, and known unresolved limitations.
+
+Do NOT use repository docs as an engineering diary or test-run log.
+
+In particular, DO NOT commit documentation merely to record:
+
+- a device being flashed
+- read_only being temporarily changed
+- current config revisions
+- the currently selected room
+- a one-off owner test or confirmation
+- a successful build/test/USB run
+- temporary runtime state
+- log filenames from a development session
+- chronological "then we tested..." evidence
+- completion of a milestone/checkpoint whose durable behavior is already documented
+
+Those facts may remain in `.local/` logs or the agent conversation and normally
+should NOT cause a repository change.
+
+Only update durable docs when the work establishes or changes something a future
+developer actually needs to know, such as:
+
+- architecture or product semantics
+- wire/config/schema contracts
+- supported hardware or wiring
+- reproducible setup/recovery procedure
+- a persistent hardware quirk
+- an unresolved limitation
+- a measured constraint that materially affects implementation choices
+
+When deciding whether to update docs, apply this test:
+
+> If this exact development session had never happened, would a future agent still
+> need this information to correctly understand, build, operate, or modify the system?
+
+If no, do not commit it.
+
+Examples:
+
+GOOD:
+- "read_only is a persisted runtime Sonos-mutation gate."
+- "CST820 calibration is persisted per physical device."
+- "Topology listener must not start before Wi-Fi because ESP32 networking can assert."
+- "CO5300 rendering requires the full-frame PSRAM workaround."
+
+DO NOT DOCUMENT:
+- "Today the owner set read_only=false."
+- "Stick is currently on revision 10."
+- "The owner tested playback and it worked."
+- "We flashed both boards and saved logs at .local/foo.log."
+- "The device is currently left on Office."
+
+Git history and ignored `.local/` logs are the development record. Durable docs are
+not the development record.
+
+Do not add or preserve historical checkpoint sections merely because previous
+agents did so. If encountered during relevant work, remove stale session-specific
+material when it is clearly no longer durable documentation.
