@@ -313,7 +313,7 @@ export async function flash(
     throw new Error("--env-file requires --config when flashing");
   // Resolve before builds, USB access, or writes. Never place credentials in process args.
   const profile = config ? loadProfile(config, envFile) : undefined;
-  if (profile) await ops.build(board, touch);
+  await ops.build(board, touch);
   let uploadError: unknown;
   try {
     await ops.upload(board, port, touch);

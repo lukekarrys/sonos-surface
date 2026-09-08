@@ -136,7 +136,7 @@ node --run configure -- --port STICK_PORT --config /path/to/profile.json --env-f
 
 `node --run configure` defaults to repo-root `config/default.json`, which is read-only. The default environment-file path is also relative to the repository, independent of the working directory. Explicit relative paths resolve from the working directory.
 
-**Flash without `--config` only flashes an already built image and preserves the current device configuration.** Build it first with `node --run build:stick` or `node --run build:waveshare`. To inspect the application afterward, use `node --run monitor -- --device BOARD --port PORT`.
+**Flash always builds the requested current firmware before uploading and waiting for application readiness. Without `--config`, it preserves the current device configuration.** When `--config` is supplied, profile/env preflight runs before the build or any USB access, and the profile is applied and verified after readiness. To inspect the application afterward, use `node --run monitor -- --device BOARD --port PORT`.
 
 Ports can change; identify the board before flashing. Flash verifies hashes, uses watchdog reset at 115200 baud, then checks application READY or an idle heartbeat. Application readiness does not by itself prove working peripherals or visible pixels. A failed build/flash never proceeds to profile upload.
 

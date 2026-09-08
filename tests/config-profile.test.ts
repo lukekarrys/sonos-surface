@@ -256,7 +256,17 @@ test("flash preflight, preservation, readiness, failed build/upload ordering", a
   await flash("stick", "fake", f.path, f.env, false, ops);
   assert.deepEqual(events.splice(0), ["build", "flash", "ready", "configure"]);
   await flash("stick", "fake", undefined, undefined, false, ops);
-  assert.deepEqual(events.splice(0), ["flash", "ready"]);
+  assert.deepEqual(events.splice(0), ["build", "flash", "ready"]);
+  await assert.rejects(
+    flash("stick", "fake", undefined, undefined, false, {
+      ...ops,
+      async build() {
+        events.push("build");
+        throw new Error();
+      },
+    }),
+  );
+  assert.deepEqual(events.splice(0), ["build"]);
   await assert.rejects(
     flash("stick", "fake", f.path, f.env, false, {
       ...ops,
@@ -293,6 +303,32 @@ test("flash preflight, preservation, readiness, failed build/upload ordering", a
   );
   await assert.rejects(flash("stick", "fake", f.path, f.env, false, ops));
   assert.deepEqual(events, []);
+});
+test("flash resolves the profile before building and applies that captured profile", async (t) => {
+  const f = fixture(t);
+  const expected = loadProfile(f.path, f.env);
+  const events: string[] = [];
+  await flash("waveshare", "fake", f.path, f.env, true, {
+    async build(board, touch) {
+      assert.equal(board, "waveshare");
+      assert.equal(touch, true);
+      events.push("build");
+      // Changing the file after preflight must not change the submitted profile.
+      writeFileSync(f.path, "{invalid");
+    },
+    async upload(board, port, touch) {
+      assert.deepEqual([board, port, touch], ["waveshare", "fake", true]);
+      events.push("flash");
+    },
+    async ready() {
+      events.push("ready");
+    },
+    async configure(_port, profile) {
+      assert.deepEqual(profile, expected);
+      events.push("configure");
+    },
+  });
+  assert.deepEqual(events, ["build", "flash", "ready", "configure"]);
 });
 test("serial readiness requires application evidence and reconnect never resends", async () => {
   assert.equal(serialOptions.hupcl, false);
