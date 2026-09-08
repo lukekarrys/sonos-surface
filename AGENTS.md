@@ -8,27 +8,21 @@
 
 ## Build, Test, and Development Commands
 
-Run `python3 scripts/setup.py` for pinned Arduino-ESP32 dependencies, or add `--host-only` for portable tests. Run `python3 scripts/test.py`, then `python3 scripts/device.py build stick` or `build waveshare`. README documents exact flash/monitor commands. Keep generated `.deps/`, `.build/`, and private `.local/` files untracked. Update dependency pins and setup instructions together.
+Node 24 (24.12 or later) is the host runtime. Run `npm install`, then `node --run setup` for pinned Arduino dependencies (`-- --host-only` for portable dependencies). TypeScript 7 checks host code; VS Code uses the recommended TypeScript 7 extension and the workspace package. TypeScript executes natively with erasable syntax and explicit `.ts` imports; no transpilation step or runtime aliases. Package scripts through `node --run` are the canonical task interface.
+
+Leave `node --run check` green: static TypeScript checking, Prettier, clang-format, and portable tests with sanitizers and compiler warnings treated as errors. Firmware/tooling changes should also pass `node --run check:full`, which builds Stick and Waveshare with Arduino warnings set to `more`.
+
+Run `node --run cpp:configure` (Stick default) or `node --run cpp:configure -- waveshare` to select one active editor target. The generated, ignored `.build/compile_commands.json` owns C++ editor/compiler context; do not add fake defines or disable diagnostics. Keep generated `.deps/`, `.build/`, `node_modules/`, and private `.local/` files untracked. Update dependency pins and setup instructions together.
 
 ## Environment profiles and local secrets
 
-`config/*.json` are the durable environment profiles, shared by any devices in that
-environment. Board selection chooses firmware, independently of the profile. Filenames are arbitrary human
-labels and never imply Sonos room identity; only JSON `rooms` keys select targets.
-The host tools expand `${NAME}` in JSON string values using process environment
-values over repo-root `.env` (or `--env-file`). Keep `.env` ignored and use
-`.env.example` for variable names. Never log or save resolved credential-bearing
-JSON. `.local/` is for logs, captures, and temporary/generated data.
+`config/*.json` are the durable environment profiles, shared by any devices in that environment. Board selection chooses firmware, independently of the profile. Filenames are arbitrary human labels and never imply Sonos room identity; only JSON `rooms` keys select targets. The host tools expand `${NAME}` in JSON string values using process environment values over repo-root `.env` (or `--env-file`). Keep `.env` ignored and use `.env.example` for variable names. Never log or save resolved credential-bearing JSON. `.local/` is for logs, captures, and temporary/generated data.
 
-`configure.py --port PORT` uses `config/default.json`; `--config PATH` selects any
-profile path. `device.py flash BOARD --port PORT --config PATH` preflights the
-profile before building/flashing, then configures and verifies status. Without
-`--config`, flash preserves device configuration. Firmware receives current JSON
-only; environment expansion belongs solely to the host.
+`node --run configure -- --port PORT` uses `config/default.json`; `--config PATH` selects any profile path. `node --run flash:BOARD -- --port PORT --config PATH` preflights the profile before building/flashing, then configures and verifies status. Without `--config`, flash preserves device configuration. Firmware receives current JSON only; environment expansion belongs solely to the host.
 
 ## Coding Style & Naming Conventions
 
-C++17 uses two-space indentation, PascalCase types, and camelCase functions/fields. Python uses four spaces. No formatter is configured. Use descriptive Markdown headings, relative links, and valid JSON examples; keep wire names consistent with the specifications.
+C++17 uses two-space indentation, PascalCase types, and camelCase functions/fields. Prettier owns all Markdown (`proseWrap: "never"`; do not hard wrap prose), TypeScript, JSON, and YAML formatting (`node --run format`); clang-format owns C/C++ and the sketch (`node --run format:cpp`). Use only erasable TypeScript syntax: no enums, parameter properties, or runtime namespaces. Use descriptive Markdown headings, relative links, and valid JSON examples; keep wire names consistent with the specifications.
 
 Omitted intent fields resolve through source/room policy, then preserve if still absent. Retain per-field provenance and express operation dependencies explicitly. Never encode Sonos ordering or sleeps in cards. Keep grouping, generic scripting, and unrelated Sonos management out of scope.
 
@@ -44,47 +38,32 @@ PRs should explain behavior, validation, and unresolved risks; link issues when 
 
 ## Agent Working Style
 
-Device runtime `read_only=true` blocks all Sonos mutations at HTTP dispatch;
-`read_only=false` permits requested mutations only for configured, eligible rooms.
-The room-keyed config object is the allowlist and contains source-specific exceptions.
-Display IDs resolve from current names; accepted requests freeze UUID and policy. M5/Waveshare flashing and non-Sonos tests
-are authorized. Keep autonomous tests read-only; do not turn an existing true flag
-false to complete testing. Stop for physical gestures or intentional live playback tests.
+Device runtime `read_only=true` blocks all Sonos mutations at HTTP dispatch; `read_only=false` permits requested mutations only for configured, eligible rooms. The room-keyed config object is the allowlist and contains source-specific exceptions. Display IDs resolve from current names; accepted requests freeze UUID and policy. M5/Waveshare flashing and non-Sonos tests are authorized. Keep autonomous tests read-only; do not turn an existing true flag false to complete testing. Stop for physical gestures or intentional live playback tests.
 
 Resolve reversible engineering choices autonomously. Involve the human for meaningful hardware tests or choices that materially change user-visible semantics, persisted formats, or architecture. Label deliberate contracts, reference evidence, and experimental assumptions separately. Prefer small working slices on both boards; measure Sonos/NFC behavior before adding abstractions. Stay within the current task's authorized scope.
 
 ## Breaking changes and migrations
 
-This is an owner-controlled personal project. All deployed devices are expected
-to run the current firmware and current configuration format.
+This is an owner-controlled personal project. All deployed devices are expected to run the current firmware and current configuration format.
 
 Unless the owner explicitly requests otherwise for a specific change:
 
 - prefer clean breaking changes over backward compatibility
 - support exactly one current persisted config/NVS format
-- do not add migration code, compatibility readers, deprecated aliases, fallback
-  parsers, schema upgraders, or dual-format support
+- do not add migration code, compatibility readers, deprecated aliases, fallback parsers, schema upgraders, or dual-format support
 - do not write migration guides or upgrade procedures
 - do not document obsolete configuration shapes
-- when a persisted format changes, update the current implementation, examples,
-  tests, committed environment profiles, and local environment values as needed, and remove the superseded path
+- when a persisted format changes, update the current implementation, examples, tests, committed environment profiles, and local environment values as needed, and remove the superseded path
 - old private configuration may simply be replaced
 - all controlled devices may be flashed/configured together
 
-Do not preserve a legacy behavior merely because an earlier commit/device used it.
-If backward compatibility or a staged migration is required, the owner will
-explicitly state that requirement. Git history is sufficient documentation of
-superseded formats.
+Do not preserve a legacy behavior merely because an earlier commit/device used it. If backward compatibility or a staged migration is required, the owner will explicitly state that requirement. Git history is sufficient documentation of superseded formats.
 
-A format intentionally part of the current product contract is not migration
-compatibility. Plain Apple Music URL NFC cards are a supported input format;
-keep that support unless separately asked to remove it. Describe supported inputs
-directly, without legacy rollout or migration rationale.
+A format intentionally part of the current product contract is not migration compatibility. Plain Apple Music URL NFC cards are a supported input format; keep that support unless separately asked to remove it. Describe supported inputs directly, without legacy rollout or migration rationale.
 
 ## Documentation durability rule
 
-Repository documentation describes CURRENT durable architecture, contracts,
-hardware facts, setup, and known unresolved limitations.
+Repository documentation describes CURRENT durable architecture, contracts, hardware facts, setup, and known unresolved limitations.
 
 Do NOT use repository docs as an engineering diary or test-run log.
 
@@ -101,11 +80,9 @@ In particular, DO NOT commit documentation merely to record:
 - chronological "then we tested..." evidence
 - completion of a milestone/checkpoint whose durable behavior is already documented
 
-Those facts may remain in `.local/` logs or the agent conversation and normally
-should NOT cause a repository change.
+Those facts may remain in `.local/` logs or the agent conversation and normally should NOT cause a repository change.
 
-Only update durable docs when the work establishes or changes something a future
-developer actually needs to know, such as:
+Only update durable docs when the work establishes or changes something a future developer actually needs to know, such as:
 
 - architecture or product semantics
 - wire/config/schema contracts
@@ -117,29 +94,27 @@ developer actually needs to know, such as:
 
 When deciding whether to update docs, apply this test:
 
-> If this exact development session had never happened, would a future agent still
-> need this information to correctly understand, build, operate, or modify the system?
+> If this exact development session had never happened, would a future agent still need this information to correctly understand, build, operate, or modify the system?
 
 If no, do not commit it.
 
 Examples:
 
 GOOD:
+
 - "read_only is a persisted runtime Sonos-mutation gate."
 - "CST820 calibration is persisted per physical device."
 - "Topology listener must not start before Wi-Fi because ESP32 networking can assert."
 - "CO5300 rendering requires the full-frame PSRAM workaround."
 
 DO NOT DOCUMENT:
+
 - "Today the owner set read_only=false."
 - "Stick is currently on revision 10."
 - "The owner tested playback and it worked."
 - "We flashed both boards and saved logs at .local/foo.log."
 - "The device is currently left on Office."
 
-Git history and ignored `.local/` logs are the development record. Durable docs are
-not the development record.
+Git history and ignored `.local/` logs are the development record. Durable docs are not the development record.
 
-Do not add or preserve historical checkpoint sections merely because previous
-agents did so. If encountered during relevant work, remove stale session-specific
-material when it is clearly no longer durable documentation.
+Do not add or preserve historical checkpoint sections merely because previous agents did so. If encountered during relevant work, remove stale session-specific material when it is clearly no longer durable documentation.

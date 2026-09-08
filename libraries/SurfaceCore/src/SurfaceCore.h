@@ -18,7 +18,10 @@ struct Result {
 enum class SourceKind { Album, Playlist, Track, Station };
 enum class TransportCommand { Play, Pause, Next, Previous };
 enum class Repeat { Off, All, One };
-struct Volume { bool relative = false; int value = 0; };
+struct Volume {
+  bool relative = false;
+  int value = 0;
+};
 struct Source {
   std::string url, storefront, catalogId;
   SourceKind kind = SourceKind::Album;
@@ -36,16 +39,23 @@ struct ModePolicy {
   std::optional<bool> shuffle;
   std::optional<Repeat> repeat;
 };
-struct RoomPolicy { ModePolicy album, playlist, track; };
+struct RoomPolicy {
+  ModePolicy album, playlist, track;
+};
 using RoomConfig = std::map<std::string, RoomPolicy>; // Display IDs; authoritative allowlist.
-struct ResolvedRoomPolicy { std::string displayId; RoomPolicy policy; };
+struct ResolvedRoomPolicy {
+  std::string displayId;
+  RoomPolicy policy;
+};
 using ResolvedRoomPolicies = std::map<std::string, ResolvedRoomPolicy>; // Eligible UUIDs only.
 enum class PolicyField { Shuffle, Repeat };
 enum class PolicyOrigin { Preserved, Explicit, RoomPolicy, SourceDefault };
 struct FieldProvenance {
   PolicyOrigin origin = PolicyOrigin::Preserved;
   std::string key; // Display ID or source kind; empty for explicit/preserved.
-  bool operator==(const FieldProvenance& other) const { return origin == other.origin && key == other.key; }
+  bool operator==(const FieldProvenance& other) const {
+    return origin == other.origin && key == other.key;
+  }
 };
 using PolicyProvenance = std::map<PolicyField, FieldProvenance>;
 const char* sourceKindName(SourceKind kind);
@@ -95,12 +105,31 @@ public:
 
 Result decodeNdefText(const uint8_t* data, size_t size, std::string& text);
 Result decodeNdefUri(const uint8_t* data, size_t size, std::string& url);
-Result decodeNdefRecord(uint8_t tnf, const std::string& type, const uint8_t* data, size_t size, std::string& text);
+Result decodeNdefRecord(uint8_t tnf, const std::string& type, const uint8_t* data, size_t size,
+                        std::string& text);
 
 // Conservative serial schedule: each operation depends on completion of its predecessor.
-enum class Operation { Stop, ClearQueue, AddSource, SelectQueue, SelectStation, ApplyMode, SetVolume, RestoreTransport, Play, Pause, Next, Previous, Seek, SelectQueueItem };
+enum class Operation {
+  Stop,
+  ClearQueue,
+  AddSource,
+  SelectQueue,
+  SelectStation,
+  ApplyMode,
+  SetVolume,
+  RestoreTransport,
+  Play,
+  Pause,
+  Next,
+  Previous,
+  Seek,
+  SelectQueueItem
+};
 const char* operationName(Operation operation);
-struct Plan { ResolvedIntent resolved; std::vector<Operation> operations; };
+struct Plan {
+  ResolvedIntent resolved;
+  std::vector<Operation> operations;
+};
 Result makePlan(const ResolvedIntent& intent, Plan& plan);
 enum class PlaybackStatus { Unknown, Playing, Paused, Stopped, NoMedia, Transitioning };
 enum class PlaybackSource { Unknown, Queue, AppleMusicStation, Live, Other };
@@ -149,7 +178,9 @@ class SonosTransport {
 public:
   virtual ~SonosTransport() = default;
   virtual Result refresh(PlaybackState& state) = 0;
-  virtual Result queue(uint32_t, uint32_t, QueuePage&) { return Result::fail("Queue reading unsupported"); }
+  virtual Result queue(uint32_t, uint32_t, QueuePage&) {
+    return Result::fail("Queue reading unsupported");
+  }
   virtual Result prepare(const ResolvedIntent& intent) = 0;
   virtual Result execute(Operation operation) = 0;
   virtual Result verify(const ResolvedIntent& intent, PlaybackState& state) = 0;
@@ -168,6 +199,7 @@ public:
   // Drop observations on selection/reconnect, preserving command uncertainty.
   void invalidateObservation();
   const AppState& state() const { return state_; }
+
 private:
   void publish();
   SonosTransport& transport_;

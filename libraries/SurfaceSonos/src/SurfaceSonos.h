@@ -2,7 +2,11 @@
 #include <SurfaceCore.h>
 
 namespace surface {
-struct HttpResponse { int status = 0; std::string body, error; bool notSent = false; };
+struct HttpResponse {
+  int status = 0;
+  std::string body, error;
+  bool notSent = false;
+};
 bool isReadOnlySonosAction(const std::string& action);
 // Only the root ZonePlayer device defines the destination identity. Embedded
 // MediaRenderer/MediaServer devices have their own UDNs and must not overwrite it.
@@ -25,16 +29,25 @@ public:
   std::string target;
   HttpResponse request(const std::string& path, const std::string& action,
                        const std::string& body) final;
+
 protected:
-  virtual HttpResponse dispatch(const std::string& path, const std::string& action, const std::string& body) = 0;
-  virtual HttpResponse blocked(const std::string& reason, const std::string&) { return {0, "", reason, true}; }
+  virtual HttpResponse dispatch(const std::string& path, const std::string& action,
+                                const std::string& body) = 0;
+  virtual HttpResponse blocked(const std::string& reason, const std::string&) {
+    return {0, "", reason, true};
+  }
 };
-struct SonosConfig { std::string targetId, appleRegion = "52231"; };
-struct AppleSourceItem { std::string uri, metadata; };
+struct SonosConfig {
+  std::string targetId, appleRegion = "52231";
+};
+struct AppleSourceItem {
+  std::string uri, metadata;
+};
 std::string xmlEscape(const std::string& value);
 Result appleSourceItem(const Source& source, const std::string& region, AppleSourceItem& item);
 Result parseTopology(const std::string& xml, std::vector<Room>& rooms);
-Result combineMode(const std::string& current, std::optional<bool> shuffle, std::optional<Repeat> repeat, std::string& mode);
+Result combineMode(const std::string& current, std::optional<bool> shuffle,
+                   std::optional<Repeat> repeat, std::string& mode);
 Result modeWithShuffle(const std::string& current, std::optional<bool> shuffle, std::string& mode);
 std::optional<uint32_t> parseSonosTime(const std::string& text);
 std::string normalizeArtwork(const std::string& reference, const std::string& baseUrl);
@@ -51,6 +64,7 @@ public:
   Result prepare(const ResolvedIntent& intent) override;
   Result execute(Operation operation) override;
   Result verify(const ResolvedIntent& intent, PlaybackState& state) override;
+
 private:
   Result soap(const char* service, const char* action, const std::string& args,
               std::string& response, bool mutation = false);

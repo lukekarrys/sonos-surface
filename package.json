@@ -1,0 +1,49 @@
+{
+  "name": "sonos-surface",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.12.0 <25"
+  },
+  "devEngines": {
+    "runtime": {
+      "name": "node",
+      "version": ">=24.12.0 <25",
+      "onFail": "error"
+    },
+    "packageManager": {
+      "name": "npm",
+      "onFail": "error"
+    }
+  },
+  "scripts": {
+    "setup": "node scripts/setup.ts",
+    "test": "node scripts/test.ts",
+    "typecheck": "tsc --noEmit",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "format:cpp": "node scripts/format-cpp.ts",
+    "format:cpp:check": "node scripts/format-cpp.ts --check",
+    "cpp:configure": "node scripts/device.ts cpp:configure",
+    "check": "node scripts/check.ts",
+    "check:full": "node scripts/check.ts --full",
+    "build:stick": "node scripts/device.ts build stick",
+    "build:waveshare": "node scripts/device.ts build waveshare",
+    "flash:stick": "node scripts/device.ts flash stick",
+    "flash:waveshare": "node scripts/device.ts flash waveshare",
+    "configure": "node scripts/configure.ts",
+    "monitor": "node scripts/device.ts monitor",
+    "ports": "node scripts/device.ts ports",
+    "reset": "node scripts/device.ts reset",
+    "reboot": "node scripts/device.ts reboot",
+    "calibrate": "node scripts/calibrate.ts",
+    "discover": "node scripts/discover.ts",
+    "probe": "node scripts/probe.ts"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.3",
+    "prettier": "3.9.6",
+    "serialport": "13.0.0",
+    "typescript": "7.0.2"
+  }
+}

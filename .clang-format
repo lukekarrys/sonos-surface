@@ -1,0 +1,7 @@
+BasedOnStyle: LLVM
+IndentWidth: 2
+Standard: c++17
+ColumnLimit: 100
+PointerAlignment: Left
+# Arduino discovers dependencies in include order; test fixture headers also depend on it.
+SortIncludes: Never

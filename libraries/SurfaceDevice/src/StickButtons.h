@@ -4,9 +4,12 @@
 
 namespace surface::device {
 inline Input stickButtonInput(const m5::Button_Class& a, const m5::Button_Class& b) {
-  if (a.wasDoubleClicked()) return Input::RoomNext;
-  if (a.wasSingleClicked()) return Input::Refresh;
-  if (b.wasClicked()) return Input::Toggle;
+  if (a.wasDoubleClicked())
+    return Input::RoomNext;
+  if (a.wasSingleClicked())
+    return Input::Refresh;
+  if (b.wasClicked())
+    return Input::Toggle;
   return Input::None;
 }
 inline bool stickButtonPending(const m5::Button_Class& a, const m5::Button_Class& b) {

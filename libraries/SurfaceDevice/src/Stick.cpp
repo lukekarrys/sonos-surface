@@ -45,10 +45,13 @@ bool boardBegin(std::string& notice) {
   registered = wire && units.add(unit, Wire);
   ready = registered && units.begin();
   lastInit = millis();
-  Serial.printf("[board] M5 id=%d display=%dx%d display-ready=%d Grove power=%d SDA=9 SCL=10 I2C=%d NFC=0x50 ready=%d\n",
-                M5.getBoard(), M5.Display.width(), M5.Display.height(), displayReady, power, wire, ready);
-  notice = !displayReady ? "Stick display init FAILED (see serial)" :
-           ready ? "NFC ready: tap card" : "NFC init FAILED: check Grove cable; retrying";
+  Serial.printf("[board] M5 id=%d display=%ldx%ld display-ready=%d Grove power=%d SDA=9 SCL=10 "
+                "I2C=%d NFC=0x50 ready=%d\n",
+                M5.getBoard(), M5.Display.width(), M5.Display.height(), displayReady, power, wire,
+                ready);
+  notice = !displayReady ? "Stick display init FAILED (see serial)"
+           : ready       ? "NFC ready: tap card"
+                         : "NFC init FAILED: check Grove cable; retrying";
   Serial.println(notice.c_str());
   return displayReady && ready;
 }
@@ -62,13 +65,14 @@ BoardEvent boardPoll() {
   lastButtons = now;
   M5.update();
   if (M5.BtnA.wasChangePressed())
-    Serial.printf("[button] A %s clicks=%u poll-gap-ms=%lu\n", M5.BtnA.isPressed() ? "pressed" : "released",
-                  M5.BtnA.getClickCount(), gap);
+    Serial.printf("[button] A %s clicks=%u poll-gap-ms=%lu\n",
+                  M5.BtnA.isPressed() ? "pressed" : "released", M5.BtnA.getClickCount(), gap);
   if (M5.BtnA.wasDecideClickCount())
     Serial.printf("[button] A decided clicks=%u\n", M5.BtnA.getClickCount());
   if (now - buttonReport >= 5000) {
     Serial.printf("[button] max-poll-gap-ms=%lu\n", maxButtonGap);
-    maxButtonGap = 0; buttonReport = now;
+    maxButtonGap = 0;
+    buttonReport = now;
   }
   static uint32_t lastDisplayInit = 0;
   if (!displayReady && millis() - lastDisplayInit >= 5000) {
@@ -92,14 +96,18 @@ BoardEvent boardPoll() {
     }
     ready = registered && units.begin();
     Serial.printf("[nfc] init retry ready=%d\n", ready);
-    if (ready) return {Input::Error, "NFC recovered: tap card"};
+    if (ready)
+      return {Input::Error, "NFC recovered: tap card"};
   }
   const auto button = stickButtonInput(M5.BtnA, M5.BtnB);
-  if (button != Input::None) return {button, ""};
+  if (button != Input::None)
+    return {button, ""};
   // Keep sampling an in-progress gesture; resume NFC without resetting its
   // presentation latch once the click count is decided or the hold is released.
-  if (stickButtonPending(M5.BtnA, M5.BtnB)) return {};
-  if (!ready || millis() - lastPoll < 200) return {};
+  if (stickButtonPending(M5.BtnA, M5.BtnB))
+    return {};
+  if (!ready || millis() - lastPoll < 200)
+    return {};
   lastPoll = millis();
   units.update();
   m5::nfc::a::PICC picc;
@@ -113,8 +121,12 @@ BoardEvent boardPoll() {
     return {};
   }
   misses = 0;
-  if (!nfc.select(picc)) return {};
-  if (latched) { nfc.deactivate(); return {}; }
+  if (!nfc.select(picc))
+    return {};
+  if (latched) {
+    nfc.deactivate();
+    return {};
+  }
   latched = true;
   Serial.printf("[nfc] detected uid=%s\n", picc.uidAsString().c_str());
   // identify() itself reactivates/probes and then halts the card. Keep the
@@ -135,7 +147,10 @@ BoardEvent boardPoll() {
     return {Input::Error, "NFC reactivate failed; remove and retap"};
   }
   Serial.printf("[nfc] type=%s user-bytes=%u\n", picc.typeAsString().c_str(), picc.userAreaSize());
-  if (!picc.supportsNDEF()) { nfc.deactivate(); return {Input::Error, "NFC-A tag does not support NDEF"}; }
+  if (!picc.supportsNDEF()) {
+    nfc.deactivate();
+    return {Input::Error, "NFC-A tag does not support NDEF"};
+  }
   bool valid = false;
   m5::nfc::ndef::TLV message;
   const auto start = millis();
@@ -146,42 +161,56 @@ BoardEvent boardPoll() {
     uint8_t bytes[16]{};
     const bool rawRead = nfc.read16(bytes, 4);
     Serial.printf("[nfc] raw-page4 read=%d bytes=", rawRead);
-    if (rawRead) for (auto b : bytes) Serial.printf("%02x ", b);
+    if (rawRead)
+      for (auto b : bytes)
+        Serial.printf("%02x ", b);
     Serial.println();
   }
   nfc.deactivate();
   Serial.printf("[nfc] read=%d valid=%d ms=%lu\n", read, valid, millis() - start);
-  if (!read || !message.isMessageTLV()) return {Input::Error, "No readable NDEF message"};
+  if (!read || !message.isMessageTLV())
+    return {Input::Error, "No readable NDEF message"};
   const auto& records = message.records();
-  if (records.size() != 1) return {Input::Error, "Expected exactly one NFC record"};
+  if (records.size() != 1)
+    return {Input::Error, "Expected exactly one NFC record"};
   const auto& record = records.front();
-  Serial.printf("[nfc] TNF=%u type=%s payload-bytes=%u\n", unsigned(record.tnf()), record.type(), record.payloadSize());
+  Serial.printf("[nfc] TNF=%u type=%s payload-bytes=%lu\n", unsigned(record.tnf()), record.type(),
+                record.payloadSize());
   const std::string type = record.type();
   std::string payload;
-  if (type == "U" && record.payloadSize()) Serial.printf("[nfc] URI prefix=0x%02x\n", record.payload()[0]);
-  auto result = decodeNdefRecord(uint8_t(record.tnf()), type, record.payload(), record.payloadSize(), payload);
-  if (!result.ok) return {Input::Error, result.error};
-  if (type.empty()) Serial.println("[nfc] raw URL (empty type)");
-  Serial.printf("[nfc] decoded payload-bytes=%u (accepted fields logged by core)\n", unsigned(payload.size()));
+  if (type == "U" && record.payloadSize())
+    Serial.printf("[nfc] URI prefix=0x%02x\n", record.payload()[0]);
+  auto result = decodeNdefRecord(uint8_t(record.tnf()), type, record.payload(),
+                                 record.payloadSize(), payload);
+  if (!result.ok)
+    return {Input::Error, result.error};
+  if (type.empty())
+    Serial.println("[nfc] raw URL (empty type)");
+  Serial.printf("[nfc] decoded payload-bytes=%u (accepted fields logged by core)\n",
+                unsigned(payload.size()));
   return {Input::Payload, payload};
 }
 void boardRender(const AppState& state, const std::string& notice) {
-  if (!displayReady) return;
+  if (!displayReady)
+    return;
   const auto& observed = state.observed;
   const auto detail = state.refreshError.empty() ? state.detail : "Refresh: " + state.refreshError;
   auto screen = std::string("sonos-surface / NFC\n") + notice + "\n" +
-    (observed.known ? observed.room + ": " + observed.playback : "Playback: unknown") +
-    (observed.stale ? " [stale]" : "") + "\n" + observed.title + "\n" +
-    state.status + ": " + detail + "\nA: refresh  B: play/pause";
-  if (screen == lastScreen) return;
+                (observed.known ? observed.room + ": " + observed.playback : "Playback: unknown") +
+                (observed.stale ? " [stale]" : "") + "\n" + observed.title + "\n" + state.status +
+                ": " + detail + "\nA: refresh  B: play/pause";
+  if (screen == lastScreen)
+    return;
   lastScreen = screen;
   M5.Display.fillScreen(TFT_BLACK);
   M5.Display.setTextColor(TFT_WHITE);
   M5.Display.setCursor(0, 0);
   // Bound each section to keep result and current-state visible on a 240x135 UI.
-  M5.Display.println(observed.room.empty() ? "Discovering rooms..." : observed.room.substr(0, 38).c_str());
+  M5.Display.println(observed.room.empty() ? "Discovering rooms..."
+                                           : observed.room.substr(0, 38).c_str());
   M5.Display.println(notice.substr(0, 76).c_str());
-  M5.Display.printf("%s%s\n", observed.known ? observed.playback.c_str() : "Unknown playback", observed.stale ? " [stale]" : "");
+  M5.Display.printf("%s%s\n", observed.known ? observed.playback.c_str() : "Unknown playback",
+                    observed.stale ? " [stale]" : "");
   M5.Display.println(observed.title.substr(0, 70).c_str());
   M5.Display.println(state.status.c_str());
   M5.Display.println(detail.substr(0, 100).c_str());

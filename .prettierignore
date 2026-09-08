@@ -1,6 +1,5 @@
 .deps/
 .build/
 .local/
-.DS_Store
-.env
 node_modules/
+.env
