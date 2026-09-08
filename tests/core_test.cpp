@@ -154,12 +154,12 @@ int main() {
        "https://music.apple.com/us/album/name/12?i=%zz"}) {
     assert(!normalizeAppleUrl(bad, source).ok); ++cases;
   }
-  auto legacy = parsed(" \n" + album + "\n");
-  assert(legacy.transport == TransportCommand::Play && !legacy.shuffle.has_value()); ++cases;
+  auto urlOnly = parsed(" \n" + album + "\n");
+  assert(urlOnly.transport == TransportCommand::Play && !urlOnly.shuffle.has_value()); ++cases;
   auto explicitFalse = parsed(card({{"source", {{"service", "apple-music"}, {"url", album}}},
                                     {"transport", "play"}, {"shuffle", false}}));
   assert(explicitFalse.shuffle.has_value() && !*explicitFalse.shuffle); ++cases;
-  assert(resolvePolicy(legacy, {"room", playlistPolicies({{"room", true}}), 1}).intent.shuffle == false); ++cases;
+  assert(resolvePolicy(urlOnly, {"room", playlistPolicies({{"room", true}}), 1}).intent.shuffle == false); ++cases;
   auto explicitTrue = explicitFalse; explicitTrue.shuffle = true;
   auto resolved = resolvePolicy(explicitTrue, {"room", playlistPolicies({{"room", true}}), 1});
   assert(resolved.intent.shuffle == true && shuffleOrigin(resolved) == "explicit"); ++cases;
@@ -223,25 +223,25 @@ int main() {
   std::string payload;
   std::string ndef = std::string("\x02" "en") + album;
   assert(decodeNdefText(reinterpret_cast<const uint8_t*>(ndef.data()), ndef.size(), payload).ok && payload == album); ++cases;
-  // Existing URL-only Text cards and new JSON Text cards must share execution
-  // and policy behavior, without requiring a card migration.
+  // URL-only and structured Text cards share the same normalization, policy,
+  // and execution path.
   for (const auto& scenario : std::vector<std::pair<std::string, std::string>>{
          {album, "room"}, {playlist, "room"}, {playlist, "other"}}) {
     const auto& url = scenario.first;
-    auto oldRecord = std::string("\x02" "en") + " \n" + url + "?ls=1\n";
-    auto newRecord = std::string("\x02" "en") + card({
+    auto urlRecord = std::string("\x02" "en") + " \n" + url + "?ls=1\n";
+    auto structuredRecord = std::string("\x02" "en") + card({
       {"source", {{"service", "apple-music"}, {"url", url}}}, {"transport", "play"}});
-    std::string oldText, newText;
-    assert(decodeNdefText(reinterpret_cast<const uint8_t*>(oldRecord.data()), oldRecord.size(), oldText).ok);
-    assert(decodeNdefText(reinterpret_cast<const uint8_t*>(newRecord.data()), newRecord.size(), newText).ok);
-    auto oldIntent = parsed(oldText);
-    assert(oldIntent.source->url == url && oldIntent.transport == TransportCommand::Play && !oldIntent.shuffle.has_value());
-    FakeSonos oldTransport, newTransport;
-    Application oldApp(oldTransport, {scenario.second, playlistPolicies({{"room", true}}), 1});
-    Application newApp(newTransport, {scenario.second, playlistPolicies({{"room", true}}), 1});
-    assert(oldApp.submit(oldText).ok && newApp.submit(newText).ok);
-    assert(oldTransport.calls == newTransport.calls && oldTransport.calls.back() == Operation::Play);
-    assert(oldApp.state().provenance == newApp.state().provenance); ++cases;
+    std::string urlText, structuredText;
+    assert(decodeNdefText(reinterpret_cast<const uint8_t*>(urlRecord.data()), urlRecord.size(), urlText).ok);
+    assert(decodeNdefText(reinterpret_cast<const uint8_t*>(structuredRecord.data()), structuredRecord.size(), structuredText).ok);
+    auto urlIntent = parsed(urlText);
+    assert(urlIntent.source->url == url && urlIntent.transport == TransportCommand::Play && !urlIntent.shuffle.has_value());
+    FakeSonos urlTransport, structuredTransport;
+    Application urlApp(urlTransport, {scenario.second, playlistPolicies({{"room", true}}), 1});
+    Application structuredApp(structuredTransport, {scenario.second, playlistPolicies({{"room", true}}), 1});
+    assert(urlApp.submit(urlText).ok && structuredApp.submit(structuredText).ok);
+    assert(urlTransport.calls == structuredTransport.calls && urlTransport.calls.back() == Operation::Play);
+    assert(urlApp.state().provenance == structuredApp.state().provenance); ++cases;
   }
   ndef[0] = '\x82';
   assert(!decodeNdefText(reinterpret_cast<const uint8_t*>(ndef.data()), ndef.size(), payload).ok); ++cases;
@@ -322,7 +322,7 @@ int main() {
   assert(modeWithShuffle("SHUFFLE", std::nullopt, mode).ok && mode == "SHUFFLE"); ++cases;
   assert(!modeWithShuffle("unknown", false, mode).ok); ++cases;
   AppleSourceItem item;
-  assert(appleSourceItem(legacy.source.value(), "52231", item).ok);
+  assert(appleSourceItem(urlOnly.source.value(), "52231", item).ok);
   assert(item.uri == "x-rincon-cpcontainer:1004206calbum%3a12345?sid=204");
   assert(item.metadata.find("1004206calbum%3a12345") != std::string::npos);
   assert(item.metadata.find("SA_RINCON52231_X_#Svc52231-0-Token") != std::string::npos); ++cases;

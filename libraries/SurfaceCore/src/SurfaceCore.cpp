@@ -395,10 +395,10 @@ Result decodeNdefRecord(uint8_t tnf, const std::string& type, const uint8_t* dat
   if (tnf != 1) return Result::fail("Unsupported NFC TNF=" + std::to_string(tnf));
   if (type == "T") return decodeNdefText(data, size, text);
   if (type == "U") return decodeNdefUri(data, size, text);
-  // Observed household legacy cards: well-known TNF, zero type bytes, raw URL.
+  // Supported household URL cards: well-known TNF, zero type bytes, raw URL.
   // This exception must not turn arbitrary record payloads into JSON intents.
   if (!type.empty()) return Result::fail("Unsupported NFC type=" + type.substr(0, 32));
-  if (!data || !size || size > 4096) return Result::fail("Invalid legacy NFC URL length");
+  if (!data || !size || size > 4096) return Result::fail("Invalid empty-type NFC URL length");
   Source source;
   auto result = normalizeAppleUrl(std::string(reinterpret_cast<const char*>(data), size), source);
   if (!result.ok) return result;

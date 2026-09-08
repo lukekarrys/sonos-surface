@@ -23,15 +23,14 @@ unsigned policyTests() {
   assert(selection.rooms.size() == 3 && selection.resolvedPolicies.size() == 3 && selection.warning.empty()); ++cases;
   const auto saved = roomConfigJson(selection.configured);
   for (const Json& invalid : std::vector<Json>{
-      {{"rooms", Json::array({"office"})}}, {{"rooms", nullptr}}, {{"rooms", {{"office", true}}}},
+      {{"rooms", Json::array()}}, {{"rooms", nullptr}}, {{"rooms", {{"office", true}}}},
       {{"rooms", {{"office", Json::array()}}}}, {{"rooms", {{"office", {{"station", Json::object()}}}}}},
       {{"rooms", {{"office", {{"album", nullptr}}}}}},
       {{"rooms", {{"office", {{"album", {{"shuffle", "true"}}}}}}}},
       {{"rooms", {{"office", {{"playlist", {{"shuffle", 1}}}}}}}},
       {{"rooms", {{"office", {{"track", {{"repeat", nullptr}}}}}}}},
       {{"rooms", {{"office", {{"album", {{"volume", 20}}}}}}}},
-      {{"rooms", {{std::string(65, 'a'), Json::object()}}}},
-      {{"playlist_shuffle_rooms", {{"office", true}}}}, {{"playlist_shuffle_room", "office"}}}) {
+      {{"rooms", {{std::string(65, 'a'), Json::object()}}}}}) {
     assert(!parseDeviceRooms(invalid, readOnly, selection.configured));
     assert(!readOnly && roomConfigJson(selection.configured) == saved); ++cases;
   }
@@ -42,7 +41,7 @@ unsigned policyTests() {
       R"({"rooms":{"office":{},"office":{"track":{"repeat":"one"}}}})",
       R"({"rooms":{"office":{"playlist":{"shuffle":true,"shuffle":false}}}})",
       R"({"rooms":{},"read_only":true,"read_only":false})",
-      R"({"rooms":{},"future_policy":{}})", R"({"rooms":{},"playlist_shuffle_room":""})",
+      R"({"rooms":{},"future_policy":{}})", R"({"rooms":{},"unexpected_field":""})",
       R"({"rooms":{},"wifi_ssid":null})", R"({"rooms":{"office":{"album":{"repeat":"bad"}}}})"}) {
     Json document = config;
     assert(!parseConfigDocument(text, document) && document == config); ++cases;

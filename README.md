@@ -16,7 +16,7 @@ repeat off unless their room overrides it. NFC writing is specified, not impleme
 | --- | --- |
 | [Product](docs/product.md) | Scope, architecture, family workflows, future boundaries |
 | [Intent and cards](docs/intent.md) | Schema, source/mode invariants, NFC encoding, future simple writer |
-| [Room configuration and policy](docs/policy.md) | Authoritative room object, identity, defaults/overrides, precedence/provenance, migration |
+| [Room configuration and policy](docs/policy.md) | Authoritative room object, identity, defaults/overrides, precedence/provenance |
 | [Planner/executor](docs/planner-executor.md) | Frozen acceptance, ordering, preservation, dispatch safeguards, failures/reconciliation |
 | [Sonos capabilities](docs/sonos-capabilities.md) | Observations, bounded queues, seek/selection, Apple/Sonos mapping |
 | [Waveshare frontend](docs/waveshare-frontend.md) | Accepted 1.8-inch interaction, rendering and artwork worker |
@@ -58,8 +58,8 @@ does not imply the speaker is offline. Allow local network access if macOS promp
 
 For a new device, copy `config.example.json` into `.local/config.json` (use a
 separate `.local/waveshare-config.json` for Waveshare). Never overwrite a working
-private config with the example. Set Wi-Fi credentials, optional playable
-`source_url`, and intended room policies. Apple Music must already work in Sonos;
+private config with the example. Set Wi-Fi credentials and intended room policies.
+Apple Music must already work in Sonos;
 `apple_region: "52231"` is a Sonos service descriptor, not a storefront country code.
 
 ```json
@@ -89,12 +89,6 @@ Deployment guidance: configure Sonos's own per-room maximum-volume setting as th
 hard safety limit. The owner's 1.8-inch slider is experimental; the shared logical
 volume range remains 0–100, and a future larger kids-room UI is expected to use
 +/- buttons. This project does not add a software volume limiter.
-
-For existing devices, follow the [one-time migration](docs/policy.md#replacement-acceptance-and-migration):
-rooms arrays and either old playlist-shuffle key now reject. Preserve the current
-mode and room set, move existing playlist overrides beneath their room entry,
-flash current firmware, and upload the converted file. No room gets repeat-one
-unless deliberately configured. UUIDs do not belong in human config.
 
 ## Flash and configure
 
@@ -140,7 +134,7 @@ An interactive monitor forwards newline-terminated commands; Ctrl-C closes it.
 | `preview URL`, `preview {v1 JSON}` | Parse, validate, resolve policy, print plan only; never submit or contact Sonos |
 | `queue [start,count]` | Read a bounded selected-room page; count 1–20 |
 | `play`, `pause`, `toggle`, `next`, `previous` | Submit one transport request |
-| `source`, bare Apple URL, v1 JSON | Submit configured source or supplied intent |
+| Bare Apple URL, v1 JSON | Submit the supplied intent |
 | `read-only true`, `read-only false` | Persist mode and reboot; update the private config to match |
 | `config {JSON}` | Replace full device config and reboot; prefer the private-file uploader |
 | `reboot` | Reboot an idle application |

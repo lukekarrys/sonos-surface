@@ -161,7 +161,7 @@ BoardEvent boardPoll() {
   if (type == "U" && record.payloadSize()) Serial.printf("[nfc] URI prefix=0x%02x\n", record.payload()[0]);
   auto result = decodeNdefRecord(uint8_t(record.tnf()), type, record.payload(), record.payloadSize(), payload);
   if (!result.ok) return {Input::Error, result.error};
-  if (type.empty()) Serial.println("[nfc] legacy raw URL (empty type)");
+  if (type.empty()) Serial.println("[nfc] raw URL (empty type)");
   Serial.printf("[nfc] decoded payload-bytes=%u (accepted fields logged by core)\n", unsigned(payload.size()));
   return {Input::Payload, payload};
 }

@@ -73,7 +73,7 @@ struct Button { int x, y; const char* title; Input input; };
 // a measured universal corner radius. Drawing and hit testing share dimensions.
 constexpr int buttonWidth = 140, buttonHeight = 60;
 constexpr Button buttons[] = {
-  {32, 284, "Source", Input::Source}, {196, 284, "Refresh", Input::Refresh},
+  {196, 284, "Refresh", Input::Refresh},
   {32, 356, "Play", Input::Play}, {196, 356, "Pause", Input::Pause}
 };
 const Button* buttonAt(int x, int y) {

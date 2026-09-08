@@ -453,7 +453,7 @@ Result DirectSonos::readMute(std::string& mute) {
 Result DirectSonos::prepare(const ResolvedIntent& intent) {
   prepared_ = false; advanceDispatched_ = false; positionDispatched_ = false;
   deadline_ = http_.nowMs() + 60000;
-  if (config_.targetId.empty()) return Result::fail("Configure sonos_uid before controlling a speaker");
+  if (config_.targetId.empty()) return Result::fail("Select a configured room before controlling a speaker");
   auto r = validateIntent(intent.intent);
   if (!r.ok) return r;
   if (!intent.targetId.empty() && intent.targetId != config_.targetId) return Result::fail("Bound target mismatch");

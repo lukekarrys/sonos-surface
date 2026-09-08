@@ -37,6 +37,34 @@ false to complete testing. Stop for physical gestures or intentional live playba
 
 Resolve reversible engineering choices autonomously. Involve the human for meaningful hardware tests or choices that materially change user-visible semantics, persisted formats, or architecture. Label deliberate contracts, reference evidence, and experimental assumptions separately. Prefer small working slices on both boards; measure Sonos/NFC behavior before adding abstractions. Stay within the current task's authorized scope.
 
+## Breaking changes and migrations
+
+This is an owner-controlled personal project. All deployed devices are expected
+to run the current firmware and current configuration format.
+
+Unless the owner explicitly requests otherwise for a specific change:
+
+- prefer clean breaking changes over backward compatibility
+- support exactly one current persisted config/NVS format
+- do not add migration code, compatibility readers, deprecated aliases, fallback
+  parsers, schema upgraders, or dual-format support
+- do not write migration guides or upgrade procedures
+- do not document obsolete configuration shapes
+- when a persisted format changes, update the current implementation, examples,
+  tests, and private development-device config as needed, and remove the superseded path
+- old private configuration may simply be replaced
+- all controlled devices may be flashed/configured together
+
+Do not preserve a legacy behavior merely because an earlier commit/device used it.
+If backward compatibility or a staged migration is required, the owner will
+explicitly state that requirement. Git history is sufficient documentation of
+superseded formats.
+
+A format intentionally part of the current product contract is not migration
+compatibility. Plain Apple Music URL NFC cards are a supported input format;
+keep that support unless separately asked to remove it. Describe supported inputs
+directly, without legacy rollout or migration rationale.
+
 ## Documentation durability rule
 
 Repository documentation describes CURRENT durable architecture, contracts,

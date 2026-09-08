@@ -2,7 +2,7 @@
 #include <SurfaceCore.h>
 
 namespace surface::device {
-enum class Input { None, RoomNext, Source, Play, Pause, Toggle, Refresh, Payload, Error,
+enum class Input { None, RoomNext, Play, Pause, Toggle, Refresh, Payload, Error,
                    Intent, RoomSelect, QueuePage };
 struct BoardEvent {
   BoardEvent(Input value = Input::None, std::string message = {}) : input(value), text(std::move(message)) {}

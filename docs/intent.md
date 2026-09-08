@@ -168,33 +168,30 @@ extension required when ignoring it would change essential behavior. Editors
 MUST retain unknown extension values and `requires` when saving; if unable to
 round-trip them, they must refuse rewriting rather than silently drop them.
 
-New cards MUST contain one NDEF Text record (well-known type `T`), UTF-8, language
-`en`, whose text is the JSON document. No BOM is written. Whitespace and object
+Structured v1 cards MUST contain one NDEF Text record (well-known type `T`),
+UTF-8, language `en`, whose text is the JSON document. No BOM is written. Whitespace and object
 key order have no semantic meaning; compact JSON is preferred for capacity.
 V1 execution accepts exactly one NDEF Text record, with any valid language tag
-and UTF-8 text. Legacy URL cards also accept one well-known NDEF URI record
+and UTF-8 text. URL-only cards also accept one well-known NDEF URI record
 (`U`): prefix `0x00` plus the full URL, or `0x04` plus the URL after `https://`.
 The expanded URI MUST pass the same Apple Music URL validation and 4,096-byte
 limit; URI records cannot carry JSON intents. Other prefixes, multiple records,
 UTF-16, and nested Smart Posters are unsupported and must be reported.
 
-An observed household legacy encoding MUST also be accepted: one record with
+The supported household empty-type URL encoding is one record with
 TNF `0x01`, an empty type, and a raw UTF-8 Apple Music URL as its entire payload
 (no Text language/status header or URI prefix byte). Apply the same URL validation
 and 4,096-byte limit. This exception accepts only a URL, never JSON or commands,
-and does not apply to other TNFs/types or malformed `T`/`U` records. New writers
-MUST continue emitting v1 JSON Text records, not this legacy encoding.
+and does not apply to other TNFs/types or malformed `T`/`U` records. Writers
+MUST emit v1 JSON Text records.
 
-Legacy compatibility is REQUIRED for the initial rollout: existing household
-cards contain only an Apple Music URL in Text, URI, or the empty-type records
-described above. Old and v1 cards MUST
-work side by side; no bulk rewrite or automatic migration is required. A
-trimmed Text-record payload consisting solely of an
-accepted Apple Music URL normalizes to `source` plus explicit `transport: "play"`.
-All other settings remain omitted and policies apply normally. This is a narrow
-legacy adapter, not the default meaning of a v1 source-only intent. No other
-historical plain-text format is currently required. Do not guess at multi-line
-commands or silently overwrite cards. Malformed JSON does not fall back to a script.
+URL-only and structured v1 cards are both supported current input formats. A
+trimmed Text-record payload consisting solely of an accepted Apple Music URL
+normalizes to `source` plus explicit `transport: "play"`, as do URI and empty-type
+URL records. All other settings remain omitted and policies apply normally.
+Structured v1 cards declare their intent fields directly; a source-only intent
+preserves transport. Do not guess at multi-line commands or silently overwrite
+cards. Malformed JSON does not fall back to a script.
 
 Readers MUST bound payload size and JSON nesting/element counts before execution.
 Start with 4,096 UTF-8 bytes, eight nested containers, and 128 total members/items;

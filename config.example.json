@@ -1,7 +1,6 @@
 {
   "wifi_ssid": "YOUR_2_4_GHZ_WIFI",
   "wifi_password": "YOUR_WIFI_PASSWORD",
-  "source_url": "https://music.apple.com/us/album/REPLACE_WITH_KNOWN_SOURCE/123456789",
   "apple_region": "52231",
   "read_only": true,
   "rooms": {

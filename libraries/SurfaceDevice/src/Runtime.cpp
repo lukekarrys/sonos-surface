@@ -18,7 +18,7 @@ namespace surface::device {
 namespace {
 using Json = nlohmann::json;
 struct Config {
-  std::string ssid, password, host, uid, source, appleRegion = "52231";
+  std::string ssid, password, host, appleRegion = "52231";
   bool readOnly = true;
   uint32_t revision = 1;
   RoomConfig rooms;
@@ -60,15 +60,11 @@ bool parseConfig(const std::string& text, Config& output) {
   if (!parseConfigDocument(text, json)) return false;
   Config c;
   c.ssid = json.value("wifi_ssid", ""); c.password = json.value("wifi_password", "");
-  c.host = json.value("sonos_ip", ""); c.uid = json.value("sonos_uid", "");
-  c.source = json.value("source_url", "");
+  c.host = json.value("sonos_ip", "");
   if (!parseDeviceRooms(json, c.readOnly, c.rooms)) return false;
   c.appleRegion = json.value("apple_region", "52231");
   IPAddress address;
-  if (c.ssid.size() > 32 || c.password.size() > 63 || (!c.host.empty() && !address.fromString(c.host.c_str())) ||
-      (!c.uid.empty() && c.uid.compare(0, 7, "RINCON_") != 0)) return false;
-  Source source;
-  if (!c.source.empty() && !normalizeAppleUrl(c.source, source).ok) return false;
+  if (c.ssid.size() > 32 || c.password.size() > 63 || (!c.host.empty() && !address.fromString(c.host.c_str()))) return false;
   if (c.appleRegion.empty() || c.appleRegion.find_first_not_of("0123456789") != std::string::npos) return false;
   output = std::move(c);
   return true;
@@ -503,17 +499,14 @@ void handle(const std::string& line) {
   else if (line == "pause") submit(command("pause"));
   else if (line == "toggle") submitToggle();
   else if (line == "next" || line == "previous") submit(command(line.c_str()));
-  else if (line == "source") {
-    if (config.source.empty()) notice = "Configure source_url first";
-    else submit(config.source);
-  } else if (!line.empty() && (line[0] == '{' || line.compare(0, 8, "https://") == 0)) submit(line);
-  else log("Commands: rooms | room-next | status | queue [start,count] | play | pause | toggle | next | previous | source | config-status | read-only true/false | config {JSON} | preview URL/intent JSON | intent JSON");
+  else if (!line.empty() && (line[0] == '{' || line.compare(0, 8, "https://") == 0)) submit(line);
+  else log("Commands: rooms | room-next | status | queue [start,count] | play | pause | toggle | next | previous | config-status | read-only true/false | config {JSON} | preview URL/intent JSON | URL/intent JSON");
 }
 } // namespace
 
 void begin() {
-  // Native USB defaults to 256 RX bytes. A configuration with a source URL
-  // exceeds that and can lose its newline while the display task is busy.
+  // Buffer complete configuration and intent commands while the display task
+  // is busy; the native USB default of 256 RX bytes is insufficient.
   const auto usbRxBytes = Serial.setRxBufferSize(8192);
   Serial.begin(115200);
   Serial.setTxTimeoutMs(20); // Bounded USB backpressure keeps intent diagnostics complete.
@@ -534,7 +527,7 @@ void begin() {
   savedPreference = preferences.getString("preferred-id", "").c_str();
   selection.configured = config.rooms;
   selection.preferredId = savedPreference;
-  log("speaker-ip=" + config.host + " uid=" + config.uid);
+  log("speaker-ip=" + config.host);
   if (!config.ssid.empty()) {
     WiFi.mode(WIFI_STA);
     WiFi.setAutoReconnect(true);
@@ -545,7 +538,7 @@ void begin() {
     notice = "Failed to create Sonos worker";
     vQueueDelete(jobs); jobs = nullptr;
   }
-  log("READY: NFC/touch; USB commands status/play/pause/source/config");
+  log("READY: NFC/touch; USB commands status/play/pause/config; explicit URL/intent JSON");
 }
 void loop() {
   if (!stateMutex) { vTaskDelay(1); return; }
@@ -562,7 +555,6 @@ void loop() {
   }
   const auto event = boardPoll();
   switch (event.input) {
-    case Input::Source: handle("source"); break;
     case Input::Play: handle("play"); break;
     case Input::Pause: handle("pause"); break;
     case Input::Toggle: submitToggle(); break;

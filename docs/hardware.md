@@ -143,6 +143,11 @@ An unplugged Stick capture showed brownout near USB disconnection; the cause of
 later owner-reported battery/busy/topology glitches remains unrecorded. There is
 no persistent device log history; use live laptop capture for those observations.
 
+Topology listener startup must wait for a Wi-Fi connection. Opening its socket
+while Wi-Fi is uninitialized can cause an ESP32 network semaphore assertion.
+Manual discovery also rejects before opening UDP while disconnected. This
+assertion is distinct from the unresolved native USB/early-boot stalls above.
+
 ## Sonos evidence and open validation
 
 The owner confirmed NFC album/playlist/personal-station playback and physical
@@ -156,47 +161,3 @@ playing/stopped variants, single-track playback mapping, full repeat/shuffle
 mutation combinations, real rename/group changes, and topology subscription
 outage/renewal remain primarily fixture-tested. The frontend's broad acceptance
 is not a claim that every control mutation was traced on hardware.
-
-## Configuration validation
-
-The policy/configuration cleanup uses host protocol fixtures for the complete
-source/mode matrix, repeat-one room example, and frozen acceptance. Pure USB
-`preview` can validate policy on a device without changing Sonos or its runtime mode.
-The development room set remains Office, Living Room, and Bedroom, with only
-Living Room playlist shuffle=true. Both queried configs were read_only=true;
-private files have been converted without adding any track repeat rule.
-
-Stick is flashed and migrated at policy revision 9. It passed 18 pure policy
-previews across the three rooms (defaults, existing override, explicit false,
-no-source repeat-one), six invalid sourced previews, invalid intent admission,
-and invalid config replacement with unchanged revision. The capture contains
-111 read dispatches and zero mutations, and restored its original Living Room
-selection. Evidence: `.local/policy-stick-{complete-flash,check,summary}.log`.
-This verifies the device policy path, not a fresh physical NFC/playback test.
-
-Waveshare is flashed and migrated at policy revision 3. Owner-performed power/BOOT
-recovery restored its USB port despite no visible screen change; the corrected image
-then passed hash verification and application readiness. Before configuration,
-a manual status request safely returned unavailable topology while USB stayed
-responsive. The converted config retained the same three rooms and read_only=true.
-It passed the same 18 policy previews, six invalid previews, invalid admission,
-and atomic invalid-config checks, with 124 read dispatches and zero mutations.
-The original Office selection was restored, and calibration matched the saved fit
-exactly before and after config replacement. Evidence:
-`.local/policy-waveshare-{recovered-flash,unconfigured,configure,check,summary}.log`.
-Both development-device migrations are complete; no new physical touch/playback
-acceptance is inferred from USB diagnostics.
-
-Migration exposed an unconfigured-startup bug: rejecting the old config left
-Wi-Fi uninitialized while the topology listener opened a socket, causing a network
-semaphore assertion. Listener startup now waits for a Wi-Fi connection, and
-manual discovery also rejects before opening UDP while disconnected. Stick's
-corrected image reached idle USB readiness with the old config still rejected,
-then accepted its replacement. This observed assertion is distinct from the
-unresolved native USB/early-boot stalls above.
-
-Validation: 548 portable behavioral checks plus touch/calibration, pinned M5
-buttons, Waveshare UI, and artwork suites pass under sanitizers. Normal Stick,
-normal Waveshare, and raw touch-diagnostic builds pass. Track repeat-one is
-validated in a configured host protocol fixture; no real room was assigned it.
-No Sonos mutation or NFC/touch playback test was initiated during this cleanup.

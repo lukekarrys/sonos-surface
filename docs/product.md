@@ -36,7 +36,7 @@ Sonos observations + separate request outcomes
 - [Intent](intent.md) owns portable commands, normalized source validity, card
   encoding, and the future writer contract.
 - [Policy](policy.md) owns room configuration/identity/selection, source defaults,
-  overrides, per-field precedence/provenance, revision, and migration.
+  overrides, per-field precedence/provenance, and revision.
 - [Execution](planner-executor.md) owns admission, dependencies, preservation,
   failures, dispatch safeguards, and reconciliation.
 - [Sonos capabilities](sonos-capabilities.md) owns normalized observations,
@@ -54,9 +54,12 @@ predecessor dependencies; richer concurrency requires evidence before design.
 ## Family workflows and portability
 
 One continuous card presentation creates one request; removal and retapping create
-another. Existing household Text, URI, and observed empty-type Apple URL cards
-coexist with v1 JSON Text cards. Legacy URLs normalize to source plus explicit play.
+another. Supported NFC inputs are Apple Music URLs in Text, URI, or empty-type
+records, and declarative v1 JSON Text cards. URL-only cards normalize to source
+plus explicit play.
 A deliberate new source card replaces/restarts its source even if already selected.
+Music sources enter through explicit intents from NFC, USB URLs/JSON, or future
+writer/voice inputs.
 
 The future simple writer exposes only Apple Music source, source-valid shuffle,
 and repeat. It always writes explicit `transport: "play"`. Its `Default` choice

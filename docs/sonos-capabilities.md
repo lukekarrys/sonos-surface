@@ -18,8 +18,8 @@ when it is true. Configured/eligible target and destination-identity checks rema
 
 ## Normalized state
 
-`PlaybackState` keeps legacy diagnostic strings for existing board integration,
-while consumers can use these portable fields without SOAP/XML parsing:
+`PlaybackState` exposes diagnostic strings for board presentation and portable
+fields that consumers can use without SOAP/XML parsing:
 
 | Fields | Contract |
 | --- | --- |

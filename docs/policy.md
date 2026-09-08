@@ -49,8 +49,7 @@ room policies. There is no separate policy map capable of enrolling another room
 
 Resolution is `config display ID → discovered room → UUID`. A rename intentionally
 breaks the old binding until configuration is edited. UUIDs are internal identities,
-never human config keys. Legacy `sonos_uid` is ignored for selection and may be
-removed from old files; `sonos_ip` is an optional discovery bootstrap hint only.
+never human config keys. `sonos_ip` is an optional discovery bootstrap hint only.
 
 Selection sorts by case-insensitive human name then UUID. A room switch persists
 its display ID in `surface/preferred-id`. Boot restores it if eligible; otherwise
@@ -117,7 +116,7 @@ and the static operation plan. Preservation baselines belong to execution reads,
 not policy. USB `preview URL` or `preview {v1 envelope}` prints the same policy/plan
 without submitting work, preflight reads, or mutations, in either runtime mode.
 
-## Replacement, acceptance, and migration
+## Configuration replacement and request acceptance
 
 Configuration validation completes before NVS replacement; invalid updates retain
 the prior config. Successful replacement advances the persisted local revision and
@@ -132,27 +131,8 @@ ID strings within the size bound remain stored for actionable topology warnings.
 Empty source policy objects are allowed and equivalent to omitting that override.
 Diagnostic serialization retains exceptions only, never expands defaults.
 
-The former `rooms` array, `playlist_shuffle_rooms`, and `playlist_shuffle_room`
-formats now **reject**. Maintaining multiple parsers is unnecessary for the two
-owner-controlled development devices. There is no silent legacy reinterpretation.
-An old installed config after flashing remains in NVS but fails validation: the
-runtime uses read-only/no-target defaults until a valid replacement is uploaded.
-
-For an unmigrated device:
-
-1. Before flashing, query `config-status`; save its current mode, room set, and
-   playlist overrides. Keep a private backup of its complete config file.
-2. Replace the array with `{ "room-id": {} }` entries. Move each existing playlist
-   boolean into that room's `playlist.shuffle`; remove both legacy keys. If a
-   policy names a room outside the old allowlist, resolve that discrepancy
-   explicitly rather than enrolling it. Preserve `read_only` and private fields.
-3. Build/flash current firmware, then upload the converted file using
-   `scripts/configure.py` as shown in [README](../README.md#configuration).
-   Household replacement leaves the separate `surface/touch` calibration intact.
-4. Query `config-status`, `rooms`, and pure `preview` intents. Confirm the same
-   selectable rooms, existing playlist override, source defaults, and calibration.
-   Do not use playback to test pure policy or assign a new track policy by guess.
-
-[Hardware](hardware.md#configuration-validation) records the development-device
-migration result. Future writer controls and omission labels live in
-[intent](intent.md#simple-family-writer-contract-future).
+If stored configuration is invalid, the runtime uses read-only/no-target defaults
+until a valid configuration is uploaded. Household replacement leaves the separate
+`surface/touch` calibration intact. See [README](../README.md#flash-and-configure)
+for configuration upload and [intent](intent.md#simple-family-writer-contract-future)
+for future writer controls and omission labels.

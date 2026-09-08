@@ -24,7 +24,7 @@ inline bool parseModePolicy(const nlohmann::json& json, SourceKind kind, ModePol
 // Structural replacement is atomic. Invalid display ID strings stay visible for
 // topology diagnostics and never bind; defaults are never inserted into config.
 inline bool parseDeviceRooms(const nlohmann::json& config, bool& readOnly, RoomConfig& rooms) {
-  if (!config.is_object() || config.contains("playlist_shuffle_rooms") || config.contains("playlist_shuffle_room")) return false;
+  if (!config.is_object()) return false;
   bool mode = true;
   RoomConfig next;
   if (config.contains("read_only")) {
@@ -97,8 +97,8 @@ inline bool parseConfigDocument(const std::string& text, nlohmann::json& output)
   for (auto it = json.begin(); it != json.end(); ++it) {
     const auto& k = it.key();
     if (k == "read_only" || k == "rooms") continue;
-    if (k != "wifi_ssid" && k != "wifi_password" && k != "sonos_ip" && k != "sonos_uid" &&
-        k != "source_url" && k != "apple_region") return false;
+    if (k != "wifi_ssid" && k != "wifi_password" && k != "sonos_ip" &&
+        k != "apple_region") return false;
     if (!it.value().is_string()) return false;
   }
   bool mode;
