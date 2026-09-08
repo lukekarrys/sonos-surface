@@ -187,12 +187,6 @@ exactly before and after config replacement. Evidence:
 Both development-device migrations are complete; no new physical touch/playback
 acceptance is inferred from USB diagnostics.
 
-For owner-requested real-world testing, both devices subsequently saved and
-rebooted with `read_only=false`: Stick revision 10 and Waveshare revision 4.
-USB queries verified the unchanged room policies and Waveshare calibration;
-each device retained its own default room/source. No playback command was sent
-as part of this update. Evidence: `.local/control-{stick,waveshare}-{configure,status}.log`.
-
 Migration exposed an unconfigured-startup bug: rejecting the old config left
 Wi-Fi uninitialized while the topology listener opened a socket, causing a network
 semaphore assertion. Listener startup now waits for a Wi-Fi connection, and

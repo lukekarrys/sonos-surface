@@ -18,7 +18,7 @@ Omitted intent fields resolve through source/room policy, then preserve if still
 
 ## Testing Guidelines
 
-Portable assertion tests run with address/undefined behavior sanitizers; no coverage threshold is imposed. Test omission, explicit false, policies, ordering, and failures as functionality grows. Keep the Mac probe read-only. Record real board/Sonos observations in `docs/hardware.md`; distinguish measured behavior from assumptions.
+Portable assertion tests run with address/undefined behavior sanitizers; no coverage threshold is imposed. Test omission, explicit false, policies, ordering, and failures as functionality grows. Keep the Mac probe read-only. Record only durable board/Sonos findings in `docs/hardware.md`, following the [Documentation durability rule](#documentation-durability-rule); distinguish measured behavior from assumptions.
 
 ## Commit & Pull Request Guidelines
 
