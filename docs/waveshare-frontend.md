@@ -7,7 +7,7 @@ four-item queue browser. It consumes normalized AppState/QueuePage and emits
 explicit MusicIntent values or device navigation actions. The interaction and rendering code never interprets
 Sonos SOAP, classifies service URIs, or calls the network. A separate device
 artwork worker performs bounded image GETs and decoding. Stick keeps its own UI.
-The [room/policy model](product.md#stick-room-and-policy-milestone) and
+The [room/policy model](policy.md) and
 [shared capability contract](sonos-capabilities.md) remain authoritative.
 
 | Control | Interaction |
@@ -73,8 +73,8 @@ typed UI intents and selection/page actions to the existing worker. Shared core
 and Sonos adapter files contain no screen, gesture, or layout concepts.
 
 Controls sit within x=32–336/y=28–416, with slider endpoints x=52/316. Their centers
-fit the saved unit's historically reachable calibration area; that evidence does
-not independently validate these new controls. The built-in font provides ASCII
+fit the saved unit's reachable calibration area; the owner has accepted this
+layout and artwork appearance. That does not establish full-screen accuracy. The built-in font provides ASCII
 glyphs; other UTF-8 codepoints display as `?`, without broken byte fragments.
 Text is bounded and ellipsized rather than wrapping into other controls. Title
 uses two lines, artist one line, and album one compact line.
@@ -114,13 +114,6 @@ before/after memory, and generation publication/discard. Rendering still uses
 one full-frame canvas flush. Progress uses real observations without
 interpolation; full playback event subscriptions remain deferred.
 
-For physical artwork acceptance, compare the cover with the current track in
-Sonos, switch to another configured room, and return. Confirm the old cover
-clears during selection/loading and the correct cover returns. Changing tracks
-externally should update the cover after the normal state poll, while touch and
-queue navigation remain responsive. No playback mutation is needed for room
-switching. Keep runtime read-only enabled for autonomous checks.
-
 Frame diagnostics report draw/flush/total time, maximum UI polling gap since the
 last frame, free heap, and free PSRAM. Queue diagnostics measure the bounded page
 fetch separately from discovery/state refresh. USB `ui-screen now|rooms|queue` navigates these same screens for serial
@@ -128,66 +121,18 @@ layout/performance inspection without injecting touches or issuing a playback
 intent. It is disabled in the raw touch-diagnostic build.
 Touch logs retain raw/mapped
 coordinates and release actions. These are live serial diagnostics, not stored
-history. See [measured evidence](hardware.md#waveshare-frontend-read-only-development-2026-09-06).
+history. See [hardware evidence](hardware.md) for measured performance and limitations.
 
-## Physical read-only checkpoint
+## Accepted prototype scope
 
-Keep Waveshare `read_only=true`. Open a serial capture with the current enumerated
-port (this unit is presently `/dev/cu.usbmodem1101`):
+The owner accepted this 1.8-inch layout and artwork, including a cover change
+following an externally selected album. Some mistaps on the small screen remain
+acceptable for the owner's prototype. The volume slider is experimental UI;
+a future larger kids-room UI is expected to use +/- volume buttons. Shared
+volume remains the normal logical 0–100 range; no application volume limiter is
+implemented. Deployment guidance lives in [README](../README.md#configuration).
 
-```sh
-.deps/venv/bin/python scripts/device.py monitor waveshare --port /dev/cu.usbmodem1101
-```
-
-1. Check the room name, title/artist, transport label, numeric volume, timing,
-   modes, and READ ONLY label are readable and not clipped.
-2. Tap the room header, select Bedroom, then Living Room, then Office. Confirm old
-   metadata disappears immediately and each new room loads independently. Check
-   Back and selecting the already-selected room both return to now playing.
-3. Tap Previous, Play/Pause, and Next once each, waiting for idle. Confirm the
-   intended action in serial and read-only feedback; no playback should change.
-4. Drag volume slowly across the bar and release. Confirm a moving preview, one
-   accepted absolute volume request after release, and return to observed volume.
-5. On a finite queue track, drag progress and release. Confirm one seek request.
-   On an externally selected TV/live/station source, confirm no interactive seek.
-6. Open Queue, use More/Earlier, and tap a visible item. Confirm four-item bounded
-   pages, the correct highlighted item, and intended zero-based index (visible
-   number minus one) in serial. Check the stored/empty queue on a non-queue room.
-7. Tap Shuffle and Repeat. Confirm explicit values in serial and unchanged
-   observed modes after the read-only block.
-8. Change track, pause, volume, or source externally when convenient. Confirm the
-   display converges to that observation; record perceived delay. No event-system
-   redesign follows automatically from the nominal ten-second polling interval.
-9. Confirm fresh center taps after `peripherals-retry`; raw diagnostics and the
-   saved calibration must still work. A screen photo is useful for layout review.
-
-Software tests and USB actions do not establish finger targeting, visible pixels,
-or physical ergonomics. Those remain owner checkpoints until recorded.
-
-## Deliberate mutation test after physical acceptance
-
-Only the owner enables `read-only false`. Choose an eligible room at a comfortable
-level (Office's previously measured fixed-output Port is unsuitable for validating
-variable speaker volume). Start with a finite active queue and note volume/modes.
-
-1. Pause/resume, then Previous/Next; confirm the observed label/track reconciles.
-2. Make one small volume drag; confirm one request, the new observed level, and no
-   continued writes after release.
-3. Seek once while paused and once while playing; confirm timing and transport
-   preservation. Select one existing queue row and confirm the exact item,
-   unchanged queue contents, and preserved playing/non-playing state.
-4. Change Shuffle once and cycle Repeat through all/one/off; confirm each observed
-   value and preservation of the other mode. Restore the original settings.
-5. Switch rooms and confirm no audible or playback mutation from selection.
-   Return to `read-only true` when finished and update the private config to match.
-
-Do not proceed to voice, NFC on Waveshare, queue editing, or another milestone
-as part of these checks.
-
-## Owner feedback and volume follow-up
-
-The owner accepted the overall visible UI and reports some mistaps on the small
-screen. They specifically flagged an accidental volume slide reaching 100% as a
-serious concern and may configure a Sonos-side maximum. This artwork change adds
-no volume cap or gesture safeguard. A safer volume interaction remains a separate
-follow-up; the existing slider can still request the full 0–100 range.
+Mode buttons submit no-source explicit intents. They retain generic queue-mode
+capability, including repeat-one, without inferring an incoming declarative source
+from current playback. New source-card validation and defaults live in
+[intent](intent.md#source-specific-mode-validity) and [policy](policy.md).

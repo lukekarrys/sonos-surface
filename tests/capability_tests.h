@@ -198,7 +198,7 @@ unsigned capabilityTests() {
     CapabilityHttp office, bedroom; bedroom.id = "RINCON_B"; bedroom.room = "Bedroom"; bedroom.uri = "x-rincon-queue:RINCON_B#0";
     DirectSonos first(office, {office.id, "52231"}), second(bedroom, {bedroom.id, "52231"});
     Application officeApp(first, {office.id, {}, 1}), bedroomApp(second, {bedroom.id, {}, 1});
-    RoomSelection selection; selection.allowedIds = {"office", "bedroom"}; selection.preferredId = "office";
+    RoomSelection selection; selection.configured = {{"office", {}}, {"bedroom", {}}}; selection.preferredId = "office";
     selection.update({{office.id, office.room, "1", office.id, "1", true, "office"},
         {bedroom.id, bedroom.room, "2", bedroom.id, "2", true, "bedroom"}});
     auto bound = resolvePolicy(parsed(payload), {selection.selectedId, {}, 12});

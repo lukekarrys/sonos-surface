@@ -9,7 +9,22 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--port', required=True)
 parser.add_argument('--file', type=Path, default=Path('.local/config.json'))
 args = parser.parse_args()
-payload = json.dumps(json.loads(args.file.read_text()), separators=(',', ':'))
+
+
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError('Duplicate configuration key')
+        result[key] = value
+    return result
+
+
+try:
+    config = json.loads(args.file.read_text(), object_pairs_hook=unique_object)
+    payload = json.dumps(config, separators=(',', ':'), allow_nan=False)
+except ValueError:
+    parser.error('Invalid or duplicate configuration JSON (values omitted)')
 if len(payload.encode()) > 4088:
     parser.error('Configuration too large')
 with open_port(args.port) as port:

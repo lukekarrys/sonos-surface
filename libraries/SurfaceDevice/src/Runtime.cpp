@@ -1,5 +1,5 @@
 #include "SurfaceDevice.h"
-#include "PlaylistPolicyConfig.h"
+#include "RoomConfig.h"
 #include <SurfaceSonos.h>
 #include <surface_json.hpp>
 #include <Arduino.h>
@@ -19,10 +19,9 @@ namespace {
 using Json = nlohmann::json;
 struct Config {
   std::string ssid, password, host, uid, source, appleRegion = "52231";
-  PlaylistShuffleRooms playlistRooms;
   bool readOnly = true;
   uint32_t revision = 1;
-  std::vector<std::string> rooms;
+  RoomConfig rooms;
 } config;
 Preferences preferences;
 SemaphoreHandle_t stateMutex;
@@ -54,30 +53,16 @@ void publish(const AppState& state) {
   if (!selection.warning.empty()) sharedState.refreshError = selection.warning;
   xSemaphoreGive(stateMutex);
   log("request=" + std::to_string(state.requestId) + " status=" + state.status + " " + state.detail +
-      " shuffle-origin=" + state.shuffleOrigin + " refresh-error=" + state.refreshError);
+      " refresh-error=" + state.refreshError);
 }
 bool parseConfig(const std::string& text, Config& output) {
-  bool duplicate = false;
-  std::vector<std::set<std::string>> configKeys;
-  auto json = Json::parse(text, [&](int, Json::parse_event_t event, Json& value) {
-    if (event == Json::parse_event_t::object_start) configKeys.emplace_back();
-    if (event == Json::parse_event_t::key && !configKeys.back().insert(value.get<std::string>()).second) duplicate = true;
-    if (event == Json::parse_event_t::object_end) configKeys.pop_back();
-    return true;
-  }, false);
-  if (duplicate) return false;
-  if (!json.is_object() || json.size() > 10) return false;
-  for (auto it = json.begin(); it != json.end(); ++it) {
-    const auto& k = it.key();
-    if (k != "playlist_shuffle_rooms" && k != "read_only" && k != "rooms" && !it.value().is_string()) return false;
-    if (k != "wifi_ssid" && k != "wifi_password" && k != "sonos_ip" && k != "sonos_uid" &&
-        k != "read_only" && k != "rooms" && k != "source_url" && k != "playlist_shuffle_room" && k != "playlist_shuffle_rooms" && k != "apple_region") return false;
-  }
+  Json json;
+  if (!parseConfigDocument(text, json)) return false;
   Config c;
   c.ssid = json.value("wifi_ssid", ""); c.password = json.value("wifi_password", "");
   c.host = json.value("sonos_ip", ""); c.uid = json.value("sonos_uid", "");
   c.source = json.value("source_url", "");
-  if (!parsePlaylistPolicy(json, c.playlistRooms) || !parseDeviceRooms(json, c.readOnly, c.rooms)) return false;
+  if (!parseDeviceRooms(json, c.readOnly, c.rooms)) return false;
   c.appleRegion = json.value("apple_region", "52231");
   IPAddress address;
   if (c.ssid.size() > 32 || c.password.size() > 63 || (!c.host.empty() && !address.fromString(c.host.c_str())) ||
@@ -145,6 +130,8 @@ protected:
 // SSDP finds a bootstrap player, never an authoritative target. Topology supplies
 // the current names/addresses/eligibility; the optional old IP is only a hint.
 std::vector<std::string> discoverAddresses() {
+  // A manual status/rooms request must also be safe before configuration.
+  if (WiFi.status() != WL_CONNECTED) return {};
   std::set<std::string> hosts;
   WiFiUDP udp;
   if (udp.begin(0)) {
@@ -178,9 +165,13 @@ class TopologyEvents {
   WiFiServer server{1401};
   std::string sid, host;
   uint32_t renewAt = 0;
+  bool listening = false;
 public:
-  TopologyEvents() { server.begin(); }
   bool poll() {
+    // Invalid/missing configuration must remain recoverable over USB. The ESP
+    // network socket locks do not exist until Wi-Fi has initialized the stack.
+    if (WiFi.status() != WL_CONNECTED) return false;
+    if (!listening) { server.begin(); listening = true; }
     auto client = server.accept();
     if (!client) return false;
     client.setTimeout(100);
@@ -267,7 +258,7 @@ void worker(void*) {
     if (discovered.ok) selection.update(std::move(rooms));
     else {
       selection.rooms.clear();
-      selection.resolvedPlaylistRules.clear();
+      selection.resolvedPolicies.clear();
       selection.warning = "Topology unavailable; mutations blocked";
     }
     if (job->cycle && discovered.ok) selection.cycle();
@@ -278,7 +269,7 @@ void worker(void*) {
     if (savePreference) savedPreference = selection.preferredId;
     const auto selectableRooms = selection.rooms;
     const auto problems = selection.problems;
-    const auto resolvedRules = selection.resolvedPlaylistRules;
+    const auto resolvedRules = selection.resolvedPolicies;
     const bool changedTarget = selectObservedRoom(sharedState, selectedRoom);
     Room target = selectedRoom;
     if (!job->refresh) {
@@ -289,7 +280,7 @@ void worker(void*) {
     if (savePreference && !preferences.putString("preferred-id", savedPreference.c_str())) log("Preferred room save failed");
     for (const auto& problem : problems) log("CONFIG_WARNING " + problem);
     for (const auto& rule : resolvedRules)
-      log("resolved playlist policy uuid=" + rule.first + " shuffle=" + std::to_string(rule.second));
+      log("resolved room policy uuid=" + rule.first + " " + roomConfigJson({{rule.second.displayId, rule.second.policy}}).dump());
     for (const auto& room : selectableRooms)
       log("room=" + room.name + " roomDisplayId=" + room.displayId + " uuid=" + room.id + " ip=" + room.address + " group=" + room.group +
           " coordinator=" + room.coordinator + " selectable=" + std::to_string(room.eligible));
@@ -374,7 +365,7 @@ void submit(const std::string& payload, bool refresh = false, bool cycle = false
     const auto* room = selection.selected();
     if (result.ok && (!room || !room->eligible)) result = Result::fail("Selected room unavailable; refresh targets");
     const Room acceptedRoom = room ? *room : Room{};
-    if (result.ok) job->accepted = resolvePolicy(intent, {room->id, selection.resolvedPlaylistRules, config.revision});
+    if (result.ok) job->accepted = resolvePolicy(intent, {room->id, selection.resolvedPolicies, config.revision});
     xSemaphoreGive(stateMutex);
     if (result.ok) {
       log("accepted room=" + acceptedRoom.name + " roomDisplayId=" + acceptedRoom.displayId + " " + describeIntent(intent, job->accepted));
@@ -434,7 +425,7 @@ void submitToggle() {
   xSemaphoreTake(stateMutex, portMAX_DELAY);
   const auto* selected = selection.selected();
   const Room room = selected ? *selected : Room{};
-  if (room.eligible) job->toggleContext = PolicyContext{room.id, selection.resolvedPlaylistRules, config.revision};
+  if (room.eligible) job->toggleContext = PolicyContext{room.id, selection.resolvedPolicies, config.revision};
   xSemaphoreGive(stateMutex);
   if (!job->toggleContext) {
     delete job; busy.store(false);
@@ -449,6 +440,29 @@ void submitToggle() {
 }
 std::string command(const char* transport) {
   return Json{{"format", "sonos-surface"}, {"version", 1}, {"intent", {{"transport", transport}}}}.dump();
+}
+// Pure policy/plan diagnostic, including in CONTROL mode. Never queues a job or
+// calls Sonos; uses exactly the normal parser, resolver, and planner.
+void preview(const std::string& payload) {
+  MusicIntent input;
+  auto result = parseIntent(payload, input);
+  ResolvedIntent accepted;
+  Room room;
+  xSemaphoreTake(stateMutex, portMAX_DELAY);
+  const auto* selected = selection.selected();
+  if (result.ok && !selected) result = Result::fail("Selected room unavailable; refresh targets");
+  if (result.ok) {
+    room = *selected;
+    accepted = resolvePolicy(input, {room.id, selection.resolvedPolicies, config.revision});
+  }
+  xSemaphoreGive(stateMutex);
+  Plan plan;
+  if (result.ok) result = makePlan(accepted, plan);
+  if (!result.ok) { log("PREVIEW_INVALID " + result.error); return; }
+  log("policy-preview roomDisplayId=" + room.displayId + " " + describeIntent(input, accepted));
+  std::string effects;
+  for (auto op : plan.operations) effects += std::string(operationName(op)) + " ";
+  log("PREVIEW_ONLY planned effects=" + effects);
 }
 void handle(const std::string& line) {
   if (line == "reboot") {
@@ -471,9 +485,9 @@ void handle(const std::string& line) {
     if (!stored.is_object()) { log("CONFIG_INVALID; upload config first"); return; }
     stored["read_only"] = line == "read-only true";
     handle("config " + stored.dump());
-  } else if (line == "config-status") {
-    log("device-config " + Json{{"read_only", config.readOnly}, {"rooms", config.rooms},
-        {"playlist_shuffle_rooms", config.playlistRooms}}.dump());
+  } else if (line.rfind("preview ", 0) == 0) preview(line.substr(8));
+  else if (line == "config-status") {
+    log("device-config " + Json{{"read_only", config.readOnly}, {"rooms", roomConfigJson(config.rooms)}, {"policyRevision", config.revision}}.dump());
   } else if (line == "rooms" || line == "room-next") submit("", true, line == "room-next");
   else if (line.rfind("room-select ", 0) == 0) selectRoom(line.substr(12));
   else if (line.rfind("queue ", 0) == 0) {
@@ -493,7 +507,7 @@ void handle(const std::string& line) {
     if (config.source.empty()) notice = "Configure source_url first";
     else submit(config.source);
   } else if (!line.empty() && (line[0] == '{' || line.compare(0, 8, "https://") == 0)) submit(line);
-  else log("Commands: rooms | room-next | status | queue [start,count] | play | pause | toggle | next | previous | source | config-status | read-only true/false | config {JSON} | intent JSON");
+  else log("Commands: rooms | room-next | status | queue [start,count] | play | pause | toggle | next | previous | source | config-status | read-only true/false | config {JSON} | preview URL/intent JSON | intent JSON");
 }
 } // namespace
 
@@ -509,7 +523,7 @@ void begin() {
   jobs = xQueueCreate(1, sizeof(Job*));
   if (!stateMutex || !jobs) { log("FATAL worker allocation"); return; }
   const bool boardReady = boardBegin(notice);
-  log("sonos-surface checkpoint firmware; " + notice);
+  log("sonos-surface firmware; " + notice);
   Serial.printf("[board] adapter ready=%d heap=%u psram=%u\n", boardReady, ESP.getFreeHeap(), ESP.getPsramSize());
   if (!preferences.begin("surface", false)) log("NVS open failed; USB saves unavailable");
   auto stored = preferences.getString("config", "{}");
@@ -518,8 +532,7 @@ void begin() {
   log(config.readOnly ? "SONOS_MODE=READ_ONLY (runtime; all mutations blocked before HTTP)" : "SONOS_MODE=CONTROL (configured eligible rooms)");
   handle("config-status");
   savedPreference = preferences.getString("preferred-id", "").c_str();
-  selection.allowedIds = config.rooms;
-  selection.playlistRules = config.playlistRooms;
+  selection.configured = config.rooms;
   selection.preferredId = savedPreference;
   log("speaker-ip=" + config.host + " uid=" + config.uid);
   if (!config.ssid.empty()) {

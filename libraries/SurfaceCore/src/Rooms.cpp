@@ -27,7 +27,7 @@ const Room* RoomSelection::selected() const {
   return nullptr;
 }
 void RoomSelection::update(std::vector<Room> discovered) {
-  rooms.clear(); problems.clear(); resolvedPlaylistRules.clear(); warning.clear();
+  rooms.clear(); problems.clear(); resolvedPolicies.clear(); warning.clear();
   for (auto& room : discovered) {
     room.displayId = roomDisplayId(room.name);
     if (room.displayId.empty()) problems.push_back("ROOM NAME INVALID: " + room.name + " uuid=" + room.id);
@@ -45,8 +45,9 @@ void RoomSelection::update(std::vector<Room> discovered) {
     if (!match) problems.push_back("ROOM MISSING: " + id);
     return match;
   };
-  if (allowedIds.empty()) problems.push_back("ROOM CONFIG ERROR: set rooms");
-  for (const auto& id : allowedIds) {
+  if (configured.empty()) problems.push_back("ROOM CONFIG ERROR: set rooms");
+  for (const auto& entry : configured) {
+    const auto& id = entry.first;
     const auto* room = resolve(id);
     if (!room) continue;
     if (!room->eligible || room->address.empty()) {
@@ -54,10 +55,7 @@ void RoomSelection::update(std::vector<Room> discovered) {
       continue;
     }
     if (std::none_of(rooms.begin(), rooms.end(), [&](const Room& r) { return r.id == room->id; })) rooms.push_back(*room);
-  }
-  for (const auto& rule : playlistRules) {
-    const auto* room = resolve(rule.first);
-    if (room) resolvedPlaylistRules[room->id] = rule.second;
+    resolvedPolicies[room->id] = {id, entry.second};
   }
   auto lower = [](std::string name) {
     for (auto& c : name) if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
@@ -100,14 +98,25 @@ std::string describeIntent(const MusicIntent& input, const ResolvedIntent& resol
   else if (!input.source && !input.queueIndex) preserved.push_back("position");
   if (input.queueIndex) fields["queueIndex"] = *input.queueIndex;
   if (input.repeat) fields["repeat"] = *input.repeat == Repeat::Off ? "off" : *input.repeat == Repeat::All ? "all" : "one";
-  else preserved.push_back("repeat");
+  if (!i.repeat) preserved.push_back("repeat");
   if (input.shuffle.has_value()) fields["shuffle"] = *input.shuffle;
   if (!i.shuffle.has_value()) preserved.push_back("shuffle");
-  const char* kinds[] = {"album", "playlist", "track", "station"};
   return Json{{"target", resolved.targetId}, {"policyRevision", resolved.policyRevision},
-    {"sourceKind", input.source ? kinds[static_cast<int>(input.source->kind)] : "absent"},
-    {"explicit", fields}, {"shuffleInput", input.shuffle.has_value() ? Json(*input.shuffle) : Json("absent")},
-    {"shuffleResolved", i.shuffle.has_value() ? Json(*i.shuffle) : Json("preserve")},
-    {"shuffleOrigin", resolved.shuffleOrigin}, {"preserved", preserved}}.dump();
+    {"sourceKind", input.source ? sourceKindName(input.source->kind) : "absent"},
+    {"explicit", fields}, {"policy", Json::parse(describePolicy(i, resolved.provenance))},
+    {"preserved", preserved}}.dump();
+}
+std::string describePolicy(const MusicIntent& intent, const PolicyProvenance& provenance) {
+  using Json = nlohmann::json;
+  Json fields = Json::object();
+  for (const auto field : {PolicyField::Shuffle, PolicyField::Repeat}) {
+    const auto found = provenance.find(field);
+    const auto origin = found == provenance.end() ? FieldProvenance{} : found->second;
+    const auto value = field == PolicyField::Shuffle ?
+      (intent.shuffle.has_value() ? Json(*intent.shuffle) : Json(nullptr)) :
+      (intent.repeat ? Json(repeatName(*intent.repeat)) : Json(nullptr));
+    fields[field == PolicyField::Shuffle ? "shuffle" : "repeat"] = {{"value", value}, {"origin", describeOrigin(origin)}};
+  }
+  return fields.dump();
 }
 } // namespace surface

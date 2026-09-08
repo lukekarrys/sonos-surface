@@ -32,15 +32,36 @@ struct MusicIntent {
   std::optional<int64_t> seekPositionMs;
   std::optional<int64_t> queueIndex; // Zero-based, like queue page offsets.
 };
-using PlaylistShuffleRooms = std::map<std::string, bool>;
+struct ModePolicy {
+  std::optional<bool> shuffle;
+  std::optional<Repeat> repeat;
+};
+struct RoomPolicy { ModePolicy album, playlist, track; };
+using RoomConfig = std::map<std::string, RoomPolicy>; // Display IDs; authoritative allowlist.
+struct ResolvedRoomPolicy { std::string displayId; RoomPolicy policy; };
+using ResolvedRoomPolicies = std::map<std::string, ResolvedRoomPolicy>; // Eligible UUIDs only.
+enum class PolicyField { Shuffle, Repeat };
+enum class PolicyOrigin { Preserved, Explicit, RoomPolicy, SourceDefault };
+struct FieldProvenance {
+  PolicyOrigin origin = PolicyOrigin::Preserved;
+  std::string key; // Display ID or source kind; empty for explicit/preserved.
+  bool operator==(const FieldProvenance& other) const { return origin == other.origin && key == other.key; }
+};
+using PolicyProvenance = std::map<PolicyField, FieldProvenance>;
+const char* sourceKindName(SourceKind kind);
+const char* repeatName(Repeat repeat);
+std::string describeOrigin(const FieldProvenance& provenance);
+Result validateSourceModes(SourceKind kind, const ModePolicy& modes);
+ModePolicy sourceDefaults(SourceKind kind);
+ModePolicy roomSourcePolicy(const RoomPolicy& policy, SourceKind kind);
 struct PolicyContext {
   std::string targetId;
-  PlaylistShuffleRooms playlistShuffleRooms;
+  ResolvedRoomPolicies rooms;
   uint32_t revision = 1;
 };
 struct ResolvedIntent {
   MusicIntent intent;
-  std::string shuffleOrigin; // explicit, albums-in-order, playlist-room-shuffle, preserve
+  PolicyProvenance provenance;
   uint32_t policyRevision = 1;
   std::string targetId;
 };
@@ -49,6 +70,7 @@ Result parseIntent(const std::string& text, MusicIntent& intent);
 Result validateIntent(const MusicIntent& intent);
 ResolvedIntent resolvePolicy(const MusicIntent& intent, const PolicyContext& context);
 std::string describeIntent(const MusicIntent& input, const ResolvedIntent& resolved);
+std::string describePolicy(const MusicIntent& intent, const PolicyProvenance& provenance);
 
 struct Room {
   std::string id, name, address, coordinator, group;
@@ -61,8 +83,9 @@ bool validRoomDisplayId(const std::string& id);
 class RoomSelection {
 public:
   std::vector<Room> rooms; // Configured, uniquely resolved rooms only.
-  std::vector<std::string> allowedIds, problems;
-  PlaylistShuffleRooms playlistRules, resolvedPlaylistRules;
+  std::vector<std::string> problems;
+  RoomConfig configured;
+  ResolvedRoomPolicies resolvedPolicies;
   std::string selectedId, preferredId, warning; // Selected UUID; preferred display ID.
   bool initialized = false;
   void update(std::vector<Room> discovered);
@@ -110,7 +133,8 @@ struct PlaybackState {
 };
 struct AppState {
   PlaybackState observed;
-  std::string status = "idle", detail, shuffleOrigin;
+  std::string status = "idle", detail;
+  PolicyProvenance provenance;
   std::string refreshError; // Observation failures do not replace command outcomes.
   uint64_t requestId = 0;
   bool recoveryRequired = false;

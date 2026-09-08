@@ -2,7 +2,7 @@
 
 ## Contract
 
-Current milestone implements source, play/pause/next/previous, absolute/relative
+The shared core implements source, play/pause/next/previous, absolute/relative
 volume, shuffle, repeat, absolute seek, and existing active-queue item selection
 through shared planning and Sonos boundaries.
 Source-only and source + pause capture and preserve playing/non-playing state.
@@ -73,8 +73,8 @@ Omission preserves final state where changing another property has side effects:
   non-playing. Unknown or transitioning playback must be refreshed/resolved
   before mutation. Explicit `pause` also means non-playing; an already stopped
   speaker satisfies it.
-- A normal “play this” card MUST include `transport: "play"`. The writer offers
-  this as a visible default, never a parser default.
+- A normal “play this” card MUST include `transport: "play"`. The simple writer always writes
+  this explicitly; transport is not an option in that UI or a parser default.
 - Omitted shuffle/repeat preserve their pre-mutation values unless policy fills
   them. When Sonos exposes one combined play mode, the planner must read and
   carry forward the omitted component. Source-change side effects may require
@@ -85,21 +85,39 @@ Omission preserves final state where changing another property has side effects:
   invent a replay fallback at the queue boundary. Its exact paused-state behavior
   is a real-device capability to validate, not an implicit `play` request.
 
-Station sources are a capability exception: shuffle/repeat do not apply, so
-explicit station + shuffle/repeat MUST reject before mutation. Station selection
-does not issue queue clear/add/select or mode-setting commands; it leaves the
-stored queue intact. Stations derive neither album nor playlist shuffle policy.
-Do not promise queue shuffle/repeat behavior for a radio source or report a
-station as a selected queue. A standalone mode change while a station is selected
-is also unsupported in this slice. Mute/volume preservation still applies.
+## Source-specific mode validity
+
+Shared intent validation applies this matrix whenever the incoming intent contains
+its own normalized source. Every input surface, including direct typed touch
+intents and future writers/voice, receives the same validation before policy or
+Sonos mutation. Omission is valid for every field; [policy](policy.md) determines
+whether it derives a value or preserves state.
+
+| Source in intent | Explicit shuffle | Explicit repeat |
+| --- | --- | --- |
+| Album | true / false | off / all |
+| Playlist | true / false | off / all |
+| Track (album URL with `i`) | Invalid, including false | off / one |
+| Station | Invalid, including false | Invalid, including off |
+| No source | true / false | off / all / one, subject to generic adapter capability |
+
+Album/playlist repeat=one and track repeat=all reject. Never inspect currently
+playing media to infer a declarative source kind or retroactively apply this
+matrix/defaults. A no-source `{"repeat":"one"}` remains valid for generic Sonos
+queue modes. The adapter may still reject unavailable capabilities, such as mode
+writes against a live station; that does not classify it as a declarative source.
+
+Stations derive neither shuffle nor repeat. Selection does not issue queue
+clear/add/select or mode writes, and leaves the stored queue intact. Do not report
+a station as a selected queue. Mute/volume preservation still applies.
 
 Seek and queueIndex cannot combine with each other, source, or next/previous.
 Both preserve transport unless explicit play/pause is supplied, and may combine
 with volume or mode. Seek beyond known duration and selection outside fresh queue
 bounds reject before dispatch; see [details](sonos-capabilities.md#seek-and-queue-selection).
 
-Other table-field combinations are valid, including source + pause,
-source + shuffle + play + volume, and volume alone. Validation rejects the
+Combinations satisfying these constraints are valid, including source + pause,
+album/playlist + shuffle + play + volume, and volume alone. Validation rejects the
 entire intent before mutation if a known field/combination is invalid or
 unsupported. V1 has no toggle, queue append, delay, or sequence fields.
 UI toggles MUST resolve from fresh state to explicit values before submission;
@@ -185,12 +203,52 @@ to the local editor. The writer MUST also check actual tag capacity, including
 NDEF overhead, before writing. No truncation is permitted. Verify tag/NDEF and
 ST25R3916 driver read/write support early; no 4 KB card capacity is assumed.
 
-## Writer workflow
+## Simple family writer contract (future)
+
+Writing and its web server are not implemented yet. The simple family-facing
+writer exposes **only Apple Music source, shuffle, and repeat**, adapting controls
+to the normalized source kind:
+
+| Source | Shuffle choices | Repeat choices |
+| --- | --- | --- |
+| Album | Default / On / Off | Default / Off / All |
+| Playlist | Default / On / Off | Default / Off / All |
+| Track / single song | Hidden | Default / Off / One |
+| Station | Hidden | Hidden |
+
+`Default` omits the field from the card and lets selected-room overrides plus
+code-owned source defaults resolve it later. Do not label it “Preserve”: a new
+album, playlist, or track normally derives repeat=off, and an album derives
+shuffle=false. Explicit On/Off/All/One choices serialize their exact values.
+
+Every card created by this simple writer includes **`transport: "play"`** with
+its source. Transport is fixed, not presented as an option. Source-and-stay-paused,
+play/pause-only commands, and queue manipulation are outside this family workflow.
+
+Volume remains a supported power-user MusicIntent/card-schema capability, using
+the normal logical 0–100 range. Manual JSON cards or advanced tools may use it.
+The simple writer exposes no volume, seek, queueIndex, room, roomDisplayId, UUID,
+policy, device configuration, or read_only controls. Unsupported advanced cards
+must remain inspectable without silently rewriting/dropping their extra fields.
+
+Examples using the illustrative room configuration in [policy](policy.md):
+
+- One playlist card with source + play and omitted modes shuffles in Living Room,
+  preserves shuffle in Office, and derives repeat=off in both.
+- One album card with source + play and omitted modes plays in order in Office,
+  shuffles in Sons Room, and derives repeat=off in both.
+- One track card with source + play and omitted repeat loops in Sons Room and
+  plays once in Office. The room policy, not the card, supplies that difference.
+
+Room-independent cards are a central product requirement. Any effective policy
+preview is explanatory; it must not silently save the previewed values on the tag.
+
+## Writer workflow (future)
 
 1. Read/inspect or create a draft. Show explicit settings separately from an
    effective policy preview for the selected target; do not save derived values
    onto the card unless the user explicitly chooses them.
-2. Validate the complete draft, show whether it plays music, and arm one write
+2. Validate the complete draft, show its source and playback intent, and arm one write
    for 60 seconds. Arming or editing MUST NOT submit playback. An edit session
    pins the read tag identity and payload; reject a different/changed tag.
 3. While armed, the next compatible tag presentation is reserved for writing,
@@ -241,5 +299,5 @@ Required rejection fixtures: both `set` and `delta`; `volume: null`; `shuffle: 0
 `source` + `next`; duplicate JSON keys; unknown intent key; unknown required
 extension; unsupported version; oversized NDEF; an artist URL. Required
 preservation fixtures: explicit `false`/zero, source-only while playing and while
-paused, album URL with `i` receiving no album policy, and round-tripped unknown
+paused, album URL with `i` receiving track defaults rather than album defaults, and round-tripped unknown
 optional extensions.

@@ -4,13 +4,23 @@
   "source_url": "https://music.apple.com/us/album/REPLACE_WITH_KNOWN_SOURCE/123456789",
   "apple_region": "52231",
   "read_only": true,
-  "rooms": [
-    "office",
-    "living-room",
-    "kitchen",
-    "bedroom"
-  ],
-  "playlist_shuffle_rooms": {
-    "bedroom": true
+  "rooms": {
+    "office": {},
+    "living-room": {
+      "playlist": {
+        "shuffle": true
+      }
+    },
+    "sons-room": {
+      "album": {
+        "shuffle": true
+      },
+      "playlist": {
+        "shuffle": true
+      },
+      "track": {
+        "repeat": "one"
+      }
+    }
   }
 }

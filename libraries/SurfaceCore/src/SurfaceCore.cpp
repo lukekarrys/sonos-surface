@@ -174,8 +174,8 @@ Result validateIntent(const MusicIntent& intent) {
   if ((intent.transport == TransportCommand::Next || intent.transport == TransportCommand::Previous) &&
       (intent.source || intent.shuffle.has_value() || intent.repeat)) return Result::fail("Next/previous cannot combine with source or mode");
   if (intent.source) {
-    if (intent.source->kind == SourceKind::Station && (intent.shuffle.has_value() || intent.repeat))
-      return Result::fail("Shuffle/repeat are unsupported for stations");
+    auto modes = validateSourceModes(intent.source->kind, {intent.shuffle, intent.repeat});
+    if (!modes.ok) return modes;
     Source normalized;
     auto r = normalizeAppleUrl(intent.source->url, normalized);
     if (!r.ok) return r;
@@ -272,18 +272,94 @@ Result parseIntent(const std::string& payload, MusicIntent& output) {
   return result;
 }
 
+const char* sourceKindName(SourceKind kind) {
+  switch (kind) {
+    case SourceKind::Album: return "album";
+    case SourceKind::Playlist: return "playlist";
+    case SourceKind::Track: return "track";
+    case SourceKind::Station: return "station";
+  }
+  return "unknown";
+}
+const char* repeatName(Repeat repeat) {
+  switch (repeat) {
+    case Repeat::Off: return "off";
+    case Repeat::All: return "all";
+    case Repeat::One: return "one";
+  }
+  return "unknown";
+}
+Result validateSourceModes(SourceKind kind, const ModePolicy& modes) {
+  if (modes.repeat && *modes.repeat != Repeat::Off && *modes.repeat != Repeat::All && *modes.repeat != Repeat::One)
+    return Result::fail("Invalid repeat");
+  switch (kind) {
+    case SourceKind::Album:
+    case SourceKind::Playlist:
+      if (modes.repeat == Repeat::One) return Result::fail("Repeat one is invalid for album/playlist sources");
+      break;
+    case SourceKind::Track:
+      if (modes.shuffle.has_value()) return Result::fail("Shuffle is unsupported for tracks");
+      if (modes.repeat == Repeat::All) return Result::fail("Repeat all is invalid for tracks");
+      break;
+    case SourceKind::Station:
+      if (modes.shuffle.has_value() || modes.repeat) return Result::fail("Shuffle/repeat are unsupported for stations");
+      break;
+    default: return Result::fail("Invalid source kind");
+  }
+  return {};
+}
+ModePolicy sourceDefaults(SourceKind kind) {
+  switch (kind) {
+    case SourceKind::Album: return {false, Repeat::Off};
+    case SourceKind::Playlist:
+    case SourceKind::Track: return {std::nullopt, Repeat::Off};
+    case SourceKind::Station: return {};
+  }
+  return {};
+}
+ModePolicy roomSourcePolicy(const RoomPolicy& policy, SourceKind kind) {
+  switch (kind) {
+    case SourceKind::Album: return policy.album;
+    case SourceKind::Playlist: return policy.playlist;
+    case SourceKind::Track: return policy.track;
+    case SourceKind::Station: return {};
+  }
+  return {};
+}
+std::string describeOrigin(const FieldProvenance& provenance) {
+  switch (provenance.origin) {
+    case PolicyOrigin::Preserved: return "preserve";
+    case PolicyOrigin::Explicit: return "explicit";
+    case PolicyOrigin::RoomPolicy: return "room-policy:" + provenance.key;
+    case PolicyOrigin::SourceDefault: return "source-default:" + provenance.key;
+  }
+  return "preserve";
+}
 ResolvedIntent resolvePolicy(const MusicIntent& intent, const PolicyContext& context) {
-  ResolvedIntent result{intent, intent.shuffle.has_value() ? "explicit" : "preserve", context.revision, context.targetId};
-  if (!intent.shuffle.has_value() && intent.source) {
-    const auto roomRule = context.playlistShuffleRooms.find(context.targetId);
-    if (intent.source->kind == SourceKind::Playlist && roomRule != context.playlistShuffleRooms.end()) {
-      result.intent.shuffle = roomRule->second;
-      result.shuffleOrigin = "playlist-room-shuffle";
-    } else if (intent.source->kind == SourceKind::Album) {
-      result.intent.shuffle = false;
-      result.shuffleOrigin = "albums-in-order";
+  // Callers validate incoming intents first. Execution validates the frozen result
+  // again; neither observations nor later configuration participate in resolution.
+  ResolvedIntent result{intent, {}, context.revision, context.targetId};
+  ModePolicy defaults, overrides;
+  std::string displayId;
+  if (intent.source) {
+    defaults = sourceDefaults(intent.source->kind);
+    const auto room = context.rooms.find(context.targetId);
+    if (room != context.rooms.end()) {
+      overrides = roomSourcePolicy(room->second.policy, intent.source->kind);
+      displayId = room->second.displayId;
     }
   }
+  auto resolve = [&](auto& value, const auto& overrideValue, const auto& defaultValue, PolicyField field) {
+    auto& origin = result.provenance[field];
+    if (value.has_value()) origin = {PolicyOrigin::Explicit, ""};
+    else if (overrideValue.has_value()) {
+      value = overrideValue; origin = {PolicyOrigin::RoomPolicy, displayId};
+    } else if (defaultValue.has_value()) {
+      value = defaultValue; origin = {PolicyOrigin::SourceDefault, sourceKindName(intent.source->kind)};
+    }
+  };
+  resolve(result.intent.shuffle, overrides.shuffle, defaults.shuffle, PolicyField::Shuffle);
+  resolve(result.intent.repeat, overrides.repeat, defaults.repeat, PolicyField::Repeat);
   return result;
 }
 
@@ -487,7 +563,7 @@ Result Application::submit(const ResolvedIntent& accepted) {
   state_.queue.reset();
   state_.status = "pending";
   state_.detail = "Preflight";
-  state_.shuffleOrigin = plan.resolved.shuffleOrigin;
+  state_.provenance = plan.resolved.provenance;
   publish();
   result = transport_.prepare(plan.resolved);
   size_t completed = 0;

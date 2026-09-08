@@ -1,13 +1,12 @@
-# Shared Sonos capability milestone
+# Shared Sonos capabilities
 
 ## Deliberate contracts
 
-This milestone adds normalized observations, absolute seek, bounded queue reads,
-and direct selection of an existing item in the active queue. M5StickS3 remains
-the development harness. No queue editor, grouping, service browser, artwork
-fetching, or new Waveshare UI is included in that backend milestone. The following
-[Waveshare frontend milestone](waveshare-frontend.md) consumes these contracts
-without adding UI concepts to the shared layers.
+The shared backend provides normalized observations, absolute seek, bounded queue
+reads, and selection of an existing item in the active queue. Both boards use this
+backend; [Waveshare](waveshare-frontend.md) presents its touch and artwork frontend
+without adding UI concepts to the shared layers. General queue editing and a service
+browser remain outside scope.
 
 The existing selected-room and policy contracts remain authoritative: configuration
 uses `roomDisplayId`, discovery resolves UUIDs, and acceptance freezes UUID and
@@ -119,8 +118,8 @@ recovery. Normal polling does not clear uncertainty or enforce prior intents.
 Existing next/previous retain the same conservative single-attempt contract.
 
 Protocol reference: [UPnP AVTransport service](https://www.upnp.org/specs/av/UPnP-av-AVTransport-v3-Service.pdf),
-Seek with REL_TIME/ TRACK_NR. Real Sonos mutation behavior remains subject to the
-physical checkpoint; a protocol description or fake is not hardware evidence.
+Seek with REL_TIME/ TRACK_NR. The owner has confirmed paused seek and selection; broader playing/stopped
+behavior remains fixture-tested. A protocol description is not hardware evidence.
 
 ## Observation and diagnostics
 
@@ -150,7 +149,22 @@ python3 scripts/probe.py --ip SPEAKER_IP --uid RINCON_SPEAKER_ID --queue-start 2
 python3 scripts/probe.py --ip SPEAKER_IP --uid RINCON_SPEAKER_ID --samples 12 --interval-ms 10000
 ```
 
-See [hardware evidence](hardware.md) for measured reads/builds and the remaining
-owner checkpoint. Software fixtures cover external play/pause, track, audio,
+See [hardware evidence](hardware.md) for measured behavior and unresolved limits. Software fixtures cover external play/pause, track, audio,
 mode, queue, and source replacement. Real external-change evidence must identify
 an actual changed observation; identical periodic reads alone do not prove it.
+
+## Apple source mapping and playback evidence
+
+Albums/playlists use Apple service 204, item prefixes `1004206c`/`1006206c`, and
+region descriptor `52231` by default. Container URI separators must encode `:` as
+`%3a`: a real playlist insert failed with Sonos 804 using literal `:`, then succeeded
+with the encoded form. No synchronization sleep was needed. Readiness polls
+observed TRANSITIONING after Play acknowledgment before eventual PLAYING.
+
+Personal-station mapping comes from a real Sonos favorite and successful playback:
+`x-sonosapi-radio:radio%3a{stationId}?sid=204&flags=44`, item prefix `000c002c`,
+audioBroadcast class, `parentID=-1`, and the configured Apple descriptor. This
+household works without an account-specific `sn` parameter. Station playback kept
+the 25-entry stored queue byte-equivalent in the measured test. Other account or
+station variants are not established by that result. Account access and track URI
+playback still require real-device evidence before claiming broader compatibility.

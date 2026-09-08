@@ -1,4 +1,4 @@
-#include "../libraries/SurfaceDevice/src/PlaylistPolicyConfig.h"
+#include "../libraries/SurfaceDevice/src/RoomConfig.h"
 
 // Real DirectSonos execution against protocol fixtures; no network or sleeps.
 struct ControlHttp : LocalHttp {
@@ -73,55 +73,31 @@ unsigned milestoneTests() {
   unsigned cases = 0;
   // Multiple independent room defaults, including false, never modify input or
   // spill into unconfigured targets. Configuration values are policy, not intent.
-  PlaylistShuffleRooms rules{{"RINCON_A", true}, {"RINCON_B", true}, {"RINCON_C", false}};
   auto playlistInput = parsed(playlist);
+  auto rules = playlistPolicies({{"RINCON_A", true}, {"RINCON_B", true}, {"RINCON_C", false}});
   for (const auto& id : {"RINCON_A", "RINCON_B", "RINCON_C", "RINCON_D"}) {
     const auto resolved = resolvePolicy(playlistInput, {id, rules, 2});
     const std::optional<bool> expected = std::string(id) == "RINCON_D" ? std::nullopt :
         std::optional<bool>(std::string(id) != "RINCON_C");
     assert(resolved.intent.shuffle == expected);
-    assert(resolved.shuffleOrigin == (expected.has_value() ? "playlist-room-shuffle" : "preserve"));
+    assert(shuffleOrigin(resolved) == (expected.has_value() ? std::string("room-policy:") + id : "preserve"));
     assert(!playlistInput.shuffle.has_value()); ++cases;
     for (bool explicitValue : {false, true}) {
       auto explicitInput = playlistInput; explicitInput.shuffle = explicitValue;
       auto explicitResult = resolvePolicy(explicitInput, {id, rules, 2});
-      assert(explicitResult.intent.shuffle == explicitValue && explicitResult.shuffleOrigin == "explicit"); ++cases;
+      assert(explicitResult.intent.shuffle == explicitValue && shuffleOrigin(explicitResult) == "explicit"); ++cases;
     }
     auto albumResult = resolvePolicy(parsed(album), {id, rules, 2});
-    assert(albumResult.intent.shuffle == false && albumResult.shuffleOrigin == "albums-in-order"); ++cases;
+    assert(albumResult.intent.shuffle == false && shuffleOrigin(albumResult) == "source-default:album"); ++cases;
   }
   auto frozen = resolvePolicy(playlistInput, {"RINCON_A", rules, 2});
-  rules["RINCON_A"] = false;
+  rules["RINCON_A"].policy.playlist.shuffle = false;
   assert(frozen.intent.shuffle == true && frozen.policyRevision == 2);
   assert(resolvePolicy(playlistInput, {"RINCON_A", rules, 3}).intent.shuffle == false); ++cases;
-  using surface::device::parsePlaylistPolicy;
-  rules = {{"office", true}, {"living-room", false}};
-  PlaylistShuffleRooms loaded;
-  assert(parsePlaylistPolicy(Json{{"playlist_shuffle_rooms", rules}}, loaded) && loaded == rules); ++cases;
-  assert(parsePlaylistPolicy(Json{{"playlist_shuffle_room", "RINCON_A"}}, loaded));
-  assert((loaded == PlaylistShuffleRooms{{"RINCON_A", true}})); ++cases;
-  for (const auto& empty : {Json::object(), Json{{"playlist_shuffle_room", ""}},
-                           Json{{"playlist_shuffle_rooms", Json::object()}}}) {
-    loaded = rules; assert(parsePlaylistPolicy(empty, loaded) && loaded.empty()); ++cases;
-  }
-  for (const Json& invalid : std::vector<Json>{
-      {{"playlist_shuffle_rooms", "RINCON_A"}}, {{"playlist_shuffle_rooms", Json::array({"RINCON_A"})}},
-      {{"playlist_shuffle_rooms", nullptr}},
-      {{"playlist_shuffle_rooms", {{"RINCON_A", "true"}}}}, {{"playlist_shuffle_rooms", {{"RINCON_A", 1}}}},
-      {{"playlist_shuffle_rooms", {{"RINCON_A", nullptr}}}},
-      {{"playlist_shuffle_rooms", {{"RINCON_A", true}, {"RINCON_B", "bad"}}}},
-      {{"playlist_shuffle_room", Json::array()}},
-      {{"playlist_shuffle_room", "RINCON_A"}, {"playlist_shuffle_rooms", Json::object()}}}) {
-    loaded = rules;
-    assert(!parsePlaylistPolicy(invalid, loaded) && loaded == rules); ++cases;
-  }
-  Json excessive = Json::object();
-  for (int n = 0; n < 33; ++n) excessive["RINCON_" + std::to_string(n)] = true;
-  assert(!parsePlaylistPolicy(Json{{"playlist_shuffle_rooms", excessive}}, loaded)); ++cases;
 
   Room a{"RINCON_A", "Office", "192.168.1.2", "RINCON_A", "a", true, "office"};
   Room b{"RINCON_B", "Living Room", "192.168.1.3", "RINCON_B", "b", true, "living-room"};
-  RoomSelection rooms; rooms.allowedIds = {"office", "living-room"};
+  RoomSelection rooms; rooms.configured = {{"office", {}}, {"living-room", {}}};
   rooms.preferredId = "living-room"; rooms.update({b, a});
   assert(rooms.selectedId == b.id && rooms.warning.empty() && rooms.rooms.front().id == b.id); ++cases;
   b.name = "Renamed"; b.address = "192.168.1.4"; rooms.update({a, b});
@@ -131,7 +107,7 @@ unsigned milestoneTests() {
   assert(rooms.cycle() && rooms.selectedId == a.id); ++cases;
   b.eligible = true; rooms.update({a, b}); assert(rooms.cycle() && rooms.selectedId == b.id); ++cases;
   rooms.update({a, b}); assert(rooms.warning.empty()); ++cases;
-  RoomSelection fallback; fallback.allowedIds = {"office", "living-room"};
+  RoomSelection fallback; fallback.configured = {{"office", {}}, {"living-room", {}}};
   fallback.preferredId = "missing"; fallback.update({b, a});
   assert(fallback.selectedId == b.id && !fallback.warning.empty() && fallback.preferredId == "missing"); ++cases;
   fallback.update({a}); assert(fallback.selectedId == a.id); ++cases;
@@ -146,27 +122,27 @@ unsigned milestoneTests() {
   assert(!parseTopology("garbage", topology).ok); ++cases;
   for (auto uid : {a.id, b.id}) {
     auto intent = parsed(album);
-    auto resolved = resolvePolicy(intent, {uid, {{b.id, true}}, 1});
-    assert(resolved.intent.shuffle == false && resolved.shuffleOrigin == "albums-in-order"); ++cases;
-    intent.shuffle = false; assert(resolvePolicy(intent, {uid, {{b.id, true}}, 1}).shuffleOrigin == "explicit"); ++cases;
+    auto resolved = resolvePolicy(intent, {uid, playlistPolicies({{b.id, true}}), 1});
+    assert(resolved.intent.shuffle == false && shuffleOrigin(resolved) == "source-default:album"); ++cases;
+    intent.shuffle = false; assert(shuffleOrigin(resolvePolicy(intent, {uid, playlistPolicies({{b.id, true}}), 1})) == "explicit"); ++cases;
     auto playlistIntent = parsed(playlist);
-    auto policy = resolvePolicy(playlistIntent, {uid, {{b.id, true}}, 1});
+    auto policy = resolvePolicy(playlistIntent, {uid, playlistPolicies({{b.id, true}}), 1});
     assert(policy.intent.shuffle == (uid == b.id ? std::optional<bool>(true) : std::nullopt)); ++cases;
     for (bool explicitValue : {false, true}) {
       playlistIntent.shuffle = explicitValue;
-      auto explicitPolicy = resolvePolicy(playlistIntent, {uid, {{b.id, true}}, 1});
-      assert(explicitPolicy.intent.shuffle == explicitValue && explicitPolicy.shuffleOrigin == "explicit"); ++cases;
+      auto explicitPolicy = resolvePolicy(playlistIntent, {uid, playlistPolicies({{b.id, true}}), 1});
+      assert(explicitPolicy.intent.shuffle == explicitValue && shuffleOrigin(explicitPolicy) == "explicit"); ++cases;
     }
   }
   auto incoming = parsed(playlist);
-  auto bound = resolvePolicy(incoming, {rooms.selectedId, {{b.id, true}}, 7});
+  auto bound = resolvePolicy(incoming, {rooms.selectedId, playlistPolicies({{b.id, true}}), 7});
   assert(rooms.cycle() && rooms.selectedId == a.id);
   FakeSonos first, second;
-  Application firstApp(first, {b.id, {{b.id, true}}, 7}), secondApp(second, {a.id, {{b.id, true}}, 7});
+  Application firstApp(first, {b.id, playlistPolicies({{b.id, true}}), 7}), secondApp(second, {a.id, playlistPolicies({{b.id, true}}), 7});
   assert(firstApp.refresh().ok && secondApp.refresh().ok && first.calls.empty() && second.calls.empty()); ++cases;
   assert(bound.targetId == b.id && bound.intent.shuffle == true && firstApp.submit(bound).ok); ++cases;
   assert(!secondApp.submit(bound).ok && second.calls.empty()); ++cases;
-  assert(secondApp.submit(resolvePolicy(incoming, {a.id, {{b.id, true}}, 7})).ok && first.calls == second.calls); ++cases;
+  assert(secondApp.submit(resolvePolicy(incoming, {a.id, playlistPolicies({{b.id, true}}), 7})).ok && first.calls == second.calls); ++cases;
   assert(!incoming.shuffle && incoming.source->url == playlist); ++cases;
   for (const Json& bad : std::vector<Json>{{{"volume", nullptr}}, {{"volume", {{"set", 1}, {"delta", 2}}}},
       {{"volume", {{"set", -1}}}}, {{"volume", {{"delta", 101}}}}, {{"volume", {{"set", 1.2}}}},
@@ -186,7 +162,7 @@ unsigned milestoneTests() {
   for (const Json& request : std::vector<Json>{{{"volume", {{"set", 45}}}}, {{"volume", {{"delta", -100}}}},
       {{"volume", {{"delta", 100}}}}, {{"repeat", "off"}}, {{"repeat", "all"}}, {{"repeat", "one"}},
       {{"shuffle", false}}, {{"shuffle", true}}, {{"transport", "next"}}, {{"transport", "previous"}}}) {
-    ControlHttp http; DirectSonos sonos(http, {a.id, "52231"}); Application app(sonos, {a.id, {{b.id, true}}, 1});
+    ControlHttp http; DirectSonos sonos(http, {a.id, "52231"}); Application app(sonos, {a.id, playlistPolicies({{b.id, true}}), 1});
     assert(app.submit(card(request)).ok);
     assert(http.writes.size() == 1);
     if (!request.contains("volume")) assert(http.volume == 30);
@@ -195,41 +171,41 @@ unsigned milestoneTests() {
     assert(http.uri == "x-rincon-queue:RINCON_A#0" && http.playback == "PAUSED_PLAYBACK"); ++cases;
   }
   ControlHttp volumeHttp; DirectSonos volumeSonos(volumeHttp, {a.id, "52231"});
-  auto relative = resolvePolicy(parsed(card({{"volume", {{"delta", 5}}}})), {a.id, {{b.id, true}}, 1});
+  auto relative = resolvePolicy(parsed(card({{"volume", {{"delta", 5}}}})), {a.id, playlistPolicies({{b.id, true}}), 1});
   assert(volumeSonos.prepare(relative).ok); volumeHttp.volume = 80;
   assert(volumeSonos.execute(Operation::SetVolume).ok && volumeHttp.volume == 35);
   assert(volumeSonos.execute(Operation::SetVolume).ok && volumeHttp.volume == 35); ++cases;
   for (int delta : {0, -100}) {
-    ControlHttp http; http.volume = 0; DirectSonos sonos(http, {a.id, "52231"}); Application app(sonos, {a.id, {{b.id, true}}, 1});
+    ControlHttp http; http.volume = 0; DirectSonos sonos(http, {a.id, "52231"}); Application app(sonos, {a.id, playlistPolicies({{b.id, true}}), 1});
     assert(app.submit(card({{"volume", {{"delta", delta}}}})).ok && http.writes.empty()); ++cases;
   }
   for (const auto* playback : {"PLAYING", "PAUSED_PLAYBACK", "STOPPED", "TRANSITIONING"}) {
     ControlHttp http; http.playback = playback;
-    DirectSonos sonos(http, {a.id, "52231"}); Application app(sonos, {a.id, {{b.id, true}}, 1});
+    DirectSonos sonos(http, {a.id, "52231"}); Application app(sonos, {a.id, playlistPolicies({{b.id, true}}), 1});
     auto result = app.submit(card({{"source", {{"service", "apple-music"}, {"url", album}}}}));
     if (std::string(playback) == "TRANSITIONING") assert(!result.ok && http.writes.empty());
     else {
-      assert(result.ok && http.volume == 30 && http.mode == "REPEAT_ONE");
+      assert(result.ok && http.volume == 30 && http.mode == "NORMAL");
       assert((http.playback == "PLAYING") == (std::string(playback) == "PLAYING"));
     }
     ++cases;
   }
   {
     ControlHttp http; http.playback = "PLAYING";
-    DirectSonos sonos(http, {a.id, "52231"}); Application app(sonos, {a.id, {{b.id, true}}, 1});
+    DirectSonos sonos(http, {a.id, "52231"}); Application app(sonos, {a.id, playlistPolicies({{b.id, true}}), 1});
     assert(app.submit(card({{"source", {{"service", "apple-music"}, {"url", album}}}, {"transport", "pause"}})).ok);
     assert(http.playback != "PLAYING");
     for (const auto& write : http.writes) assert(write.first != "Play"); ++cases;
   }
   for (const auto* advance : {"next", "previous"}) {
     ControlHttp http; http.failAction = std::string(advance) == "next" ? "Next" : "Previous"; http.uncertain = true;
-    DirectSonos sonos(http, {a.id, "52231"}); Application app(sonos, {a.id, {{b.id, true}}, 1});
+    DirectSonos sonos(http, {a.id, "52231"}); Application app(sonos, {a.id, playlistPolicies({{b.id, true}}), 1});
     auto request = card({{"transport", advance}});
     assert(!app.submit(request).ok && app.state().recoveryRequired && http.writes.size() == 1);
     assert(!app.submit(request).ok && http.writes.size() == 1); ++cases;
   }
   ControlHttp grouping; DirectSonos groupSonos(grouping, {a.id, "52231"});
-  auto play = resolvePolicy(parsed(card({{"transport", "play"}})), {a.id, {{b.id, true}}, 1});
+  auto play = resolvePolicy(parsed(card({{"transport", "play"}})), {a.id, playlistPolicies({{b.id, true}}), 1});
   assert(groupSonos.prepare(play).ok); grouping.grouped = true;
   assert(!groupSonos.execute(Operation::Play).ok && grouping.writes.empty()); ++cases;
   grouping.grouped = false; grouping.id = b.id;
@@ -245,45 +221,45 @@ unsigned milestoneTests() {
     assert(!validRoomDisplayId(id)); ++cases;
   }
   Room extra{"RINCON_C", "Bedroom", "192.168.1.5", "RINCON_C", "c", true, "bedroom"};
-  RoomSelection selected; selected.allowedIds = {"office", "living-room", "missing", "Bad ID"};
-  selected.playlistRules = {{"living-room", true}};
+  RoomSelection selected; selected.configured = {{"office", {}}, {"living-room", {}}, {"missing", {}}, {"Bad ID", {}}};
+  selected.configured["living-room"] = playlistPolicy(true);
   selected.update({extra, a, b});
   assert(selected.rooms.size() == 2 && selected.rooms[0].id == b.id && selected.problems.size() == 2); ++cases;
   for (int n = 0; n < 8; ++n) { assert(selected.cycle() && selected.selectedId != extra.id); ++cases; }
-  assert(selected.resolvedPlaylistRules == PlaylistShuffleRooms({{b.id, true}})); ++cases;
-  auto accepted = resolvePolicy(parsed(playlist), {b.id, selected.resolvedPlaylistRules, 9});
-  selected.cycle(); selected.allowedIds = {"office"}; b.name = "New Name"; selected.update({a, b});
+  assert(selected.resolvedPolicies.size() == 2 && selected.resolvedPolicies.at(b.id).policy.playlist.shuffle == true); ++cases;
+  auto accepted = resolvePolicy(parsed(playlist), {b.id, selected.resolvedPolicies, 9});
+  selected.cycle(); selected.configured = {{"office", {}}}; b.name = "New Name"; selected.update({a, b});
   assert(accepted.targetId == b.id && accepted.intent.shuffle == true && accepted.policyRevision == 9); ++cases;
-  assert(selected.resolvedPlaylistRules.empty() && selected.selectedId == a.id); ++cases;
+  assert(selected.resolvedPolicies.size() == 1 && selected.selectedId == a.id); ++cases;
   b.name = "Living Room";
-  extra.name = "Office!"; selected.allowedIds = {"office", "living-room"}; selected.update({extra, a, b});
+  extra.name = "Office!"; selected.configured = {{"office", {}}, {"living-room", {}}}; selected.update({extra, a, b});
   assert(selected.rooms.size() == 1 && selected.selectedId == b.id && selected.warning.find("AMBIGUOUS: office") != std::string::npos); ++cases;
-  selected.playlistRules = {{"office", true}}; selected.update({extra, a, b});
-  assert(selected.resolvedPlaylistRules.empty()); ++cases;
+  selected.configured = {{"office", playlistPolicy(true)}}; selected.update({extra, a, b});
+  assert(selected.resolvedPolicies.empty()); ++cases;
   extra.eligible = false; selected.update({extra, a, b});
-  assert(selected.rooms.size() == 1 && selected.selectedId == b.id); ++cases;
+  assert(selected.rooms.empty()); ++cases;
   extra.eligible = true;
-  selected.playlistRules = {{"RINCON_A", true}}; selected.update({a, b});
-  assert(selected.resolvedPlaylistRules.empty() && selected.warning.find("INVALID: RINCON_A") != std::string::npos); ++cases;
-  selected.playlistRules = {{"living-room", true}};
+  selected.configured = {{"RINCON_A", playlistPolicy(true)}}; selected.update({a, b});
+  assert(selected.resolvedPolicies.empty() && selected.warning.find("INVALID: RINCON_A") != std::string::npos); ++cases;
+  selected.configured["living-room"] = playlistPolicy(true);
   selected.preferredId = "living-room"; selected.initialized = false; selected.update({a, b});
-  auto beforeReplacement = resolvePolicy(parsed(playlist), {selected.selectedId, selected.resolvedPlaylistRules, 11});
+  auto beforeReplacement = resolvePolicy(parsed(playlist), {selected.selectedId, selected.resolvedPolicies, 11});
   auto replacement = b; replacement.id = "RINCON_REPLACEMENT";
   selected.update({a, replacement});
   assert(selected.selectedId == replacement.id && beforeReplacement.targetId == b.id && beforeReplacement.intent.shuffle == true); ++cases;
   extra.name = "Bedroom";
-  bool mode = false; std::vector<std::string> ids;
+  bool mode = false; RoomConfig ids;
   using surface::device::parseDeviceRooms;
   assert(parseDeviceRooms(Json::object(), mode, ids) && mode && ids.empty()); ++cases;
   for (bool readOnly : {true, false}) {
-    assert(parseDeviceRooms(Json{{"read_only", readOnly}, {"rooms", {"office", "missing", "Bad ID"}}}, mode, ids));
-    selected.allowedIds = ids; selected.update({a, b, extra});
+    assert(parseDeviceRooms(Json{{"read_only", readOnly}, {"rooms", {{"office", Json::object()}, {"missing", Json::object()}, {"Bad ID", Json::object()}}}}, mode, ids));
+    selected.configured = ids; selected.update({a, b, extra});
     assert(mode == readOnly && selected.rooms.size() == 1 && selected.selectedId == a.id); ++cases;
   }
   for (const Json& invalid : std::vector<Json>{{{"read_only", "false"}}, {{"read_only", nullptr}},
       {{"rooms", "office"}}, {{"rooms", {"office", "office"}}}, {{"rooms", {1}}}}) {
-    auto before = ids; auto oldMode = mode;
-    assert(!parseDeviceRooms(invalid, mode, ids) && ids == before && mode == oldMode); ++cases;
+    auto before = surface::device::roomConfigJson(ids); auto oldMode = mode;
+    assert(!parseDeviceRooms(invalid, mode, ids) && surface::device::roomConfigJson(ids) == before && mode == oldMode); ++cases;
   }
   // Exercise the exact final HTTP gate used by EspHttp, counting downstream calls.
   struct GuardFixture : GuardedHttp {
@@ -309,8 +285,8 @@ unsigned milestoneTests() {
       {{"transport", "play"}}, {{"transport", "pause"}}, {{"transport", "next"}}, {{"transport", "previous"}}}) {
     GuardFixture gate; gate.targetAllowed = true;
     if (request.value("transport", "") == "pause") gate.downstream.playback = "PLAYING";
-    DirectSonos sonos(gate, {a.id, "52231"}); Application app(sonos, {a.id, {{a.id, true}}, 10});
-    auto normalized = parsed(card(request)); auto resolved = resolvePolicy(normalized, {a.id, {{a.id, true}}, 10});
+    DirectSonos sonos(gate, {a.id, "52231"}); Application app(sonos, {a.id, playlistPolicies({{a.id, true}}), 10});
+    auto normalized = parsed(card(request)); auto resolved = resolvePolicy(normalized, {a.id, playlistPolicies({{a.id, true}}), 10});
     Plan plan; assert(makePlan(resolved, plan).ok && !plan.operations.empty());
     assert(app.refresh().ok);
     auto result = app.submit(resolved);
@@ -356,7 +332,7 @@ unsigned milestoneTests() {
     assert(app.refresh().ok);
     // External playback changes after the cached snapshot must drive the toggle.
     gate.downstream.playback = playback;
-    PolicyContext captured{a.id, {{a.id, true}}, 17};
+    PolicyContext captured{a.id, playlistPolicies({{a.id, true}}), 17};
     assert(app.submitToggle(captured).ok);
     assert(gate.downstream.writes.size() == 1);
     assert(gate.downstream.writes[0].first == (std::string(playback) == "PLAYING" ? "Pause" : "Play"));

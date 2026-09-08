@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-`sonos-surface` is a personal, single-household ESP32-S3 Sonos project. Read [product scope](docs/product.md), [intents](docs/intent.md), [policies](docs/policy.md), [execution](docs/planner-executor.md), and [hardware evidence](docs/hardware.md) before changing behavior. The first two-board slice is demonstrated: M5 NFC playback and calibrated Waveshare center-button Pause/Play are owner-confirmed, with independent state reads on both. The V2 fit is stored per device in surface/touch NVS; diagnostics remain raw. Stick uses explicit target initialization. Native USB/early-boot power-cycle limitations remain; see the latest hardware-hardening evidence.
+`sonos-surface` is a personal, single-household ESP32-S3 Sonos project. Read [product scope](docs/product.md), [intents](docs/intent.md), [policies](docs/policy.md), [execution](docs/planner-executor.md), and [hardware evidence](docs/hardware.md) before changing behavior. M5 NFC playback/room cycling and the Waveshare 1.8-inch frontend/artwork are owner-confirmed, with independent state reads on both. The V2 fit is stored per device in surface/touch NVS; diagnostics remain raw. Stick uses explicit target initialization. Native USB/early-boot limitations remain documented in hardware.
 
 `libraries/SurfaceCore/src/` owns portable intent, policy, planning, execution, and AppState. `SurfaceSonos/src/` owns SOAP/Apple metadata behind `LocalHttp`. `SurfaceDevice/src/` contains the ESP32 runtime and separate board adapters. `firmware/sonos_surface/` is the shared entry point; `tests/` and `scripts/` contain validation/tooling. Keep hardware/network SDKs out of portable layers.
 
@@ -14,7 +14,7 @@ Run `python3 scripts/setup.py` for pinned Arduino-ESP32 dependencies, or add `--
 
 C++17 uses two-space indentation, PascalCase types, and camelCase functions/fields. Python uses four spaces. No formatter is configured. Use descriptive Markdown headings, relative links, and valid JSON examples; keep wire names consistent with the specifications.
 
-Treat omitted intent fields as preservation, retain policy provenance, and express operation dependencies explicitly. Never encode Sonos ordering or sleeps in cards. Keep grouping, generic scripting, and unrelated Sonos management out of scope.
+Omitted intent fields resolve through source/room policy, then preserve if still absent. Retain per-field provenance and express operation dependencies explicitly. Never encode Sonos ordering or sleeps in cards. Keep grouping, generic scripting, and unrelated Sonos management out of scope.
 
 ## Testing Guidelines
 
@@ -30,8 +30,8 @@ PRs should explain behavior, validation, and unresolved risks; link issues when 
 
 Device runtime `read_only=true` blocks all Sonos mutations at HTTP dispatch;
 `read_only=false` permits requested mutations only for configured, eligible rooms.
-Room and playlist policy configuration use display IDs resolved from current names;
-accepted requests freeze UUID and policy. M5/Waveshare flashing and non-Sonos tests
+The room-keyed config object is the allowlist and contains source-specific exceptions.
+Display IDs resolve from current names; accepted requests freeze UUID and policy. M5/Waveshare flashing and non-Sonos tests
 are authorized. Keep autonomous tests read-only; do not turn an existing true flag
 false to complete testing. Stop for physical gestures or intentional live playback tests.
 
