@@ -129,6 +129,39 @@ size_t members(const Json& value) {
   }
   return total;
 }
+// Compact NFC wire syntax only; the shared validator below owns all source/mode rules.
+Result parseCompactCard(const std::string& text, MusicIntent& intent) {
+  if (text.compare(0, 4, "ss1:") != 0)
+    return Result::fail("Unsupported compact card prefix; expected ss1:");
+  for (unsigned char c : text)
+    if (c <= 32 || c == 127)
+      return Result::fail("Compact cards cannot contain whitespace");
+  const auto separator = text.find(';', 4);
+  if (separator == std::string::npos || (separator != 7 && separator != 11))
+    return Result::fail("ss1 requires one or two s/r options followed by a URL");
+  for (size_t at = 4; at < separator; at += 4) {
+    if (text[at + 1] != '=' || (at + 3 < separator && text[at + 3] != ','))
+      return Result::fail("Malformed ss1 option");
+    const char key = text[at], value = text[at + 2];
+    if (key == 's') {
+      if (intent.shuffle.has_value() || (value != '0' && value != '1'))
+        return Result::fail("Duplicate/invalid ss1 shuffle option");
+      intent.shuffle = value == '1';
+    } else if (key == 'r') {
+      if (intent.repeat || (value != '0' && value != '1' && value != 'a'))
+        return Result::fail("Duplicate/invalid ss1 repeat option");
+      intent.repeat = value == '0' ? Repeat::Off : value == '1' ? Repeat::One : Repeat::All;
+    } else
+      return Result::fail("Unknown ss1 option");
+  }
+  Source source;
+  auto result = normalizeAppleUrl(text.substr(separator + 1), source);
+  if (!result.ok)
+    return result;
+  intent.source = std::move(source);
+  intent.transport = TransportCommand::Play;
+  return {};
+}
 } // namespace
 
 Result normalizeAppleUrl(const std::string& input, Source& source) {
@@ -253,7 +286,12 @@ Result parseIntent(const std::string& payload, MusicIntent& output) {
     return Result::fail("Card exceeds 4096 bytes");
   const auto text = trim(payload);
   MusicIntent intent;
-  if (text.compare(0, 8, "https://") == 0) {
+  if (text.compare(0, 2, "ss") == 0) {
+    // Use the untrimmed payload so ss1 never gains whitespace/escaping ambiguity.
+    auto result = parseCompactCard(payload, intent);
+    if (!result.ok)
+      return result;
+  } else if (text.compare(0, 8, "https://") == 0) {
     Source source;
     auto result = normalizeAppleUrl(text, source);
     if (!result.ok)

@@ -38,7 +38,9 @@
     "reboot": "node scripts/device.ts reboot",
     "calibrate": "node scripts/calibrate.ts",
     "discover": "node scripts/discover.ts",
-    "probe": "node scripts/probe.ts"
+    "probe": "node scripts/probe.ts",
+    "writer:page": "node scripts/writer-page.ts",
+    "writer:page:check": "node scripts/writer-page.ts --check"
   },
   "devDependencies": {
     "@types/node": "24.13.3",

@@ -2,14 +2,15 @@
 
 Physical Apple Music/Sonos controls for M5StickS3 + ST25R3916 NFC and Waveshare ESP32-S3-Touch-AMOLED-1.8. Both boards use the same portable C++ application and direct Sonos adapter; no server is required.
 
-The current system reads NFC cards, selects configured rooms, controls playback, and observes metadata/modes/volume/timing. Waveshare adds its accepted touch UI, background artwork, and bounded queue browsing/selection. Source policy is shared: new albums play in order once; playlists preserve shuffle and repeat off; tracks repeat off. Persisted device and room policy can override these code-owned defaults. NFC writing is specified, not implemented.
+The current system reads NFC cards, selects configured rooms, controls playback, and observes metadata/modes/volume/timing. Waveshare adds its accepted touch UI, background artwork, and bounded queue browsing/selection. Source policy is shared: new albums play in order once; playlists preserve shuffle and repeat off; tracks repeat off. Persisted device and room policy can override these code-owned defaults. Stick also hosts a local phone-friendly NFC writer with explicit arming and semantic read-back verification.
 
 ## Current contracts
 
 | Document | Owns |
 | --- | --- |
 | [Product](docs/product.md) | Scope, architecture, family workflows, future boundaries |
-| [Intent and cards](docs/intent.md) | Schema, source/mode invariants, NFC encoding, future simple writer |
+| [Intent and cards](docs/intent.md) | Schema, source/mode invariants, NFC encoding, simple writer |
+| [Local card writer](docs/tag-writer.md) | Phone workflow, transient arming, editing, capacity, LAN API |
 | [Room configuration and policy](docs/policy.md) | Authoritative room object, identity, defaults/overrides, precedence/provenance |
 | [Planner/executor](docs/planner-executor.md) | Frozen acceptance, ordering, preservation, dispatch safeguards, failures/reconciliation |
 | [Sonos capabilities](docs/sonos-capabilities.md) | Observations, bounded queues, seek/selection, Apple/Sonos mapping |
@@ -112,7 +113,7 @@ Host checks reject invalid/duplicate JSON, unknown or wrongly typed top-level fi
 
 `read_only=true` blocks all Sonos mutations at HTTP dispatch. False permits requested effects in configured/selectable rooms with identity/topology safeguards. Room configuration controls availability, not permission. Missing mode defaults true and missing rooms selects nothing. Normal firmware has no room-specific mutation build flags. Keep autonomous testing read-only or use pure `preview`.
 
-`sleep_timeout_seconds` defaults to 300; zero disables automatic sleep. Only physical buttons, touch, and newly presented NFC cards reset inactivity. USB and background Sonos/network work do not. Sleep also applies while charging; wake with the Stick's front key or Waveshare's BOOT button. See [power and button states](docs/hardware.md#inactivity-power-and-physical-buttons). Disable sleep through ordinary configuration when a long USB development session is needed.
+`sleep_timeout_seconds` defaults to 300; zero disables automatic sleep. Physical buttons, touch, newly presented NFC cards, and deliberate Stick writer interactions reset inactivity. Armed writer operations postpone sleep within their timeout. USB, passive writer status polling, and background Sonos/network work do not. Sleep also applies while charging; wake with the Stick's front key or Waveshare's BOOT button. See [power and button states](docs/hardware.md#inactivity-power-and-physical-buttons). Disable sleep through ordinary configuration when a long USB development session is needed.
 
 Deployment guidance: configure Sonos's own per-room maximum-volume setting as the hard safety limit. The owner's 1.8-inch slider is experimental; the shared logical volume range remains 0–100, and a future larger kids-room UI is expected to use +/- buttons. This project does not add a software volume limiter.
 
@@ -159,6 +160,16 @@ Config upload validates before replacement, advances the local revision, and reb
 
 Boot reads existing Sonos state without input. Expect `SONOS_MODE`, `device-config`, room resolution, and state logs. Playback polls nominally every ten seconds; topology events invalidate discovery. Input during worker activity rejects as busy. An interactive monitor forwards newline-terminated commands; Ctrl-C closes it.
 
+## Local NFC writer
+
+On an awake Stick, open **`http://STICK_IP/`** in Safari on the same LAN. The current numeric IP appears on the Stick display and in serial `[writer] URL=...` output; the router's DHCP client list also supplies it. No separate server or phone app is needed. The page is available only on `stick-s3`.
+
+Paste an Apple Music share URL, select source-valid shuffle/repeat options, and tap **Write Card**. `Default` omits the field; transport is always Play. Present a blank writable card within 60 seconds, keep it still until **WRITE OK**, then remove it. Use **Read / Edit Card** before replacing a nonempty music card; the read presentation never plays. Hidden supported fields and optional metadata survive edits. See [writer details and capacity](docs/tag-writer.md).
+
+`read_only` gates Sonos, so intentional NFC writing works in either mode without changing it. A later normal tap follows the usual Sonos gate and selected-room policy. The writer automatically uses raw URLs for defaults, compact `ss1` for explicit modes, and structured JSON for advanced fields/metadata. NTAG213 is a supported design target when the complete payload fits its inspected capacity. Use a disposable NTAG213 for first physical validation; actual writing and iPhone acceptance still require hardware validation.
+
+Writer assets live in `libraries/SurfaceDevice/src/writer/index.html`. After editing, run `node --run format`, `node --run writer:page`, and `node --run format:cpp`. `check` verifies that the checked-in embedded header matches the HTML source.
+
 ## Commands and diagnostics
 
 | USB command | Effect |
@@ -194,7 +205,7 @@ Advanced intent example, sent directly to submit or after `preview ` to inspect:
 
 See [intent](docs/intent.md) for source/mode restrictions and volume/seek/queue capabilities. Accepted requests freeze target UUID and resolved policy/revision. Changing selection/config never retargets accepted work. A read-only request may succeed without a write if already satisfied; otherwise READ_ONLY_BLOCKED identifies the first required effect. Uncertain effects are never automatically retried.
 
-M5 A single-click refreshes; A double-click cycles rooms; B toggles using a fresh read of the bound room. NFC reads existing Text/URI/empty-type URL cards and v1 JSON Text cards without writing. One held presentation submits once; retapping requires removal. Unsupported formats report errors instead of guessing payloads.
+M5 A single-click refreshes; A double-click cycles rooms; B toggles using a fresh read of the bound room. Normal NFC reading accepts Text/URI/empty-type URL cards, compact `ss1` Text cards, and v1 JSON Text cards without writing. One held presentation submits once; retapping requires removal. Unsupported formats report errors instead of guessing payloads.
 
 Waveshare uses release-to-submit transport/mode/volume/seek controls and four-item queue pages. USB `ui-screen now|rooms|queue` navigates its normal screens without touch or playback. Hardware diagnostics include `touch-calibration`, `touch-calibration {JSON}`, `peripherals-retry`, `display-edge N [R]`, and `display-edge off`. See the [frontend contract](docs/waveshare-frontend.md).
 
@@ -260,4 +271,4 @@ The model, bounds, and measured unit/edge limitations live in hardware. Never co
 - `config/`: committed environment profiles; `.env.example`: local secret-file template.
 - `tests/`, `scripts/`: portable/protocol fixtures and setup/device tooling.
 
-Keep network/hardware SDKs out of portable layers and generated/private files untracked. NFC writing, a writer server, 4.3C, voice, and broader UI work remain separate future tasks.
+Keep network/hardware SDKs out of portable layers and generated/private files untracked. 4.3C, voice, and broader UI work remain separate future tasks.

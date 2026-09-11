@@ -796,7 +796,11 @@ void loop() {
   // Sample physical activity before admission or background work. USB commands
   // do not extend appliance uptime (use timeout=0 during development).
   const auto event = boardPoll();
-  if (power.poll(esp_timer_get_time() / 1000, event.activity)) {
+  bool writerActive = false;
+#if defined(SURFACE_STICK_S3)
+  writerActive = boardWriterActive();
+#endif
+  if (power.poll(esp_timer_get_time() / 1000, event.activity, writerActive)) {
     stopping.store(true);
     log("SLEEP_REQUESTED: local inactivity; cancelling device work");
 #if defined(SURFACE_WAVESHARE_1_8) && !SURFACE_TOUCH_DIAGNOSTIC

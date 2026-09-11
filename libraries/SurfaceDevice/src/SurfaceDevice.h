@@ -35,6 +35,9 @@ struct BoardContext {
 #if defined(SURFACE_WAVESHARE_1_8)
 void boardContext(const BoardContext& context);
 #endif
+#if defined(SURFACE_STICK_S3)
+bool boardWriterActive();
+#endif
 bool boardBegin(std::string& notice);
 BoardEvent boardPoll();
 bool boardCommand(const std::string& line);

@@ -6,17 +6,17 @@
 
 | Supported target | Current capability |
 | --- | --- |
-| M5StickS3 + M5Stack NFC Universal Unit (ST25R3916) | Read existing NFC music cards; room selection and play/pause buttons; playback/status display |
+| M5StickS3 + M5Stack NFC Universal Unit (ST25R3916) | Read/edit/write NFC music cards with a local phone page; room selection and play/pause buttons; playback/status display |
 | Waveshare ESP32-S3-Touch-AMOLED-1.8 | Accepted touch frontend, room selection, now playing, artwork, volume/seek, transport/modes, bounded queue browsing/selection |
 | Household Sonos speakers | Direct control of independently eligible configured rooms |
 | Mac | Portable tests, device tooling, read-only discovery and shared-adapter probe |
 
-NFC tag writing and a simple local family writer are specified for future work, not implemented. Future voice may normalize curated names into the same intent; it must not become a general assistant or a required dependency of other inputs. 4.3C, NFC on Waveshare, grouping, other music services, general Sonos management, generic scripting/rules, and a general configuration UI are outside current scope.
+Future voice may normalize curated names into the same intent; it must not become a general assistant or a required dependency of other inputs. 4.3C, NFC on Waveshare, grouping, other music services, general Sonos management, generic scripting/rules, and a general configuration UI are outside current scope.
 
 ## Shared architecture
 
 ```text
-NFC / USB JSON / touch / buttons / future writer or voice
+NFC / USB JSON / touch / buttons / writer-authored cards / future voice
   -> normalize and validate MusicIntent
   -> bind selected UUID and resolve source/device/room policy once
   -> plan -> execute -> verify/reconcile through direct Sonos adapter
@@ -25,7 +25,7 @@ Sonos observations + separate request outcomes
   -> shared AppState -> board-specific presentation
 ```
 
-- [Intent](intent.md) owns portable commands, normalized source validity, card encoding, and the future writer contract.
+- [Intent](intent.md) owns portable commands, normalized source validity, card encoding, and the writer contract.
 - [Policy](policy.md) owns room configuration/identity/selection, source defaults, overrides, per-field precedence/provenance, and revision.
 - [Execution](planner-executor.md) owns admission, dependencies, preservation, failures, dispatch safeguards, and reconciliation.
 - [Sonos capabilities](sonos-capabilities.md) owns normalized observations, bounded queue pages, seek/selection, and their protocol limits.
@@ -36,9 +36,9 @@ Sonos observations + separate request outcomes
 
 ## Family workflows and portability
 
-One continuous card presentation creates one request; removal and retapping create another. Supported NFC inputs are Apple Music URLs in Text, URI, or empty-type records, and declarative v1 JSON Text cards. URL-only cards normalize to source plus explicit play. A deliberate new source card replaces/restarts its source even if already selected. Music sources enter through explicit intents from NFC, USB URLs/JSON, or future writer/voice inputs.
+One continuous card presentation creates one request; removal and retapping create another. Supported NFC inputs are Apple Music URLs in Text, URI, or empty-type records, compact `ss1` Text cards, and declarative v1 JSON Text cards. URL-only and compact cards normalize to source plus explicit Play, with compact mode overrides when present. A deliberate new source card replaces/restarts its source even if already selected. Music sources enter through explicit intents from NFC, USB URLs/JSON, or writer-authored cards/future voice inputs.
 
-The future simple writer exposes only Apple Music source, source-valid shuffle, and repeat. It always writes explicit `transport: "play"`. Its `Default` choice omits a mode field so device/room policy and shared source defaults resolve it when tapped. It never bakes device or room policies into cards. A single card can shuffle in one room, play in order in another, or repeat a single song only in a designated room. Volume and other advanced commands remain schema capabilities outside this UI. Detailed controls, write arming, capacity, and readback requirements live in intent.
+The simple writer exposes only Apple Music source, source-valid shuffle, and repeat. It always constructs explicit `transport: "play"`; raw URL and compact encodings imply that field, while structured JSON stores it. The writer chooses raw URL for default cards, `ss1` for explicit modes, and structured JSON for advanced fields or metadata. Its `Default` choice omits a mode field so device/room policy and shared source defaults resolve it when tapped. It never bakes device or room policies into cards. A single card can shuffle in one room, play in order in another, or repeat a single song only in a designated room. Volume and other advanced commands remain schema capabilities outside this UI. Detailed controls, write arming, capacity, and readback requirements live in intent.
 
 Target, request identity, device origin, policy revision, and provenance are not card fields. Accepting work freezes the resolved target UUID and policy. Room selection is a device action and has no playback effect. Grouped targets are unavailable; never control their coordinator or change grouping as a workaround.
 
@@ -46,7 +46,7 @@ Target, request identity, device origin, policy revision, and provenance are not
 
 Committed environment profiles define household configuration shared by controllers. Board selection and environment selection are independent. Host tools resolve local environment secrets and import ordinary JSON over USB; each controller stores it with validate-then-replace semantics. Profile filenames have no targeting semantics. Ordinary configuration changes need no build. Room object keys define target availability; the single runtime mutation switch is specified in [policy](policy.md#device-configuration). Keep household credentials private and off cards; treat incoming JSON/cards as untrusted data.
 
-The future browser writer must pair locally and prevent cross-origin writes. The exact pairing/server implementation is deferred. Read/edit/write mode must suppress card playback and retain unsupported data or refuse rewriting.
+The [local Stick writer](tag-writer.md) rejects cross-origin writes and unexpected Host headers. Read/edit/write presentations suppress playback. Editing retains supported hidden fields and optional metadata; unsupported documents remain inspectable but cannot be rewritten.
 
 AppState distinguishes observed facts from pending/requested values and outcomes. Boot/reconnect fetches existing playback without input. Unknown/stale data must remain visibly unknown/stale, not fabricated zero volume or stopped state. Controllers independently converge on Sonos through polling and topology invalidation; concurrent external control is best effort. Commands are one-shot, never a standing desired state to enforce continuously. Artwork and queue work are bounded and do not become prerequisites for basic control.
 
@@ -54,7 +54,7 @@ AppState distinguishes observed facts from pending/requested values and outcomes
 
 Device configuration `sleep_timeout_seconds` is an integer from 0 to 4294967295, defaulting to 300 when omitted. Positive values request sleep after that many seconds without local interaction; zero disables automatic sleep for development. Profiles choose the timeout independently of target, room policy, and `read_only`. USB power does not suppress sleep.
 
-One monotonic device timer consumes physical activity from board adapters: pressed buttons, touchscreen contact (including diagnostic screens), and a newly presented NFC card while awake. Activity counts even if an action is rejected, no control is hit, or the card cannot be decoded. A held card counts once until removal and retap; it cannot keep the device awake indefinitely. Held buttons/touch contacts continue counting as interaction. USB commands, Sonos polling/events, track/position/queue changes, artwork, topology/availability, retries, Wi-Fi traffic, and rendering do not count.
+One monotonic device timer consumes local activity: pressed buttons, touchscreen contact (including diagnostic screens), and a newly presented NFC card while awake. Activity counts even if an action is rejected, no control is hit, or the card cannot be decoded. A held card counts once until removal and retap; it cannot keep the device awake indefinitely. Held buttons/touch contacts continue counting as interaction. Opening the Stick writer page and deliberate source/read/write/cancel actions also count. Armed and active writer operations postpone sleep within a bounded timeout; completion/failure counts as interaction and passive status polls do not. USB commands, Sonos polling/events, track/position/queue changes, artwork, topology/availability, retries, Wi-Fi traffic, and rendering do not count.
 
 At timeout the runtime stops accepting actions, closes HTTP admission, cancels artwork, shuts down networking/peripherals, and enters the board's sleep state. It does not save transient application state. Physical wake runs normal boot, loads configuration and the existing preferred room, reconnects/discovers, and fetches authoritative state. Connections, subscriptions, caches, and pending actions are never restored or replayed. Only physical buttons are configured to wake the CPU; touch, NFC, network, and timer wake are disabled. See the [hardware button/state tables](hardware.md#inactivity-power-and-physical-buttons) for electrical controls and power-loss limitations.
 

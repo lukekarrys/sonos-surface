@@ -2,9 +2,9 @@
 #include <cstdint>
 
 namespace surface::device {
-// Only physical adapters produce activity. AppState and network work have no
-// activity channel. A contact can be meaningful even when no action is admitted.
-enum class LocalActivity { None, Button, Touch, Nfc };
+// Physical adapters and deliberate writer actions produce activity. Passive
+// polling and Sonos work have no activity channel.
+enum class LocalActivity { None, Button, Touch, Nfc, Writer };
 constexpr uint32_t defaultSleepTimeoutSeconds = 300;
 
 class DevicePower {
@@ -21,12 +21,12 @@ public:
   }
   uint64_t inactivityMs(uint64_t now) const { return now - lastLocalActivityMs; }
   // The caller supplies monotonic milliseconds. Activity wins at the boundary.
-  bool poll(uint64_t now, LocalActivity activity = LocalActivity::None) {
+  bool poll(uint64_t now, LocalActivity activity = LocalActivity::None, bool writerActive = false) {
     if (requested)
       return false;
     if (activity != LocalActivity::None)
       recordLocalActivity(now);
-    if (!timeoutMs || inactivityMs(now) < timeoutMs)
+    if (writerActive || !timeoutMs || inactivityMs(now) < timeoutMs)
       return false;
     requested = true;
     return true;

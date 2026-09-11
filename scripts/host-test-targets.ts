@@ -18,6 +18,11 @@ export function hostTestTargets(): HostTarget[] {
   return [
     { name: "core_test", sources: sharedSources(), includes },
     {
+      name: "writer_test",
+      sources: coreSources(),
+      includes: [deviceInclude, ...includes],
+    },
+    {
       name: "power_test",
       sources: coreSources(),
       includes: [deviceInclude, ...includes],

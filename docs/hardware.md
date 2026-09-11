@@ -18,15 +18,17 @@ Stick startup supplies an explicit board and panel, bypassing M5GFX autodetectio
 
 Waveshare probes touch to choose its revision; no response means no guessed panel. The expander's 20-ms reset pulse and bounded readiness probe are electrical adapter requirements. Successful panel/QSPI/canvas allocations are reused: pinned QSPI begin cannot safely run twice. A failed initial QSPI allocation requires reboot. Other initialization failures retry every five seconds; ten consecutive touch read failures trigger peripheral recovery and require release before further actions. USB `peripherals-retry` has recovered the V2 adapter without CPU/network restart.
 
-## NFC reading and limits
+## NFC reading and writing limits
 
-The reader accepts one Text, URI, or observed TNF=1/empty-type raw URL record under the [card contract](intent.md#versioning-optional-data-and-nfc-encoding). The empty type is an actual household encoding, not permission to guess malformed Text/URI payloads. NTAG213's measured 144-byte capacity is relevant to the future writer; 4,096-byte parser capacity does not imply that cards can store 4 KB.
+The reader accepts one Text, URI, or observed TNF=1/empty-type raw URL record under the [card contract](intent.md#versioning-optional-data-and-nfc-encoding). The empty type is an actual household encoding, not permission to guess malformed Text/URI payloads. NTAG213's measured 144-byte capacity constrains the writer; 4,096-byte parser capacity does not imply that cards can store 4 KB.
 
 Polling uses WUPA so halted held tags do not falsely appear removed. Three missed polls release the presentation latch; one presentation submits once, and removal/ retap permits another. Identify deactivates the tag, so explicit reactivation before reading is required. Successful measured preparations took about 50–52 ms to identify, 27 ms to reactivate, and 73–85 ms for NDEF reads. These are samples, not deadlines.
 
 An intermittent identify/reactivate failure recovered on retap; phase logging now distinguishes stages, but its cause remains unresolved. No guessed RF delay or automatic playback retry was added. NFC absent at boot does not block display, Wi-Fi, or Sonos; reconnecting Grove recovered reading without reboot in a physical test. NFC polling defers while a Stick A gesture is pending to preserve button sampling. M5Unified uses its 500-ms click decision window.
 
-Writing/formatting is not implemented. Actual writable tag/capacity handling, interrupted-write behavior, and verified readback still need a focused writer hardware slice. NFC-B/F/V and multi-record formats remain unsupported.
+The Stick writer implements NTAG213/215/216 page writes with preflight inspection of the capability container, static/dynamic locks, password protection, mirroring, and a single NDEF TLV followed by a terminator. It uses the smaller of identified user memory and CC-advertised capacity and checks page padding before any write. It rejects other layouts/protected tags and does not format tags or modify CC, lock, password, or configuration pages. Page 4 is first invalidated, the body is written one page per loop, and page 4 is committed last. This limits partial-message exposure but is not an atomic-write guarantee. Normal NDEF decoding/parsing and semantic comparison are required after writing.
+
+These write paths follow the pinned M5 driver and [NXP memory layout](https://www.nxp.com/docs/en/data-sheet/NTAG213_215_216.pdf), not measured write acceptance. Typical NTAG215/216 CC values advertise 496/872 bytes within 504/888 user bytes. NTAG213's measured 144 user bytes are a writer design target: raw URL and compact `ss1` examples fit when the URL/overrides fit, while advanced JSON or long URLs can require larger tags. The [writer capacity table](tag-writer.md#capacity) includes exact NDEF/TLV sizes and headroom. Physical write/read-back, interrupted-write recovery, and iPhone Safari operation remain unvalidated; begin with one expendable NTAG213. Existing URL cards remain readable without rewriting. NFC-B/F/V and multi-record formats remain unsupported.
 
 ## Waveshare rendering and calibration
 

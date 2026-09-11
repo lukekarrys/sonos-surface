@@ -6,6 +6,7 @@ export function checkTasks(full = false) {
     "typecheck",
     "format:check",
     "format:cpp:check",
+    "writer:page:check",
     "test",
     ...(full
       ? Object.values(hardwareTargets).map((target) => `build:${target.id}`)

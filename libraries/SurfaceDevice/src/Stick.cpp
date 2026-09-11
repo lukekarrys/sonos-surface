@@ -5,6 +5,9 @@
 #include <M5UnitUnifiedNFC.h>
 #include "StickDisplay.h"
 #include "StickButtons.h"
+#include "WriterServer.h"
+#include "NtagWriter.h"
+#include <esp_timer.h>
 #include <Wire.h>
 #include <esp_sleep.h>
 #include <driver/rtc_io.h>
@@ -16,6 +19,14 @@ m5::unit::UnitUnified units;
 m5::unit::UnitNFC unit;
 m5::nfc::NFCLayerA nfc{unit};
 StickDisplay display;
+CardWriter writer;
+WriterServer writerServer;
+NtagWritePages writePages;
+m5::nfc::a::PICC writerPicc;
+CardOwner presentationOwner = CardOwner::Playback;
+bool writerPending = false;
+uint64_t writerScreenUntil = 0;
+WriterState lastWriterState = WriterState::Idle;
 bool displayReady = false;
 bool registered = false;
 bool ready = false;
@@ -65,6 +76,165 @@ bool boardBegin(std::string& notice) {
   return displayReady && ready;
 }
 bool boardCommand(const std::string&) { return false; }
+
+static Result readCard(std::string& payload) {
+  bool valid = false;
+  m5::nfc::ndef::TLV message;
+  if (!nfc.ndefIsValidFormat(valid) || !valid || !nfc.ndefRead(message) || !message.isMessageTLV())
+    return Result::fail("No readable NDEF message");
+  const auto& records = message.records();
+  if (records.size() != 1)
+    return Result::fail("Expected exactly one NFC record");
+  const auto& record = records.front();
+  Serial.printf("[nfc] TNF=%u type=%s payload-bytes=%lu\n", unsigned(record.tnf()), record.type(),
+                record.payloadSize());
+  return decodeNdefRecord(uint8_t(record.tnf()), record.type(), record.payload(),
+                          record.payloadSize(), payload);
+}
+static bool prepareCard(m5::nfc::a::PICC& picc, std::string& error) {
+  const auto start = millis();
+  if (!nfc.identify(picc)) {
+    error = "NFC identify failed";
+    return false;
+  }
+  if (!nfc.reactivate(picc)) {
+    error = "NFC reactivate failed";
+    return false;
+  }
+  Serial.printf("[nfc] type=%s user-bytes=%u prepare-ms=%lu\n", picc.typeAsString().c_str(),
+                picc.userAreaSize(), millis() - start);
+  if (!picc.supportsNDEF()) {
+    error = "NFC-A tag does not support NDEF";
+    return false;
+  }
+  return true;
+}
+static void writerStep() {
+  if (!writerPending)
+    return;
+  auto finish = [] {
+    writerPending = false;
+    writePages.clear();
+    nfc.deactivate();
+  };
+  if (!writer.active() || writer.status() == WriterState::ArmedRead ||
+      writer.status() == WriterState::ArmedWrite) {
+    // A cancelled/expired operation can be rearmed while a button delays cleanup.
+    // Release the old NFC session without consuming the new arm.
+    finish();
+    return;
+  }
+  if (writer.status() == WriterState::Detected) {
+    std::string error;
+    if (!prepareCard(writerPicc, error)) {
+      writer.fail(error);
+      finish();
+      return;
+    }
+    writer.setCapacity(writerPicc.userAreaSize());
+    if (presentationOwner == CardOwner::Read) {
+      uint8_t header[16]{};
+      if (writerPicc.isNTAG2() && nfc.read16(header, 0) && header[12] == 0xe1)
+        writer.setCapacity(std::min<size_t>(writerPicc.userAreaSize(), size_t(header[14]) * 8));
+      writer.reading();
+      return;
+    }
+    using Type = m5::nfc::a::Type;
+    if (writerPicc.type != Type::NTAG_213 && writerPicc.type != Type::NTAG_215 &&
+        writerPicc.type != Type::NTAG_216) {
+      writer.fail("Writer supports NTAG213/215/216 only");
+      finish();
+      return;
+    }
+    uint8_t page0[16]{}, dynamic[16]{}, first[16]{};
+    const size_t userBytes = writerPicc.userAreaSize();
+    if (!nfc.read16(page0, 0) || !nfc.read16(dynamic, uint8_t(4 + userBytes / 4)) ||
+        !nfc.read16(first, 4)) {
+      writer.fail("Cannot inspect tag capacity and protection");
+      finish();
+      return;
+    }
+    size_t capacity = 0;
+    auto result = inspectNtag(userBytes, page0, dynamic, capacity);
+    writer.setCapacity(capacity);
+    if (result.ok)
+      result = writePages.begin(writer.payload(), capacity);
+    if (!result.ok) {
+      writer.fail(result.error);
+      finish();
+      return;
+    }
+    // Refuse layouts containing other TLVs. Replacing their reserved ranges
+    // would require a different tag layout implementation.
+    if (first[0] != 0x03) {
+      writer.fail("Unsupported tag layout; use a blank Type 2 card");
+      finish();
+      return;
+    }
+    const size_t lengthBytes = first[1] == 0xff ? 4 : 2;
+    const size_t messageBytes = first[1] == 0xff ? (size_t(first[2]) << 8) + first[3] : first[1];
+    const size_t terminator = lengthBytes + messageBytes;
+    if (terminator >= capacity) {
+      writer.fail("Invalid NDEF length or missing terminator");
+      finish();
+      return;
+    }
+    // Reject trailing reserved/control TLVs before they could be overwritten.
+    uint8_t tail[16]{};
+    const size_t tailOffset = std::min(terminator / 4 * 4, userBytes - 16);
+    if (!nfc.read16(tail, uint8_t(4 + tailOffset / 4)) || tail[terminator - tailOffset] != 0xfe) {
+      writer.fail("Unsupported trailing tag data; expected one NDEF message and terminator");
+      finish();
+      return;
+    }
+    const bool empty = messageBytes == 0;
+    std::string existing;
+    if (!empty)
+      result = readCard(existing);
+    if (result.ok)
+      result = writer.checkEdit(writerPicc.uidAsString(), existing);
+    if (!result.ok) {
+      writer.fail(result.error);
+      finish();
+      return;
+    }
+    writer.writing();
+    return;
+  }
+  if (writer.status() == WriterState::Reading) {
+    std::string payload;
+    auto result = readCard(payload);
+    if (result.ok)
+      writer.read(writerPicc.uidAsString(), payload);
+    else
+      writer.fail(result.error);
+    finish();
+    return;
+  }
+  if (writer.status() == WriterState::Writing) {
+    const auto page = writePages.page();
+    if (!nfc.write4(page.first, page.second.data(), 4, true)) {
+      writer.fail("Page write failed; card may be incomplete");
+      finish();
+      return;
+    }
+    writePages.advance();
+    if (writePages.done())
+      writer.verifying();
+    return;
+  }
+  if (writer.status() == WriterState::Verifying) {
+    // Re-select the original UID after writing, then use the ordinary NDEF decoder.
+    std::string payload;
+    auto result = nfc.reactivate(writerPicc) ? readCard(payload)
+                                             : Result::fail("Card removed before verification");
+    if (result.ok)
+      writer.verify(payload);
+    else
+      writer.fail("Verification failed: " + result.error);
+    finish();
+  }
+}
 
 static BoardEvent pollInput() {
   static uint32_t lastButtons = 0, buttonReport = 0, maxButtonGap = 0;
@@ -124,6 +294,10 @@ static BoardEvent pollInput() {
   // presentation latch once the click count is decided or the hold is released.
   if (stickButtonPending(M5.BtnA, M5.BtnB))
     return {};
+  if (writerPending) {
+    writerStep();
+    return {};
+  }
   if (!ready || millis() - lastPoll < 200)
     return {};
   lastPoll = millis();
@@ -148,74 +322,53 @@ static BoardEvent pollInput() {
   latched = true;
   activity = LocalActivity::Nfc;
   Serial.printf("[nfc] detected uid=%s\n", picc.uidAsString().c_str());
-  // identify() itself reactivates/probes and then halts the card. Keep the
-  // required post-identification reactivation, but distinguish its failure
-  // from failure inside identify(); the old combined message hid that evidence.
-  auto phaseStarted = millis();
-  const bool identified = nfc.identify(picc);
-  Serial.printf("[nfc] phase=identify ok=%d ms=%lu\n", identified, millis() - phaseStarted);
-  if (!identified) {
+  presentationOwner = writer.present(esp_timer_get_time() / 1000);
+  if (presentationOwner == CardOwner::Read || presentationOwner == CardOwner::Write) {
+    writerPicc = picc;
+    writerPending = true;
+    return {};
+  }
+  if (presentationOwner == CardOwner::Ignore) {
     nfc.deactivate();
-    return {Input::Error, "NFC identify failed; remove and retap"};
+    return {};
   }
-  phaseStarted = millis();
-  const bool reactivated = nfc.reactivate(picc);
-  Serial.printf("[nfc] phase=reactivate ok=%d ms=%lu\n", reactivated, millis() - phaseStarted);
-  if (!reactivated) {
+  std::string error, payload;
+  if (!prepareCard(picc, error)) {
     nfc.deactivate();
-    return {Input::Error, "NFC reactivate failed; remove and retap"};
+    return {Input::Error, error + "; remove and retap"};
   }
-  Serial.printf("[nfc] type=%s user-bytes=%u\n", picc.typeAsString().c_str(), picc.userAreaSize());
-  if (!picc.supportsNDEF()) {
-    nfc.deactivate();
-    return {Input::Error, "NFC-A tag does not support NDEF"};
-  }
-  bool valid = false;
-  m5::nfc::ndef::TLV message;
-  const auto start = millis();
-  bool read = nfc.ndefIsValidFormat(valid) && valid && nfc.ndefRead(message);
-  // A bounded, read-only view of the first user pages distinguishes an empty
-  // on-card message from a vendor decoder problem. Never format/write the tag.
-  if (picc.isNTAG2()) {
-    uint8_t bytes[16]{};
-    const bool rawRead = nfc.read16(bytes, 4);
-    Serial.printf("[nfc] raw-page4 read=%d bytes=", rawRead);
-    if (rawRead)
-      for (auto b : bytes)
-        Serial.printf("%02x ", b);
-    Serial.println();
-  }
+  auto result = readCard(payload);
   nfc.deactivate();
-  Serial.printf("[nfc] read=%d valid=%d ms=%lu\n", read, valid, millis() - start);
-  if (!read || !message.isMessageTLV())
-    return {Input::Error, "No readable NDEF message"};
-  const auto& records = message.records();
-  if (records.size() != 1)
-    return {Input::Error, "Expected exactly one NFC record"};
-  const auto& record = records.front();
-  Serial.printf("[nfc] TNF=%u type=%s payload-bytes=%lu\n", unsigned(record.tnf()), record.type(),
-                record.payloadSize());
-  const std::string type = record.type();
-  std::string payload;
-  if (type == "U" && record.payloadSize())
-    Serial.printf("[nfc] URI prefix=0x%02x\n", record.payload()[0]);
-  auto result = decodeNdefRecord(uint8_t(record.tnf()), type, record.payload(),
-                                 record.payloadSize(), payload);
   if (!result.ok)
     return {Input::Error, result.error};
-  if (type.empty())
-    Serial.println("[nfc] raw URL (empty type)");
-  Serial.printf("[nfc] decoded payload-bytes=%u (accepted fields logged by core)\n",
-                unsigned(payload.size()));
   return {Input::Payload, payload};
 }
 BoardEvent boardPoll() {
   activity = LocalActivity::None;
+  const uint64_t now = esp_timer_get_time() / 1000;
+  writer.tick(now);
+  const bool pageActivity = writerServer.poll(writer, now);
   auto event = pollInput();
+  if (writer.takeActivity() || pageActivity)
+    activity = LocalActivity::Writer;
+  if (writer.status() != lastWriterState) {
+    lastWriterState = writer.status();
+    writerScreenUntil = now + 7000;
+    const auto status = writer.snapshot();
+    Serial.printf(
+        "[writer] state=%s source=%s encoding=%s payload-bytes=%u tag-bytes=%u capacity=%u "
+        "detail=%s\n",
+        writerStateName(writer.status()), status["sourceKind"].get<std::string>().c_str(),
+        status["encoding"].get<std::string>().c_str(),
+        unsigned(status["payloadBytes"].get<size_t>()), unsigned(status["tagBytes"].get<size_t>()),
+        unsigned(status["capacity"].get<size_t>()), status["detail"].get<std::string>().c_str());
+  }
   event.activity = activity;
   return event;
 }
+bool boardWriterActive() { return writer.active(); }
 void boardPrepareSleep() {
+  writerServer.stop();
   M5.Speaker.end();
   M5.Mic.end();
   if (displayReady) {
@@ -264,12 +417,28 @@ void boardPrepareSleep() {
 void boardRender(const AppState& state, const std::string& notice) {
   if (!displayReady)
     return;
+  if (writer.active() || (lastWriterState != WriterState::Idle &&
+                          uint64_t(esp_timer_get_time() / 1000) < writerScreenUntil)) {
+    const auto status = writer.snapshot();
+    auto screen = std::string("WRITER: ") + writerStateName(writer.status()) + "\n" +
+                  status["detail"].get<std::string>();
+    if (screen != lastScreen) {
+      lastScreen = screen;
+      M5.Display.fillScreen(TFT_BLACK);
+      M5.Display.setTextColor(TFT_WHITE);
+      M5.Display.setCursor(0, 0);
+      M5.Display.println(screen.c_str());
+      M5.Display.printf("\nhttp://%s/\n", writerServer.address().c_str());
+    }
+    return;
+  }
   const auto& observed = state.observed;
   const auto detail = state.refreshError.empty() ? state.detail : "Refresh: " + state.refreshError;
   auto screen = std::string("sonos-surface / NFC\n") + notice + "\n" +
                 (observed.known ? observed.room + ": " + observed.playback : "Playback: unknown") +
                 (observed.stale ? " [stale]" : "") + "\n" + observed.title + "\n" + state.status +
                 ": " + detail + "\nA: refresh  B: play/pause";
+  screen += writerServer.address();
   if (screen == lastScreen)
     return;
   lastScreen = screen;
@@ -285,6 +454,8 @@ void boardRender(const AppState& state, const std::string& notice) {
   M5.Display.println(observed.title.substr(0, 70).c_str());
   M5.Display.println(state.status.c_str());
   M5.Display.println(detail.substr(0, 100).c_str());
+  M5.Display.setCursor(0, 110);
+  M5.Display.printf("Writer: http://%s/", writerServer.address().c_str());
   M5.Display.setCursor(0, 124);
   M5.Display.println("A:refresh AA:room B:play/pause");
 }

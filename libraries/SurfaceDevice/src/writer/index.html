@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>NFC Card Writer</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font:
+          17px -apple-system,
+          BlinkMacSystemFont,
+          sans-serif;
+        color: #20352b;
+        background: #f1f4ed;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        max-width: 480px;
+        margin: auto;
+        padding: 28px 20px;
+      }
+      h1 {
+        font-size: 30px;
+        margin: 8px 0;
+        letter-spacing: -1px;
+      }
+      p {
+        line-height: 1.5;
+      }
+      .eyebrow {
+        color: #547560;
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 2px;
+      }
+      .muted {
+        color: #52665a;
+        font-size: 14px;
+      }
+      label {
+        display: block;
+        margin: 20px 0 8px;
+        font-weight: 600;
+      }
+      input,
+      select,
+      button {
+        font: inherit;
+        border-radius: 12px;
+        min-height: 48px;
+        width: 100%;
+      }
+      input,
+      select {
+        background: white;
+        border: 1px solid #a9b7a9;
+        padding: 12px;
+        color: #20352b;
+      }
+      button {
+        border: 1px solid #bcc8bb;
+        background: white;
+        color: #20352b;
+        padding: 12px;
+        margin-top: 12px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      button.primary {
+        background: #215d42;
+        color: white;
+        border-color: #215d42;
+      }
+      button:disabled {
+        opacity: 0.45;
+        cursor: default;
+      }
+      fieldset {
+        border: 0;
+        padding: 0;
+        margin: 0;
+        min-width: 0;
+      }
+      .status {
+        background: white;
+        border: 1px solid #d0dacd;
+        border-radius: 16px;
+        padding: 16px;
+        margin: 24px 0 16px;
+        overflow-wrap: anywhere;
+      }
+      #state {
+        font-weight: 700;
+        text-transform: capitalize;
+      }
+      #detail {
+        margin-bottom: 0;
+        font-size: 15px;
+      }
+      #error {
+        color: #942f22;
+        white-space: pre-wrap;
+      }
+      pre {
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        font-size: 12px;
+      }
+      [hidden] {
+        display: none !important;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="eyebrow">SONOS SURFACE · LOCAL</div>
+    <h1>NFC Card Writer</h1>
+    <p class="muted">
+      Copy a share link from Apple Music, then paste it here. Every card means
+      “play this”.
+    </p>
+    <fieldset id="editor">
+      <label for="url">Apple Music URL</label>
+      <input
+        id="url"
+        type="url"
+        inputmode="url"
+        placeholder="https://music.apple.com/…"
+        autocomplete="off"
+        autocapitalize="off"
+        spellcheck="false"
+      />
+      <p id="source" class="muted">Paste a link to see its options.</p>
+      <div id="shuffleRow" hidden>
+        <label for="shuffle">Shuffle</label
+        ><select id="shuffle"></select>
+      </div>
+      <div id="repeatRow" hidden>
+        <label for="repeat">Repeat</label
+        ><select id="repeat"></select>
+      </div>
+      <p class="muted">
+        Default leaves the setting off the card. The room and device choose it
+        when you play.
+      </p>
+      <p id="advanced" class="muted" hidden>
+        This card contains advanced settings that will be preserved. Rewriting
+        sets transport to Play.
+      </p>
+      <button id="write" class="primary" disabled>Write Card</button>
+      <button id="read">Read / Edit Card</button>
+      <button id="new" hidden>Start a new card</button>
+    </fieldset>
+    <div class="status" role="status" aria-live="polite">
+      <div id="state">Connecting…</div>
+      <p id="detail">Wake the Stick and keep your phone on the same Wi-Fi.</p>
+      <p id="size" class="muted"></p>
+    </div>
+    <button id="cancel" hidden>Cancel</button>
+    <p id="error" role="alert"></p>
+    <details id="inspection" hidden>
+      <summary>Read card text</summary>
+      <pre id="raw"></pre>
+    </details>
+    <p class="muted">
+      Use a blank writable card with enough space. Ordinary cards can fit on an
+      NTAG213. To replace an existing music card, use Read / Edit first. Keep
+      the card still until verification finishes, then remove it.
+    </p>
+    <p class="muted">
+      The Stick can sleep when idle. Status checks do not keep it awake; wake it
+      with the front button to reconnect.
+    </p>
+    <script>
+      const $ = (id) => document.getElementById(id);
+      let editId = 0,
+        loadedId = 0,
+        active = false,
+        validUrl = "",
+        generation = 0,
+        timer;
+      // Serialize browser requests: the embedded server serves one bounded connection at a time.
+      let pending = Promise.resolve();
+      function api(path, data) {
+        const work = pending.then(async () => {
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 6000);
+          try {
+            const response = await fetch("/api/" + path, {
+              method: data === undefined ? "GET" : "POST",
+              headers:
+                data === undefined
+                  ? {}
+                  : { "Content-Type": "application/json" },
+              body: data === undefined ? undefined : JSON.stringify(data),
+              cache: "no-store",
+              signal: controller.signal,
+            });
+            const value = await response.json();
+            if (!response.ok) throw Error(value.error || "Request failed");
+            return value;
+          } finally {
+            clearTimeout(timeout);
+          }
+        });
+        pending = work.catch(() => {});
+        return work;
+      }
+      function options(id, values, selected) {
+        $(id).replaceChildren(
+          ...values.map(
+            (value) =>
+              new Option(value[0].toUpperCase() + value.slice(1), value),
+          ),
+        );
+        $(id).value = values.includes(selected) ? selected : "default";
+        $(id + "Row").hidden = values.length === 1;
+      }
+      async function classify(saved) {
+        const request = ++generation,
+          url = $("url").value.trim();
+        validUrl = "";
+        $("write").disabled = true;
+        $("shuffleRow").hidden = $("repeatRow").hidden = true;
+        if (!url) {
+          $("source").textContent = "Paste a link to see its options.";
+          return;
+        }
+        try {
+          const info = await api("source", { url });
+          if (request !== generation) return;
+          validUrl = url;
+          $("source").textContent = "Source: " + info.kind;
+          options("shuffle", info.choices.shuffle, saved?.shuffle || "default");
+          options("repeat", info.choices.repeat, saved?.repeat || "default");
+          $("write").disabled = active;
+          $("error").textContent = "";
+        } catch (error) {
+          if (request === generation) {
+            $("source").textContent = "Unsupported link";
+            $("error").textContent = error.message;
+          }
+        }
+      }
+      function show(status) {
+        active = status.active;
+        $("editor").disabled = active;
+        $("write").disabled =
+          active || validUrl !== $("url").value.trim() || !validUrl;
+        $("cancel").hidden = !active;
+        $("state").textContent = status.state.replaceAll("-", " ");
+        $("detail").textContent =
+          status.detail || "Ready. Write a new card or read one to edit.";
+        $("size").textContent = status.payloadBytes
+          ? `Card size: ${status.tagBytes} bytes` +
+            (status.capacity
+              ? ` · ${status.capacity} available (${status.capacity - status.tagBytes} bytes headroom)`
+              : " · capacity checked on presentation")
+          : status.capacity
+            ? `${status.capacity} bytes available on this card`
+            : "";
+        $("inspection").hidden = !status.raw;
+        $("raw").textContent = status.raw;
+        if (status.editor && status.editor.id !== loadedId) {
+          loadedId = editId = status.editor.id;
+          $("url").value = status.editor.url;
+          $("advanced").hidden = !status.editor.advanced;
+          $("new").hidden = false;
+          classify(status.editor);
+        }
+        if (status.state === "success" && !status.editor) {
+          editId = 0;
+          $("advanced").hidden = true;
+          $("new").hidden = true;
+        }
+      }
+      async function action(path, data) {
+        $("error").textContent = "";
+        try {
+          show(await api(path, data));
+        } catch (error) {
+          $("error").textContent = error.message;
+        }
+      }
+      $("url").addEventListener("input", () => {
+        ++generation;
+        validUrl = "";
+        $("write").disabled = true;
+        clearTimeout(timer);
+        timer = setTimeout(() => classify(), 450);
+      });
+      $("write").onclick = () =>
+        action("write", {
+          url: $("url").value.trim(),
+          shuffle: $("shuffle").value || "default",
+          repeat: $("repeat").value || "default",
+          editId,
+        });
+      $("read").onclick = () => action("read", {});
+      $("cancel").onclick = () => action("cancel", {});
+      $("new").onclick = () => {
+        editId = 0;
+        $("advanced").hidden = $("new").hidden = true;
+        $("url").value = "";
+        classify();
+      };
+      async function poll() {
+        try {
+          show(await api("status"));
+        } catch {
+          $("state").textContent = "Disconnected";
+          $("detail").textContent =
+            "Wake the Stick with its front button and reconnect to the same Wi-Fi. Your draft stays here.";
+          $("write").disabled = true;
+        }
+        setTimeout(poll, 900);
+      }
+      poll();
+    </script>
+  </body>
+</html>
