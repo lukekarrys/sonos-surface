@@ -24,6 +24,13 @@
 namespace surface::device {
 namespace {
 using Json = nlohmann::json;
+#if defined(SURFACE_STICK_S3)
+constexpr char hardwareTargetName[] = "stick-s3";
+#elif defined(SURFACE_WAVESHARE_1_8)
+constexpr char hardwareTargetName[] = "ws-1.8";
+#else
+#error "Build with one hardware target define"
+#endif
 struct Config {
   std::string ssid, password, appleRegion = "52231";
   bool readOnly = true;
@@ -43,6 +50,9 @@ AppState sharedState;
 RoomSelection selection;
 std::string savedPreference;
 std::string notice, serialLine;
+// Boot adapter identity, reported by the read-only board command.
+std::string adapterNotice;
+bool adapterReady = false;
 bool transientNotice = false;
 bool serialOverflow = false;
 RuntimeCoordinator coordinator(sharedState);
@@ -862,6 +872,11 @@ void handle(const std::string& line) {
       return;
     }
     restart("REBOOTING");
+  } else if (line == "board") {
+    // Read-only identification for host tooling: no Sonos work, no activity,
+    // and safe while the worker is busy.
+    logResponse("board target=" + std::string(hardwareTargetName) + " adapter=\"" + adapterNotice +
+                "\" ready=" + std::to_string(int(adapterReady)));
   } else if (boardCommand(line))
     return;
   else if (line.compare(0, 7, "config ") == 0) {
@@ -934,9 +949,9 @@ void handle(const std::string& line) {
   else if (!line.empty() && (line[0] == '{' || line.compare(0, 8, "https://") == 0))
     submit(line);
   else
-    log("Commands: rooms | room-next | status | queue [start,count] | play | pause | toggle | next "
-        "| previous | config-status | read-only true/false | config {JSON} | preview URL/intent "
-        "JSON | lifecycle-status | URL/intent JSON");
+    log("Commands: board | rooms | room-next | status | queue [start,count] | play | pause | "
+        "toggle | next | previous | config-status | read-only true/false | config {JSON} | preview "
+        "URL/intent JSON | lifecycle-status | URL/intent JSON");
 }
 } // namespace
 
@@ -962,6 +977,8 @@ void begin() {
     return;
   }
   const bool boardReady = boardBegin(notice);
+  adapterNotice = notice;
+  adapterReady = boardReady;
   log("sonos-surface firmware; " + notice);
   Serial.printf("[board] adapter ready=%d heap=%lu psram=%lu\n", boardReady, ESP.getFreeHeap(),
                 ESP.getPsramSize());

@@ -3,6 +3,10 @@
 #include "TouchCoordinates.h"
 #include "WaveshareDrawing.h"
 #include "WaveshareArtwork.h"
+#if !SURFACE_TOUCH_DIAGNOSTIC
+#include "WaveshareInjection.h"
+#include "WaveshareState.h"
+#endif
 #include <Arduino.h>
 #include <Wire.h>
 #include <Arduino_GFX_Library.h>
@@ -67,13 +71,41 @@ void loadCalibration() {
 }
 bool held = false;
 uint32_t lastTouch = 0, maxPollGap = 0;
-bool loggingContact = false;
 LocalActivity activity = LocalActivity::None;
 std::string lastScreen;
 WaveshareUi ui;
 BoardContext uiContext;
 int edgeInset = -1; // Temporary serial-controlled display diagnostic; never persisted.
 int edgeRadius = 0;
+#if !SURFACE_TOUCH_DIAGNOSTIC
+bool loggingContact = false;
+InjectedTouchQueue injected;
+bool injectedButton = false;
+WaveshareFrame lastFrame;
+bool validInjectedNumber(const std::string& token, int minimum, int maximum, int& value) {
+  if (token.empty() || token.size() > 3 ||
+      token.find_first_not_of("0123456789") != std::string::npos)
+    return false;
+  value = std::stoi(token);
+  return value >= minimum && value <= maximum;
+}
+// ui-touch X Y [fingers] in calibrated screen coordinates; fingers defaults to 1.
+bool parseInjectedTouch(const std::string& text, InjectedTouch& sample) {
+  const auto separator = text.find(' ');
+  if (separator == std::string::npos)
+    return false;
+  const auto rest = text.substr(separator + 1);
+  const auto second = rest.find(' ');
+  int x = 0, y = 0, fingers = 1;
+  if (!validInjectedNumber(text.substr(0, separator), 0, 367, x) ||
+      !validInjectedNumber(second == std::string::npos ? rest : rest.substr(0, second), 0, 447, y))
+    return false;
+  if (second != std::string::npos && !validInjectedNumber(rest.substr(second + 1), 1, 2, fingers))
+    return false;
+  sample = {x, y, fingers};
+  return true;
+}
+#endif
 #if SURFACE_TOUCH_DIAGNOSTIC
 struct Button {
   int x, y;
@@ -304,6 +336,35 @@ bool boardCommand(const std::string& line) {
     Serial.printf("[ui] navigation screen=%d (no playback intent)\n", int(ui.screen));
     return true;
   }
+  if (line == "ui-state") {
+    Serial.printf(
+        "ui-state %s\n",
+        waveshareStateJson(ui, lastFrame, held, unsigned(injected.pending())).dump().c_str());
+    return true;
+  }
+  // Development input injection: a queued sample replaces one hardware sample
+  // and is otherwise exactly a finger. It records no local activity.
+  if (line.rfind("ui-touch ", 0) == 0) {
+    const auto arguments = line.substr(9);
+    InjectedTouch sample;
+    if (arguments != "release" && !parseInjectedTouch(arguments, sample)) {
+      Serial.println("UI_INJECT_INVALID: use ui-touch X Y [fingers] (0..367, 0..447, 1..2) or "
+                     "ui-touch release");
+      return true;
+    }
+    if (!injected.push(sample)) {
+      Serial.printf("UI_INJECT_FULL: %u samples already queued\n", unsigned(injected.pending()));
+      return true;
+    }
+    Serial.printf("[ui] queued touch x=%d y=%d fingers=%d pending=%u\n", sample.x, sample.y,
+                  sample.fingers, unsigned(injected.pending()));
+    return true;
+  }
+  if (line == "ui-button boot") {
+    injectedButton = true;
+    Serial.println("[ui] queued button=boot");
+    return true;
+  }
 #endif
   if (line.compare(0, 13, "display-edge ") == 0) {
     const auto value = line.substr(13);
@@ -447,7 +508,22 @@ static BoardEvent pollInput() {
     previousFingers = fingers;
   }
   return {};
-#endif
+#else
+  if (injectedButton) {
+    injectedButton = false;
+    // The BOOT release has no assigned action yet; todo/3-lvgl and
+    // todo/4-ws-1.8-multiscreen give it one.
+    Serial.println("[ui] inject button=boot (no action)");
+  }
+  const auto injection = injected.poll(fingers > 0, held);
+  if (injection.cancelled)
+    Serial.println("[ui] inject cancelled=physical-touch");
+  const bool injecting = injection.consumed;
+  if (injecting) {
+    fingers = uint8_t(injection.sample.fingers);
+    Serial.printf("[ui] inject %s x=%d y=%d fingers=%u held=%d\n", fingers ? "touch" : "release",
+                  injection.sample.x, injection.sample.y, fingers, int(injection.held));
+  }
   if (!fingers) {
     if (loggingContact)
       Serial.printf("[touch] release raw=%d,%d\n", x, y);
@@ -463,17 +539,25 @@ static BoardEvent pollInput() {
   }
   if (held)
     return {};
-  const auto point = waveshareTouchPoint(x, y, calibration);
   // Every normal gesture sample uses the saved fit; release uses its last preview.
+  // Injected samples arrive in screen coordinates and bypass the fit only.
+  const auto point = injecting ? TouchPoint{injection.sample.x, injection.sample.y}
+                               : waveshareTouchPoint(x, y, calibration);
   static int loggedX = 0, loggedY = 0;
-  if (!loggingContact || abs(x - loggedX) >= 8 || abs(y - loggedY) >= 8) {
-    Serial.printf("[touch] raw=%d,%d mapped=%d,%d fingers=%d hit=%d\n", x, y, point.x, point.y,
-                  fingers, int(ui.hit(point.x, point.y)));
-    loggedX = x;
-    loggedY = y;
+  if (injecting)
+    Serial.printf("[ui] inject mapped=%d,%d hit=%d\n", point.x, point.y,
+                  int(ui.hit(point.x, point.y)));
+  else {
+    if (!loggingContact || abs(x - loggedX) >= 8 || abs(y - loggedY) >= 8) {
+      Serial.printf("[touch] raw=%d,%d mapped=%d,%d fingers=%d hit=%d\n", x, y, point.x, point.y,
+                    fingers, int(ui.hit(point.x, point.y)));
+      loggedX = x;
+      loggedY = y;
+    }
+    loggingContact = true;
   }
-  loggingContact = true;
   return ui.touch(point.x, point.y, fingers, millis());
+#endif
 }
 void boardContext(const BoardContext& context) { uiContext = context; }
 
@@ -568,14 +652,16 @@ void boardRender(const AppState& state, const std::string& notice) {
   drawing.draw(ui, artworkPixels());
   const auto drawn = millis();
   gfx->flush();
+  // Retained for ui-state; the same numbers the frame line reports.
+  lastFrame = {drawn - started, millis() - drawn, millis() - started, maxPollGap};
   Serial.printf("[ui] frame screen=%d room=%s title=%s transport=%s volume=%d position=%lu "
                 "duration=%lu seek=%d queue-start=%lu readonly=%d busy=%d draw=%lu flush=%lu "
                 "total=%lu poll-gap-max=%lu heap=%lu psram-free=%lu\n",
                 int(ui.screen), state.observed.room.c_str(), state.observed.title.c_str(),
                 playbackLabel(state.observed.transport), state.observed.volume.value_or(-1),
                 state.observed.positionMs.value_or(0), state.observed.durationMs.value_or(0),
-                ui.canSeek(), ui.queueStart, uiContext.readOnly, uiContext.busy, drawn - started,
-                millis() - drawn, millis() - started, maxPollGap, ESP.getFreeHeap(),
+                ui.canSeek(), ui.queueStart, uiContext.readOnly, uiContext.busy, lastFrame.draw,
+                lastFrame.flush, lastFrame.total, lastFrame.pollGapMax, ESP.getFreeHeap(),
                 ESP.getFreePsram());
   maxPollGap = 0;
   (void)notice;

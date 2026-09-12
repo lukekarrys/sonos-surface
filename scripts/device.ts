@@ -19,7 +19,15 @@ import { hostCompilationDatabase } from "./host-build.ts";
 import type { HostTarget } from "./host-build.ts";
 import { hostTestTargets, hostProbeTarget } from "./host-test-targets.ts";
 import { configureDevice } from "./configure.ts";
-import { listPorts, openPort, readyPort, request } from "./serial-device.ts";
+import {
+  deviceMessage,
+  listPorts,
+  openPort,
+  readyPort,
+  request,
+  waitReady,
+} from "./serial-device.ts";
+import type { DevicePort } from "./serial-device.ts";
 
 import {
   hardwareTargets,
@@ -398,8 +406,118 @@ export async function flash(
   );
   if (profile) await ops.configure(port, profile);
 }
-export async function monitor(name: string, seconds: number) {
-  const port = await openPort(name);
+export const espressifVendorId = "303a";
+// Identification only removes guessing: two identical models are still flashed
+// by explicit --port. Nothing is written before readiness, and nothing but the
+// read-only board command is ever written at all.
+export async function identifyPorts(
+  list: () => Promise<{ path: string; vendorId?: string }[]> = listPorts,
+  open: (path: string) => Promise<DevicePort> = openPort,
+  print: (line: string) => void = console.log,
+  seconds = 10,
+) {
+  for (const info of await list()) {
+    if (info.vendorId?.toLowerCase() !== espressifVendorId) {
+      print(`${info.path} skipped (not an Espressif device)`);
+      continue;
+    }
+    let port: DevicePort | undefined;
+    let answer =
+      "no application response (asleep, busy booting, or not sonos-surface)";
+    try {
+      port = await open(info.path);
+      await waitReady(port, seconds);
+      answer = (await request(port, "board", "board ", [], 5)).trim();
+    } catch {
+      // A silent port is reported, never reset or retried.
+    } finally {
+      await port?.close();
+    }
+    print(`${info.path} ${answer}`);
+  }
+}
+export interface CapturedLine {
+  at: number;
+  line: string;
+}
+export const summaryRelevant = (line: string) => {
+  const text = deviceMessage(line);
+  return (
+    text.startsWith("heartbeat ") ||
+    text.startsWith("worker ") ||
+    text.includes("max-poll-gap-ms=") ||
+    text.includes("poll-gap-max=")
+  );
+};
+// Job durations come from the host arrival times of the worker transitions:
+// the transitions themselves carry no device timestamp.
+export function captureSummary(entries: CapturedLine[]): string {
+  let heartbeats = 0,
+    busy = 0,
+    transitions = 0,
+    buttonGap = 0,
+    uiGap = 0;
+  const started = new Map<string, number>();
+  const durations: number[] = [];
+  for (const { at, line } of entries) {
+    const text = deviceMessage(line);
+    if (text.startsWith("heartbeat ")) {
+      heartbeats++;
+      if (text.includes("busy=1")) busy++;
+      continue;
+    }
+    const running = /^worker Idle -> Running id=(\d+)/.exec(text);
+    if (running) {
+      transitions++;
+      started.set(running[1], at);
+      continue;
+    }
+    const idle = /^worker Running -> Idle id=(\d+)/.exec(text);
+    if (idle) {
+      transitions++;
+      const start = started.get(idle[1]);
+      if (start !== undefined) {
+        durations.push(at - start);
+        started.delete(idle[1]);
+      }
+      continue;
+    }
+    const button = /\[button\] max-poll-gap-ms=(\d+)/.exec(text);
+    if (button) buttonGap = Math.max(buttonGap, Number(button[1]));
+    const frame = /poll-gap-max=(\d+)/.exec(text);
+    if (frame) uiGap = Math.max(uiGap, Number(frame[1]));
+  }
+  const sorted = [...durations].sort((a, b) => a - b);
+  const middle = sorted.length >> 1;
+  const median = !sorted.length
+    ? 0
+    : sorted.length % 2
+      ? sorted[middle]
+      : (sorted[middle - 1] + sorted[middle]) / 2;
+  return [
+    `capture heartbeats=${heartbeats}`,
+    `busy-ratio=${(heartbeats ? busy / heartbeats : 0).toFixed(3)}`,
+    `worker-transitions=${transitions}`,
+    `jobs=${sorted.length}`,
+    `job-ms-median=${Math.round(median)}`,
+    `job-ms-max=${sorted.length ? sorted[sorted.length - 1] : 0}`,
+    `button-poll-gap-ms-max=${buttonGap}`,
+    `ui-poll-gap-ms-max=${uiGap}`,
+  ].join(" ");
+}
+export async function monitor(
+  name: string,
+  seconds: number,
+  options: { until?: string; stats?: boolean } = {},
+  open: (path: string) => Promise<DevicePort> = openPort,
+  print: (line: string) => void = console.log,
+) {
+  // An unattended capture must always end by itself.
+  if (!process.stdin.isTTY && !seconds)
+    throw new Error(
+      "--seconds is required when stdin is not a terminal; monitor reads no commands there",
+    );
+  const port = await open(name);
   let stopped = false;
   let writeError: unknown;
   const stop = () => {
@@ -419,12 +537,18 @@ export async function monitor(name: string, seconds: number) {
         stopped = true;
       });
   });
+  const entries: CapturedLine[] = [];
   try {
     const deadline = seconds ? performance.now() + seconds * 1000 : Infinity;
     while (!stopped && performance.now() < deadline) {
       const line = await port.readLine();
-      if (line) console.log(line);
+      if (!line) continue;
+      print(line);
+      if (options.stats && summaryRelevant(line))
+        entries.push({ at: performance.now(), line });
+      if (options.until && line.includes(options.until)) break;
     }
+    if (options.stats) print(captureSummary(entries));
     await writes;
     if (writeError) throw writeError;
   } finally {
@@ -437,13 +561,13 @@ export async function monitor(name: string, seconds: number) {
 }
 export async function device(argv = process.argv.slice(2)) {
   const { values, positionals } = cli(
-    ["port", "seconds", "config", "env-file"],
-    ["download-mode", "touch-diagnostic"],
+    ["port", "seconds", "config", "env-file", "until"],
+    ["download-mode", "touch-diagnostic", "stats", "identify"],
     argv,
   );
   if (values.help)
     return console.log(
-      `node --run build:TARGET|flash:TARGET -- [--port PORT] [--config PATH] [--env-file PATH] [--touch-diagnostic]\nnode --run cpp:configure -- [TARGET]\nnode --run monitor|reset|reboot -- TARGET --port PORT [--seconds N] [--download-mode]\nnode --run ports\nHardware targets: ${Object.keys(hardwareTargets).join(", ")}`,
+      `node --run build:TARGET|flash:TARGET -- [--port PORT] [--config PATH] [--env-file PATH] [--touch-diagnostic]\nnode --run cpp:configure -- [TARGET]\nnode --run monitor -- TARGET --port PORT [--seconds N] [--until TOKEN] [--stats]\nnode --run reset|reboot -- TARGET --port PORT [--download-mode]\nnode --run ports -- [--identify]\nHardware targets: ${Object.keys(hardwareTargets).join(", ")}`,
     );
   const [action, positionalTarget, ...extra] = positionals;
   if (
@@ -462,9 +586,11 @@ export async function device(argv = process.argv.slice(2)) {
   if (action === "ports") {
     if (positionalTarget)
       throw new Error("ports does not take a hardware target");
+    if (values.identify) return identifyPorts();
     console.log(JSON.stringify(await listPorts(), null, 2));
     return;
   }
+  if (values.identify) throw new Error("--identify is only for ports");
   const targetId = hardwareTargetId(
     positionalTarget ?? (action === "cpp:configure" ? "stick-s3" : ""),
   );
@@ -481,8 +607,13 @@ export async function device(argv = process.argv.slice(2)) {
     throw new Error("--download-mode is only for reset");
   if ((values.config || values["env-file"]) && action !== "flash")
     throw new Error("--config and --env-file are only for flash");
-  if (values.seconds !== undefined && action !== "monitor")
-    throw new Error("--seconds is only for monitor");
+  if (
+    (values.seconds !== undefined ||
+      values.until !== undefined ||
+      values.stats) &&
+    action !== "monitor"
+  )
+    throw new Error("--seconds, --until, and --stats are only for monitor");
   if (action === "build") return build(targetId, touch);
   if (action === "cpp:configure") return configureCpp(targetId);
   const port = required(values.port, "port");
@@ -495,7 +626,10 @@ export async function device(argv = process.argv.slice(2)) {
       touch,
     );
   if (action === "monitor")
-    return monitor(port, numberOption(values.seconds, 0, 0, 86400));
+    return monitor(port, numberOption(values.seconds, 0, 0, 86400), {
+      until: stringOption(values.until),
+      stats: Boolean(values.stats),
+    });
   if (action === "reset") {
     // Recovery must work without a successful build or any build-directory state.
     const details = JSON.parse(

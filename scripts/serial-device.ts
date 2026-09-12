@@ -103,6 +103,30 @@ export async function openPort(path: string): Promise<DevicePort> {
   };
 }
 export const listPorts = () => SerialPort.list();
+// Every device line carries a millisecond prefix from the runtime console.
+export const deviceMessage = (line: string) => line.replace(/^\[\d+\] /, "");
+// Unsolicited background chatter, never a reply to a command.
+export const backgroundLine = (line: string) => {
+  const text = deviceMessage(line);
+  return text.startsWith("heartbeat ") || text.startsWith("worker ");
+};
+// A device line containing one of these is a refusal, not a reply.
+export const configRejectionTokens = [
+  "CONFIG_INVALID",
+  "CONFIG_BUSY",
+  "CONFIG_SAVE_FAILED",
+];
+export const rejectionTokens = [
+  ...configRejectionTokens,
+  "CALIBRATION_INVALID",
+  "CALIBRATION_SAVE_FAILED",
+  "DISPLAY_EDGE_INVALID",
+  "PREVIEW_INVALID",
+  "QUEUE_INVALID",
+  "REBOOT_BUSY",
+  "UI_INJECT_INVALID",
+  "UI_INJECT_FULL",
+];
 export async function waitReady(port: DevicePort, seconds = 20, echo = false) {
   const deadline = performance.now() + seconds * 1000;
   while (performance.now() < deadline) {

@@ -35,6 +35,8 @@
     "configure": "node scripts/configure.ts",
     "monitor": "node scripts/device.ts monitor",
     "ports": "node scripts/device.ts ports",
+    "usb": "node scripts/usb.ts",
+    "ui": "node scripts/ui.ts",
     "reset": "node scripts/device.ts reset",
     "reboot": "node scripts/device.ts reboot",
     "calibrate": "node scripts/calibrate.ts",

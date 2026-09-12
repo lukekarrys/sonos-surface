@@ -1,4 +1,5 @@
 #include "WaveshareUi.h"
+#include "WaveshareState.h"
 #include <cassert>
 #include <iostream>
 using namespace surface;
@@ -233,6 +234,48 @@ int main() {
   s.observed.durationMs = UINT32_MAX;
   ui.update(s, context(), 9000);
   assert(tap(ui, 316, 220).intent.seekPositionMs == UINT32_MAX);
+  // ui-state reports the live model, including what a host injection needs.
+  ui = makeUi();
+  ui.notify("Hello", 5000);
+  assert(ui.touch(184, 351, 1, 5100).input == Input::None);
+  auto json = waveshareStateJson(ui, WaveshareFrame{7, 21, 28, 44}, true, 3);
+  assert(json["screen"] == "now" && json["queueStart"] == 0 && json["roomStart"] == 0 &&
+         json["rooms"] == 2);
+  assert(json["touch"]["touching"] == true && json["touch"]["control"] == "volume" &&
+         json["touch"]["held"] == true && json["touch"]["cancelled"] == false &&
+         json["touch"]["injectPending"] == 3);
+  assert(json["preview"]["volume"] == 50 && json["preview"]["seek"].is_null());
+  assert(json["toast"] == "Hello" && json["busy"] == false && json["online"] == true &&
+         json["readOnly"] == true);
+  assert(json["observed"]["room"] == "Office" && json["observed"]["targetId"] == "room-a" &&
+         json["observed"]["known"] == true && json["observed"]["stale"] == false &&
+         json["observed"]["transport"] == "Paused" && json["observed"]["title"] == "Track A");
+  assert(json["observed"]["volume"] == 20 && json["observed"]["positionMs"] == 10000 &&
+         json["observed"]["durationMs"] == 120000 && json["observed"]["seekable"] == true);
+  assert(json["observed"]["queueIndex"] == 5 && json["observed"]["queueTotal"] == 11 &&
+         json["observed"]["queueRevision"] == 7);
+  assert(json["frame"]["draw"] == 7 && json["frame"]["flush"] == 21 &&
+         json["frame"]["total"] == 28 && json["frame"]["pollGapMax"] == 44);
+  ui.cancelTouch();
+  json = waveshareStateJson(ui, {}, false, 0);
+  assert(json["touch"]["touching"] == false && json["touch"]["control"] == "none" &&
+         json["touch"]["held"] == false && json["touch"]["cancelled"] == true &&
+         json["preview"]["volume"].is_null());
+  ui.screen = WaveshareScreen::Queue;
+  ui.queueStart = 4;
+  assert(waveshareStateJson(ui, {}, false, 0)["screen"] == "queue");
+  ui.screen = WaveshareScreen::Rooms;
+  assert(waveshareStateJson(ui, {}, false, 0)["screen"] == "rooms");
+  s = observation();
+  s.observed.volume.reset();
+  s.observed.positionMs.reset();
+  s.observed.durationMs.reset();
+  s.observed.queueRevision.reset();
+  ui.update(s, context(), 5200);
+  json = waveshareStateJson(ui, {}, false, 0);
+  assert(json["observed"]["volume"].is_null() && json["observed"]["positionMs"].is_null() &&
+         json["observed"]["durationMs"].is_null() && json["observed"]["queueRevision"].is_null() &&
+         json["observed"]["seekable"] == false);
   std::cout << "Waveshare UI checks passed: release intents, navigation, bounded pages, "
-               "stale/cancel/busy/read-only reconciliation\n";
+               "stale/cancel/busy/read-only reconciliation, ui-state shape\n";
 }

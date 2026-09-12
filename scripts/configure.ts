@@ -2,7 +2,7 @@ import { isDeepStrictEqual } from "node:util";
 import { cli, main, required, stringOption } from "./common.ts";
 import { loadProfile, object, ProfileError } from "./config-profile.ts";
 import type { Profile } from "./config-profile.ts";
-import { readyPort, request } from "./serial-device.ts";
+import { configRejectionTokens, readyPort, request } from "./serial-device.ts";
 import type { DevicePort } from "./serial-device.ts";
 
 async function status(port: DevicePort) {
@@ -30,11 +30,12 @@ export async function configureDevice(
     let before;
     try {
       before = await status(port);
-      await request(port, `config ${profile.payload}`, "CONFIG_SAVED", [
-        "CONFIG_INVALID",
-        "CONFIG_BUSY",
-        "CONFIG_SAVE_FAILED",
-      ]);
+      await request(
+        port,
+        `config ${profile.payload}`,
+        "CONFIG_SAVED",
+        configRejectionTokens,
+      );
     } finally {
       await port.close();
     }

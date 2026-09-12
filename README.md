@@ -126,11 +126,12 @@ Connect the intended units, close other serial monitors, and enumerate ports:
 
 ```sh
 node --run ports
+node --run ports -- --identify
 node --run flash:stick-s3 -- --port STICK_PORT --config config/luke.json
 node --run flash:ws-1.8 -- --port WAVESHARE_PORT --config config/luke.json
 ```
 
-`ports` lists serial paths and available USB metadata, including manufacturer and serial number. Choose each port explicitly; tooling does not match ports to targets or profiles. Two identical models use the same target and are flashed sequentially, for example:
+`ports` lists serial paths and available USB metadata, including manufacturer and serial number. `ports --identify` additionally asks every Espressif port (vendor 303a) for its `board` line and prints the hardware target beside the path; a port that does not answer within about ten seconds is reported as having no application response. It never writes before readiness and never writes to a non-Espressif port. Choose each port explicitly; tooling does not match ports to targets or profiles. Two identical models use the same target and are flashed sequentially, for example:
 
 ```sh
 node --run flash:ws-1.8 -- --port /dev/cu.usbmodem101 --config config/foo.json
@@ -175,6 +176,7 @@ Writer assets live in `libraries/SurfaceDevice/src/writer/index.html`. After edi
 
 | USB command | Effect |
 | --- | --- |
+| `board` | Print hardware target, the boot adapter notice, and adapter readiness; no side effects, safe while busy |
 | `config-status` | Print mode, sleep timeout, device policy, room exceptions, policy revision; no credentials |
 | `rooms`, `status` | Refresh discovery/selected-room observations |
 | `room-next`, `room-select DISPLAY_ID` | Select configured eligible room and read it; no playback effect |
@@ -184,6 +186,10 @@ Writer assets live in `libraries/SurfaceDevice/src/writer/index.html`. After edi
 | Bare Apple URL, v1 JSON | Submit the supplied intent |
 | `read-only true`, `read-only false` | Persist mode and reboot; update the committed profile to match |
 | `config {JSON}` | Replace full device config and reboot; prefer the profile uploader |
+| `ui-screen now\|rooms\|queue` | ws-1.8: navigate screens without touch or playback intent |
+| `ui-state` | ws-1.8: print the current UI model as one JSON line |
+| `ui-touch X Y [fingers]`, `ui-touch release` | ws-1.8: queue one injected sample in screen coordinates (0–367 by 0–447) |
+| `ui-button boot` | ws-1.8: one injected debounced BOOT short press |
 | `reboot` | Reboot an idle application |
 
 Example pure policy check (catalog ID is illustrative):
@@ -208,9 +214,13 @@ See [intent](docs/intent.md) for source/mode restrictions and volume/seek/queue 
 
 M5 A single-click refreshes; A double-click cycles rooms; B toggles using a fresh read of the bound room. Normal NFC reading accepts Text/URI/empty-type URL cards, compact `ss1` Text cards, and v1 JSON Text cards without writing. One held presentation submits once; retapping requires removal. Unsupported formats report errors instead of guessing payloads.
 
-Waveshare uses release-to-submit transport/mode/volume/seek controls and four-item queue pages. USB `ui-screen now|rooms|queue` navigates its normal screens without touch or playback. Hardware diagnostics include `touch-calibration`, `touch-calibration {JSON}`, `peripherals-retry`, `display-edge N [R]`, and `display-edge off`. See the [frontend contract](docs/waveshare-frontend.md).
+Waveshare uses release-to-submit transport/mode/volume/seek controls and four-item queue pages. USB `ui-screen now|rooms|queue` navigates its normal screens without touch or playback, and `ui-state` prints the current model. `ui-touch`/`ui-button` inject input and are absent from the raw touch-diagnostic build. Hardware diagnostics include `touch-calibration`, `touch-calibration {JSON}`, `peripherals-retry`, `display-edge N [R]`, and `display-edge off`. See the [frontend contract](docs/waveshare-frontend.md).
 
-Logs stream over USB only; there is no stored history after unplugging. For a bounded capture use `node --run monitor -- TARGET --port PORT --seconds 30`, redirecting output to a private `.local` log. Live laptop capture is needed for battery tests.
+Logs stream over USB only; there is no stored history after unplugging. For a bounded capture use `node --run monitor -- TARGET --port PORT --seconds 30`, redirecting output to a private `.local` log. `--until TOKEN` ends the capture early at the first line containing TOKEN, still inside the `--seconds` bound, and `--stats` ends it with one summary line: heartbeat count, `busy=1` ratio, worker transition count, job count, median and maximum job duration, and the maximum button and UI polling gaps. An interactive monitor forwards typed commands; when stdin is not a terminal it reads none and requires `--seconds` so an unattended capture always ends. Live laptop capture is needed for battery tests.
+
+**Autonomous device verification.** `node --run usb -- --port PORT --command "lifecycle-status" [--expect "lifecycles "] [--seconds N] [--lines M]` sends one command and prints the device lines that follow, without an interactive terminal. It exits zero only when the expected line arrives — by default the first line that is neither a heartbeat nor a worker transition — and nonzero on timeout, serial failure, or a device rejection token. It refuses `config` and `read-only`, which carry credentials or reboot the device and belong to `configure`/`flash`, and it never repeats command arguments in errors.
+
+`node --run ui -- --port PORT tap X Y | drag X1 Y1 X2 Y2 [--steps N] [--interval-ms 30] | release | button boot | screen now|rooms|queue | state` drives the ws-1.8 frontend without a finger, printing the device's `[ui]` lines and exiting nonzero on rejection. Injected samples are already calibrated screen coordinates: they replace one hardware sample per 30 ms touch poll and are otherwise exactly a finger. They are queued (32 entries; overflow rejects), consumed in order, cancelled by a physical finger, and subject to the same release-after-boot rule. **Injected input is never local activity, never postpones sleep, and bypasses neither admission, `read_only`, nor policy**; with the committed `read_only=false` profile an injected tap mutates the configured room for real.
 
 ## Boot recovery and per-device calibration
 

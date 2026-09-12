@@ -65,6 +65,11 @@ export function hostTestTargets(): HostTarget[] {
       includes: [deviceInclude, ...includes],
     },
     {
+      name: "waveshare_injection_test",
+      sources: [],
+      includes: [deviceInclude],
+    },
+    {
       name: "artwork_test",
       sources: [],
       includes: [deviceInclude, includes[0]],

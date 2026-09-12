@@ -112,6 +112,10 @@ public:
   std::optional<uint32_t> volumePreview, seekPreview;
   std::string toast;
   bool dirty = true;
+  // Gesture observation for diagnostics; the interaction model stays internal.
+  WaveshareControl activeControl() const { return contact; }
+  bool contactActive() const { return touching; }
+  bool releaseRequired() const { return cancelled; }
   bool fresh() const { return context.online && state.observed.known && !state.observed.stale; }
   bool canSeek() const {
     const auto& o = state.observed;
