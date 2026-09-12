@@ -162,7 +162,7 @@ Boot reads existing Sonos state without input. Expect `SONOS_MODE`, `device-conf
 
 ## Local NFC writer
 
-On an awake Stick, open **`http://STICK_IP/`** in Safari on the same LAN. The current numeric IP appears on the Stick display and in serial `[writer] URL=...` output; the router's DHCP client list also supplies it. No separate server or phone app is needed. The page is available only on `stick-s3`.
+On an awake Stick, open **`http://STICK_IP/`** in Safari on the same LAN, or use Apple Music **Share → Make Sonos Card** with the [iOS/iPadOS Shortcut](docs/tag-writer.md#iosipados-share-sheet-shortcut) to open a populated draft. The current numeric IP appears on the Stick display and in serial `[writer] URL=...` output; the router's DHCP client list also supplies it. The Shortcut has one address constant; a DHCP reservation can keep it stable. Shared drafts are unarmed, live in RAM for up to ten minutes, and do not prevent sleep. Physical-button wake is required if the Stick is asleep. No separate server or phone app is needed. The page is available only on `stick-s3`.
 
 Paste an Apple Music share URL, select source-valid shuffle/repeat options, and tap **Write Card**. `Default` omits the field; transport is always Play. Present a blank writable card within 60 seconds, keep it still until **WRITE OK**, then remove it. Use **Read / Edit Card** before replacing a nonempty music card; the read presentation never plays. Hidden supported fields and optional metadata survive edits. See [writer details and capacity](docs/tag-writer.md).
 

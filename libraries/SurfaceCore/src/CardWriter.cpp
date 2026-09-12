@@ -1,4 +1,5 @@
 #include "CardWriter.h"
+#include <algorithm>
 #include <set>
 
 namespace surface {
@@ -257,7 +258,7 @@ Result CardWriter::armRead(uint64_t now) {
     return Result::fail("Writer busy; cancel or wait for completion");
   ++sequence;
   activity = true;
-  capacity = 0;
+  setCapacity(0);
   raw.clear();
   serialized.clear();
   deadline = now + armMs;
@@ -286,7 +287,7 @@ Result CardWriter::armWrite(const std::string& url, std::optional<bool> shuffle,
   editing = baseId != 0;
   ++sequence;
   activity = true;
-  capacity = 0;
+  setCapacity(0);
   raw.clear();
   deadline = now + armMs;
   owner = CardOwner::Write;
@@ -379,7 +380,7 @@ Json CardWriter::snapshot() const {
             {"operation", sequence},
             {"payloadBytes", serialized.size()},
             {"encoding", cardEncodingName(serialized)},
-            {"tagBytes", serialized.empty() ? 0 : cardNdef(serialized).size()},
+            {"tagBytes", serialized.empty() ? 0 : tagPrefixBytes + cardNdef(serialized).size()},
             {"capacity", capacity},
             {"sourceKind", kind},
             {"maxCardBytes", 4096},
@@ -395,9 +396,75 @@ Json CardWriter::snapshot() const {
   }
   return j;
 }
+bool CardWriter::validDraftId(const std::string& id) {
+  return id.size() == 32 && std::all_of(id.begin(), id.end(), [](char c) {
+           return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+         });
+}
 int CardWriter::request(const std::string& method, const std::string& path, const std::string& body,
-                        uint64_t now, std::string& response) {
+                        uint64_t now, std::string& response, const std::string& editorBase) {
   tick(now);
+  if (path == "/writer/drafts" || path.compare(0, 15, "/writer/drafts/") == 0) {
+    auto reject = [&](int code, const char* error, const std::string& message) {
+      response = Json{{"error", error}, {"message", message}}.dump();
+      return code;
+    };
+    // Lazy expiry: drafts cause no background work and never enter active().
+    drafts.erase(std::remove_if(drafts.begin(), drafts.end(),
+                                [now](const Draft& draft) { return now >= draft.expires; }),
+                 drafts.end());
+    if (path != "/writer/drafts") {
+      if (method != "GET" || !body.empty())
+        return reject(405, "method_not_allowed", "GET required");
+      const auto id = path.substr(15);
+      for (const auto& draft : drafts) {
+        if (draft.id != id)
+          continue;
+        const auto& source = *draft.card.intent.source;
+        response = Json{{"url", source.url},
+                        {"kind", sourceKindName(source.kind)},
+                        {"shuffle", "default"},
+                        {"repeat", "default"},
+                        {"choices", choices(source.kind)}}
+                       .dump();
+        return 200;
+      }
+      return reject(404, "draft_expired", "Draft expired — share again, or paste a URL.");
+    }
+    if (method != "POST")
+      return reject(405, "method_not_allowed", "POST required");
+    if (body.size() > 4608)
+      return reject(413, "body_too_large", "Body exceeds 4608 bytes");
+    Json input;
+    if (!apiBody(body, input) || input.size() != 1 || !input.contains("source_url") ||
+        !input["source_url"].is_string())
+      return reject(400, "invalid_request", "Expected exactly one string field: source_url");
+    CardDocument card;
+    auto result = authorCard(input["source_url"].get<std::string>(), {}, {}, nullptr, card);
+    std::string payload;
+    if (result.ok)
+      result = encodeCardPayload(card, payload);
+    if (!result.ok)
+      return reject(400, "invalid_source", result.error);
+    std::string id;
+    for (unsigned attempt = 0; draftId && attempt < 8; ++attempt) {
+      auto candidate = draftId();
+      if (validDraftId(candidate) &&
+          std::none_of(drafts.begin(), drafts.end(),
+                       [&](const Draft& draft) { return draft.id == candidate; })) {
+        id = std::move(candidate);
+        break;
+      }
+    }
+    if (id.empty())
+      return reject(503, "draft_unavailable", "Could not create a draft; share again.");
+    if (drafts.size() == maxDrafts)
+      drafts.erase(drafts.begin());
+    drafts.push_back({id, std::move(card), now + draftMs});
+    activity = true;
+    response = Json{{"draft_id", id}, {"editor_url", editorBase + "/?draft=" + id}}.dump();
+    return 201;
+  }
   auto error = [&](int code, const std::string& message) {
     response = Json{{"error", message}}.dump();
     return code;
@@ -408,7 +475,8 @@ int CardWriter::request(const std::string& method, const std::string& path, cons
     response = snapshot().dump();
     return 200;
   }
-  if (path != "/api/source" && path != "/api/write" && path != "/api/read" && path != "/api/cancel")
+  if (path != "/api/source" && path != "/api/write" && path != "/api/read" &&
+      path != "/api/cancel" && path != "/api/activity")
     return error(404, "Unknown path");
   if (method != "POST")
     return error(405, "POST required");
@@ -425,6 +493,10 @@ int CardWriter::request(const std::string& method, const std::string& path, cons
   // This is an explicit browser action, including a rejected arm. Status GETs
   // have already returned and cannot extend inactivity.
   activity = true;
+  if (path == "/api/activity") {
+    response = "{}";
+    return 200;
+  }
   if (path == "/api/cancel") {
     cancel();
     response = snapshot().dump();

@@ -183,10 +183,10 @@ test("sleep timeout framing preserves omitted, disabled, and bounded integer val
     assert.equal(JSON.parse(f.load().payload).sleep_timeout_seconds, seconds);
   }
   for (const file of ["default.json", "luke.json"]) {
+    const path = join(DEFAULT_CONFIG, "..", file);
     assert.equal(
-      loadProfile(join(DEFAULT_CONFIG, "..", file), f.env, {}).config
-        .sleep_timeout_seconds,
-      300,
+      loadProfile(path, f.env, {}).config.sleep_timeout_seconds,
+      JSON.parse(readFileSync(path, "utf8")).sleep_timeout_seconds,
     );
   }
 });

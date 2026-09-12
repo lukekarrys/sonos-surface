@@ -1,12 +1,16 @@
 #if defined(SURFACE_STICK_S3)
 #include "WriterServer.h"
+#include "SurfaceDevice.h"
 #include "WriterPage.h"
 #include <sys/socket.h>
 #include <cerrno>
 
 namespace surface::device {
 void WriterServer::reply(int code, const std::string& type, const std::string& body) {
-  output = "HTTP/1.1 " + std::to_string(code) + (code == 200 ? " OK\r\n" : " Error\r\n") +
+  output = "HTTP/1.1 " + std::to_string(code) +
+           (code == 200   ? " OK\r\n"
+            : code == 201 ? " Created\r\n"
+                          : " Error\r\n") +
            "Connection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n"
            "Content-Security-Policy: default-src 'none'; script-src 'unsafe-inline'; style-src "
            "'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; "
@@ -49,18 +53,29 @@ bool WriterServer::poll(CardWriter& writer, uint64_t now) {
     while (budget-- && client.available() && !request.complete && !request.error)
       request.feed(char(client.read()));
     if (request.error)
-      reply(request.error, "application/json", "{\"error\":\"Invalid or oversized HTTP request\"}");
+      reply(request.error, "application/json",
+            "{\"error\":\"invalid_request\",\"message\":\"Invalid or oversized HTTP request\"}");
     else if (request.complete) {
       if (!request.sameOrigin(ip))
-        reply(
-            403, "application/json",
-            "{\"error\":\"Open this page using the Stick IP address; same-origin JSON required\"}");
-      else if (request.path == "/" && request.method == "GET") {
+        reply(403, "application/json",
+              "{\"error\":\"forbidden\",\"message\":\"Use the Stick IP address and JSON; browser "
+              "actions require the same Origin\"}");
+      else if ((request.path == "/" || request.path.compare(0, 8, "/?draft=") == 0) &&
+               request.method == "GET") {
         reply(200, "text/html; charset=utf-8", writerPage);
         activity = true;
       } else {
         std::string body;
-        int code = writer.request(request.method, request.path, request.body, now, body);
+        int code =
+            writer.request(request.method, request.path, request.body, now, body, "http://" + ip);
+        if (code == 200 && request.path == "/api/status") {
+          const auto state = runtimeStatus();
+          auto json = nlohmann::json::parse(body);
+          json["device"] = {{"workerBusy", state.workerBusy},
+                            {"completedJobs", state.completedJobs},
+                            {"uptimeMs", state.uptimeMs}};
+          body = json.dump();
+        }
         reply(code, "application/json", body);
       }
     }

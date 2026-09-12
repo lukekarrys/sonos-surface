@@ -111,9 +111,14 @@ public:
     if (method == "GET")
       return true;
     const auto origin = headers.find("origin"), type = headers.find("content-type");
-    return origin != headers.end() &&
-           (origin->second == "http://" + ip || origin->second == "http://" + ip + ":80") &&
-           type != headers.end() && type->second == "application/json";
+    if (method != "POST" || type == headers.end() ||
+        (type->second != "application/json" && type->second != "application/json; charset=utf-8"))
+      return false;
+    // Native Shortcuts has no browser Origin. Only unarmed draft creation permits
+    // its absence; an explicit foreign/null Origin still rejects on every POST.
+    if (origin == headers.end())
+      return path == "/writer/drafts";
+    return origin->second == "http://" + ip || origin->second == "http://" + ip + ":80";
   }
 };
 } // namespace surface::device

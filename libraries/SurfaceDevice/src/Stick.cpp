@@ -8,6 +8,7 @@
 #include "WriterServer.h"
 #include "NtagWriter.h"
 #include <esp_timer.h>
+#include <esp_random.h>
 #include <Wire.h>
 #include <esp_sleep.h>
 #include <driver/rtc_io.h>
@@ -19,7 +20,17 @@ m5::unit::UnitUnified units;
 m5::unit::UnitNFC unit;
 m5::nfc::NFCLayerA nfc{unit};
 StickDisplay display;
-CardWriter writer;
+CardWriter writer([] {
+  uint8_t bytes[16];
+  esp_fill_random(bytes, sizeof(bytes));
+  const char* hex = "0123456789abcdef";
+  std::string id;
+  for (uint8_t byte : bytes) {
+    id += hex[byte >> 4];
+    id += hex[byte & 15];
+  }
+  return id;
+});
 WriterServer writerServer;
 NtagWritePages writePages;
 m5::nfc::a::PICC writerPicc;
@@ -133,9 +144,14 @@ static void writerStep() {
     }
     writer.setCapacity(writerPicc.userAreaSize());
     if (presentationOwner == CardOwner::Read) {
-      uint8_t header[16]{};
-      if (writerPicc.isNTAG2() && nfc.read16(header, 0) && header[12] == 0xe1)
-        writer.setCapacity(std::min<size_t>(writerPicc.userAreaSize(), size_t(header[14]) * 8));
+      uint8_t header[16]{}, first[16]{};
+      if (writerPicc.isNTAG2() && nfc.read16(header, 0) && header[12] == 0xe1) {
+        const size_t capacity = std::min<size_t>(writerPicc.userAreaSize(), size_t(header[14]) * 8);
+        NtagLayout layout;
+        if (nfc.read16(first, 4))
+          inspectNtagLayout(writerPicc.userAreaSize(), capacity, first, layout);
+        writer.setCapacity(capacity, layout.prefixBytes);
+      }
       writer.reading();
       return;
     }
@@ -156,29 +172,18 @@ static void writerStep() {
     }
     size_t capacity = 0;
     auto result = inspectNtag(userBytes, page0, dynamic, capacity);
-    writer.setCapacity(capacity);
+    NtagLayout layout;
     if (result.ok)
-      result = writePages.begin(writer.payload(), capacity);
+      result = inspectNtagLayout(userBytes, capacity, first, layout);
+    writer.setCapacity(capacity, layout.prefixBytes);
+    if (result.ok)
+      result = writePages.begin(writer.payload(), capacity, layout.prefixBytes);
     if (!result.ok) {
       writer.fail(result.error);
       finish();
       return;
     }
-    // Refuse layouts containing other TLVs. Replacing their reserved ranges
-    // would require a different tag layout implementation.
-    if (first[0] != 0x03) {
-      writer.fail("Unsupported tag layout; use a blank Type 2 card");
-      finish();
-      return;
-    }
-    const size_t lengthBytes = first[1] == 0xff ? 4 : 2;
-    const size_t messageBytes = first[1] == 0xff ? (size_t(first[2]) << 8) + first[3] : first[1];
-    const size_t terminator = lengthBytes + messageBytes;
-    if (terminator >= capacity) {
-      writer.fail("Invalid NDEF length or missing terminator");
-      finish();
-      return;
-    }
+    const size_t terminator = layout.terminator;
     // Reject trailing reserved/control TLVs before they could be overwritten.
     uint8_t tail[16]{};
     const size_t tailOffset = std::min(terminator / 4 * 4, userBytes - 16);
@@ -187,7 +192,7 @@ static void writerStep() {
       finish();
       return;
     }
-    const bool empty = messageBytes == 0;
+    const bool empty = layout.messageBytes == 0;
     std::string existing;
     if (!empty)
       result = readCard(existing);

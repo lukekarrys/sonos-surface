@@ -304,6 +304,170 @@ void http() {
   }
   h = parse("GET / HTTP/1.1\r\nHost: " + std::string(2048, 'x'));
   assert(h.error == 431);
+  h = parse("POST /writer/drafts HTTP/1.1\r\nHost: 10.0.0.1\r\nContent-Type: "
+            "application/json\r\nContent-Length: 2\r\n\r\n{}");
+  assert(h.complete && !h.error && h.sameOrigin("10.0.0.1"));
+  assert(!h.sameOrigin("10.0.0.2"));
+  h.headers["content-type"] = "application/json; charset=utf-8";
+  assert(h.sameOrigin("10.0.0.1"));
+  h.headers["content-type"] = "text/plain";
+  assert(!h.sameOrigin("10.0.0.1"));
+  h.headers["content-type"] = "application/json";
+  for (const auto& origin : {"null", "http://evil.example"}) {
+    h.headers["origin"] = origin;
+    assert(!h.sameOrigin("10.0.0.1"));
+  }
+  h.headers.erase("origin");
+  for (const auto& path : {"/api/write", "/api/read", "/api/cancel", "/api/activity", "/api/source",
+                           "/writer/drafts/", "/writer/drafts?x=1"}) {
+    h.path = path;
+    assert(!h.sameOrigin("10.0.0.1"));
+  }
+}
+void drafts() {
+  unsigned sequence = 0;
+  const auto nextId = [&] {
+    const auto suffix = std::to_string(++sequence);
+    return std::string(32 - suffix.size(), '0') + suffix;
+  };
+  CardWriter writer(nextId);
+  std::string response;
+  uint64_t now = 100;
+  const auto create = [&](const std::string& body) {
+    return writer.request("POST", "/writer/drafts", body, now, response, "http://10.0.0.1");
+  };
+  const auto load = [&](const std::string& id) {
+    return writer.request("GET", "/writer/drafts/" + id, "", now, response);
+  };
+  std::vector<std::string> ids;
+  for (const auto& url : {album, playlist, track, station}) {
+    const auto before = writer.snapshot();
+    assert(create(Json{{"source_url", "  " + url + "#shared\n"}}.dump()) == 201);
+    assert(writer.takeActivity());
+    assert(!writer.active() && writer.snapshot() == before);
+    const auto created = Json::parse(response);
+    const auto id = created["draft_id"].get<std::string>();
+    assert(CardWriter::validDraftId(id));
+    assert(std::find(ids.begin(), ids.end(), id) == ids.end());
+    ids.push_back(id);
+    assert(created["editor_url"] == "http://10.0.0.1/?draft=" + id);
+    assert(load(id) == 200 && !writer.takeActivity());
+    const auto editor = Json::parse(response);
+    Source source;
+    assert(normalizeAppleUrl(url, source).ok);
+    assert(editor["url"] == source.url && editor["kind"] == sourceKindName(source.kind));
+    assert(editor["shuffle"] == "default" && editor["repeat"] == "default");
+    // The same authoring endpoint, encoder, NDEF decoder, and semantic verification.
+    assert(writer.request("POST", "/api/write",
+                          Json{{"url", editor["url"]},
+                               {"shuffle", editor["shuffle"]},
+                               {"repeat", editor["repeat"]}}
+                              .dump(),
+                          now, response) == 200);
+    assert(writer.payload() == source.url);
+    assert(writer.present(now) == CardOwner::Write);
+    writer.writing();
+    writer.verifying();
+    assert(sameCard(author(url), decode(cardNdef(writer.payload()))));
+    assert(writer.verify(serialize(author(url))).ok);
+    writer.takeActivity();
+  }
+  for (const auto& body : {"{", "[]", "{}", "{\"source_url\":null}", "{\"source_url\":[]}",
+                           "{\"source_url\":\"x\",\"source_url\":\"y\"}",
+                           "{\"source_url\":\"x\",\"shuffle\":true}", "{\"url\":\"x\"}"}) {
+    assert(create(body) == 400 && Json::parse(response)["error"] == "invalid_request");
+    assert(!writer.takeActivity());
+  }
+  for (const auto& url :
+       {"", "https://example.com/album/123", "https://music.apple.com/us/artist/example/123"}) {
+    assert(create(Json{{"source_url", url}}.dump()) == 400);
+    assert(Json::parse(response)["error"] == "invalid_source" && !writer.takeActivity());
+  }
+  assert(create(std::string(4609, 'x')) == 413 && !writer.takeActivity());
+  assert(writer.request("GET", "/writer/drafts", "", now, response) == 405);
+  assert(writer.request("POST", "/writer/drafts/" + ids[0], "{}", now, response) == 405);
+  assert(load("unknown") == 404 && Json::parse(response)["error"] == "draft_expired");
+  assert(!writer.takeActivity());
+  assert(create(Json{{"source_url", album}}.dump()) == 201);
+  assert(load(ids[0]) == 404); // Fifth draft evicts oldest, not the whole collection.
+  for (size_t index = 1; index < ids.size(); ++index)
+    assert(load(ids[index]) == 200);
+  now += CardWriter::draftMs - 1;
+  assert(load(ids.back()) == 200);
+  ++now;
+  assert(load(ids.back()) == 404); // Lookup never extends expiry.
+  CardWriter reboot(nextId);
+  assert(reboot.request("GET", "/writer/drafts/" + ids.back(), "", now, response) == 404);
+
+  for (bool armedRead : {true, false}) {
+    CardWriter busy(nextId);
+    assert((armedRead ? busy.armRead(now) : busy.armWrite(playlist, true, {}, 0, now)).ok);
+    busy.takeActivity();
+    const auto before = busy.snapshot();
+    assert(busy.request("POST", "/writer/drafts", Json{{"source_url", album}}.dump(), now,
+                        response) == 201);
+    assert(busy.snapshot() == before && busy.takeActivity());
+    assert(busy.present(now) == (armedRead ? CardOwner::Read : CardOwner::Write));
+  }
+  for (const auto& override :
+       {Json{{"url", playlist}, {"shuffle", "on"}}, Json{{"url", track}, {"repeat", "one"}}}) {
+    assert(create(Json{{"source_url", override["url"]}}.dump()) == 201);
+    assert(load(Json::parse(response)["draft_id"].get<std::string>()) == 200);
+    assert(Json::parse(response)["url"] == override["url"]);
+    assert(writer.request("POST", "/api/write", override.dump(), now, response) == 200);
+    assert(writer.payload().find("ss1:") == 0);
+    assert(writer.present(now) == CardOwner::Write);
+    writer.writing();
+    writer.verifying();
+    assert(writer.verify(writer.payload()).ok);
+  }
+  // Failed ID generation is bounded and leaves the existing draft intact.
+  unsigned calls = 0;
+  CardWriter collision([&] {
+    ++calls;
+    return ids[0];
+  });
+  assert(collision.request("POST", "/writer/drafts", Json{{"source_url", album}}.dump(), 0,
+                           response) == 201);
+  assert(collision.takeActivity());
+  assert(collision.request("POST", "/writer/drafts", Json{{"source_url", track}}.dump(), 0,
+                           response) == 503);
+  assert(calls == 9 && !collision.takeActivity());
+  assert(collision.request("GET", "/writer/drafts/" + ids[0], "", 0, response) == 200);
+  assert(Json::parse(response)["url"] == album);
+  calls = 0;
+  CardWriter retry([&] { return ++calls <= 2 ? ids[0] : nextId(); });
+  assert(retry.request("POST", "/writer/drafts", Json{{"source_url", album}}.dump(), 0, response) ==
+         201);
+  const auto first = Json::parse(response)["draft_id"];
+  assert(retry.request("POST", "/writer/drafts", Json{{"source_url", album}}.dump(), 0, response) ==
+         201);
+  assert(Json::parse(response)["draft_id"] != first);
+  assert(calls == 3);
+
+  DevicePower power(0, 1);
+  CardWriter sleeper(nextId);
+  assert(sleeper.request("POST", "/writer/drafts", Json{{"source_url", album}}.dump(), 900,
+                         response) == 201);
+  assert(sleeper.takeActivity());
+  const auto id = Json::parse(response)["draft_id"].get<std::string>();
+  assert(!power.poll(900, LocalActivity::Writer, sleeper.active()));
+  assert(!sleeper.active());
+  assert(sleeper.request("GET", "/api/status", "", 1500, response) == 200);
+  assert(sleeper.request("GET", "/api/random", "", 1500, response) == 404);
+  assert(sleeper.request("POST", "/writer/drafts", "{}", 1500, response) == 400);
+  assert(sleeper.request("GET", "/writer/drafts/" + id, "", 1500, response) == 200);
+  assert(!sleeper.takeActivity());
+  assert(!power.poll(1899, LocalActivity::None, sleeper.active()));
+  assert(power.poll(1900, LocalActivity::None, sleeper.active()));
+  assert(sleeper.present(1900) == CardOwner::Playback); // A draft never reserves a tap.
+  sleeper.takeActivity();
+  assert(sleeper.request("GET", "/api/activity", "", 1900, response) == 405 &&
+         !sleeper.takeActivity());
+  assert(sleeper.request("POST", "/api/activity", "{\"x\":1}", 1900, response) == 400 &&
+         !sleeper.takeActivity());
+  assert(sleeper.request("POST", "/api/activity", "{}", 1900, response) == 200 &&
+         sleeper.takeActivity());
 }
 void pages() {
   uint8_t page0[16]{}, dynamic[16]{};
@@ -350,6 +514,82 @@ void pages() {
   assert(count == (cardNdef(text).size() + 3) / 4 + 1);
   memory.resize(cardNdef(text).size());
   assert(sameCard(card, decode(memory)));
+}
+void factoryNtag213() {
+  // NXP table 5, including the factory empty NDEF message after lock control.
+  std::array<uint8_t, 16> first{0x01, 0x03, 0xa0, 0x0c, 0x34, 0x03, 0x00, 0xfe};
+  NtagLayout layout;
+  assert(inspectNtagLayout(144, 144, first.data(), layout).ok);
+  assert(layout.prefixBytes == 5 && layout.messageBytes == 0 && layout.terminator == 7);
+  assert(!inspectNtagLayout(504, 496, first.data(), layout).ok);
+  for (size_t i = 0; i < 5; ++i) {
+    auto invalid = first;
+    invalid[i] ^= 0x10;
+    assert(!inspectNtagLayout(144, 144, invalid.data(), layout).ok);
+  }
+  auto invalid = first;
+  invalid[5] = 2; // A memory-control or second lock descriptor is not supported.
+  assert(!inspectNtagLayout(144, 144, invalid.data(), layout).ok);
+  invalid = first;
+  invalid[6] = 137;
+  assert(!inspectNtagLayout(144, 144, invalid.data(), layout).ok);
+  invalid[6] = 136;
+  assert(inspectNtagLayout(144, 144, invalid.data(), layout).ok && layout.terminator == 143);
+  invalid[6] = 0xff;
+  invalid[7] = invalid[8] = 0xff;
+  assert(!inspectNtagLayout(144, 144, invalid.data(), layout).ok);
+
+  for (size_t payloadBytes : {size_t(65), size_t(139), size_t(140)}) {
+    const std::string base = "https://music.apple.com/us/album/";
+    const std::string url = base + std::string(payloadBytes - base.size() - 4, 'a') + "/123";
+    assert(url.size() == payloadBytes);
+    const auto card = author(url);
+    const auto ndef = cardNdef(url);
+    NtagWritePages pages;
+    auto result = pages.begin(url, 144, 5);
+    if (payloadBytes == 140) {
+      assert(!result.ok && result.error == "Card needs 145 bytes; tag capacity is 144 bytes");
+      assert(pages.done()); // No page can be dispatched on a capacity failure.
+      continue;
+    }
+    assert(result.ok);
+    std::vector<uint8_t> memory(160, 0xa5);
+    std::copy(first.begin(), first.end(), memory.begin());
+    const auto before = memory;
+    unsigned writes = 0;
+    while (!pages.done()) {
+      auto [page, bytes] = pages.page();
+      assert(page >= 5 && page < 40); // Never touch page 4 or actual lock/config pages.
+      if (writes == 0)
+        assert((page == 5 && bytes == std::array<uint8_t, 4>{0x34, 0x03, 0x00, 0xfe}));
+      std::copy(bytes.begin(), bytes.end(), memory.begin() + (page - 4) * 4);
+      pages.advance();
+      ++writes;
+      assert(std::equal(first.begin(), first.begin() + 5, memory.begin()));
+      assert(std::equal(before.begin() + 144, before.end(), memory.begin() + 144));
+      if (!pages.done())
+        assert(memory[6] == 0); // Every interrupted prefix leaves the message uncommitted.
+      else
+        assert(page == 5);
+    }
+    assert(writes == (ndef.size() + 5 + 3) / 4);
+    assert(std::equal(ndef.begin(), ndef.end(), memory.begin() + 5));
+    assert(inspectNtagLayout(144, 144, memory.data(), layout).ok && layout.messageBytes > 0);
+    const std::vector<uint8_t> message(memory.begin() + 5, memory.begin() + layout.terminator + 1);
+    assert(sameCard(card, decode(message)));
+    CardWriter writer;
+    assert(writer.armWrite(url, {}, {}, 0, 0).ok);
+    writer.setCapacity(144, layout.prefixBytes);
+    assert(writer.snapshot()["tagBytes"] == payloadBytes + 5);
+    assert(writer.present(1) == CardOwner::Write);
+    writer.writing();
+    writer.verifying();
+    assert(writer.verify(url).ok);
+    assert(writer.armWrite(url, {}, {}, 0, 2).ok);
+    assert(writer.snapshot()["tagBytes"] == payloadBytes); // No stale layout before presentation.
+  }
+  NtagWritePages pages;
+  assert(!pages.begin(album, 144, 4).ok && pages.done());
 }
 void compactParsingAndSelection() {
   for (const auto& url : {album, playlist, track, station}) {
@@ -546,6 +786,8 @@ void representativeCards() {
   }
 }
 int main() {
+  factoryNtag213();
+  drafts();
   compactParsingAndSelection();
   compactCapacity();
   representativeCards();

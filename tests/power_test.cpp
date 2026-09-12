@@ -2,12 +2,64 @@
 #include "RoomConfig.h"
 #include "WaveshareUi.h"
 #include "ArtworkState.h"
+#include "ConsoleWrite.h"
 #include <cassert>
 #include <iostream>
 using namespace surface;
 using namespace surface::device;
 
+void consoleBackpressure() {
+  struct Port {
+    int available = 0;
+    size_t writes = 0, limit = 1000;
+    std::string output;
+    int availableForWrite() { return available; }
+    size_t write(const uint8_t* data, size_t size) {
+      ++writes;
+      const size_t count = std::min(size, limit);
+      output.append(reinterpret_cast<const char*>(data), count);
+      return count;
+    }
+  } port;
+  uint32_t time = 0;
+  unsigned yields = 0;
+  const auto now = [&] { return time; };
+  const auto yield = [&] {
+    ++time;
+    ++yields;
+  };
+  // A plugged-in host that never consumes output cannot delay any diagnostic.
+  for (unsigned i = 0; i < 1000; ++i)
+    assert(!writeConsoleLine(port, "background log\n", 0, now, yield));
+  assert(time == 0 && yields == 0 && port.writes == 0);
+  port.available = 2;
+  assert(!writeConsoleLine(port, "whole line\n", 0, now, yield) && port.output.empty());
+  port.available = 100;
+  assert(writeConsoleLine(port, "whole line\n", 0, now, yield));
+  assert(port.output == "whole line\n" && yields == 0);
+  // Explicit replies can wait for a reader, but have a total deadline.
+  port.available = 0;
+  assert(writeConsoleLine(port, "device-config {}\n", 250, now, [&] {
+    yield();
+    if (time == 3)
+      port.available = 100;
+  }));
+  assert(time == 3 && port.output == "whole line\ndevice-config {}\n");
+  port.available = -1;
+  time = UINT32_MAX - 10;
+  yields = 0;
+  assert(!writeConsoleLine(port, "CONFIG_SAVED\n", 250, now, yield));
+  assert(yields == 250); // The deadline also holds across millis rollover.
+  port.available = 100;
+  port.limit = 2;
+  port.writes = 0;
+  yields = 0;
+  assert(!writeConsoleLine(port, "reply\n", 250, now, yield));
+  assert(port.writes == 1 && yields == 0); // No duplicate prefix on a short write.
+}
+
 int main() {
+  consoleBackpressure();
   using Json = nlohmann::json;
   uint32_t seconds = 99;
   assert(parseSleepTimeout(Json::object(), seconds) && seconds == 300);

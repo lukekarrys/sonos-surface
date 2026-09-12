@@ -1,5 +1,6 @@
 #include "SurfaceDevice.h"
 #include "RoomConfig.h"
+#include "ConsoleWrite.h"
 #if defined(SURFACE_WAVESHARE_1_8) && !SURFACE_TOUCH_DIAGNOSTIC
 #include "WaveshareArtwork.h"
 #endif
@@ -32,6 +33,7 @@ Preferences preferences;
 SemaphoreHandle_t stateMutex;
 QueueHandle_t jobs;
 std::atomic<bool> busy{false};
+std::atomic<uint32_t> completedJobs{0};
 std::atomic<bool> stopping{false};
 DevicePower power;
 AppState sharedState;
@@ -52,7 +54,21 @@ struct Job {
     return toggleContext ? toggleContext->targetId : accepted.targetId;
   }
 };
-void log(const std::string& message) { Serial.printf("[%lu] %s\n", millis(), message.c_str()); }
+void consoleLine(const std::string& message, uint32_t waitMs) {
+  const auto line = "[" + std::to_string(millis()) + "] " + message + "\n";
+  writeConsoleLine(Serial, line, waitMs, [] { return uint32_t(millis()); }, [] { vTaskDelay(1); });
+}
+void log(const std::string& message) { consoleLine(message, 0); }
+void logResponse(const std::string& message) { consoleLine(message, 250); }
+void restart(const std::string& message) {
+  stopping.store(true);
+  logResponse(message);
+  // Only restart acknowledgments may drain synchronously. Normal operation
+  // never inherits the SDK's repeated per-chunk TX waits.
+  Serial.setTxTimeoutMs(20);
+  Serial.flush();
+  ESP.restart();
+}
 void publish(const AppState& state) {
   if (stopping.load())
     return;
@@ -451,6 +467,7 @@ void worker(void*) {
       }
     }
     delete job;
+    completedJobs.fetch_add(1);
     busy.store(false);
   }
 }
@@ -659,44 +676,40 @@ void handle(const std::string& line) {
     return;
   if (line == "reboot") {
     if (busy.load()) {
-      log("REBOOT_BUSY");
+      logResponse("REBOOT_BUSY");
       return;
     }
-    log("REBOOTING");
-    Serial.flush();
-    ESP.restart();
+    restart("REBOOTING");
   } else if (boardCommand(line))
     return;
   else if (line.compare(0, 7, "config ") == 0) {
     if (busy.load()) {
-      log("CONFIG_BUSY");
+      logResponse("CONFIG_BUSY");
       return;
     }
     Config next;
     const auto text = line.substr(7);
     if (!parseConfig(text, next)) {
-      log("CONFIG_INVALID (values omitted from log)");
+      logResponse("CONFIG_INVALID (values omitted from log)");
       return;
     }
     if (config.revision == UINT32_MAX || !preferences.putUInt("config-rev", config.revision + 1)) {
-      log("CONFIG_SAVE_FAILED revision");
+      logResponse("CONFIG_SAVE_FAILED revision");
       return;
     }
     if (!preferences.putString("config", text.c_str())) {
-      log("CONFIG_SAVE_FAILED");
+      logResponse("CONFIG_SAVE_FAILED");
       return;
     }
-    log("CONFIG_SAVED rebooting (credentials not logged)");
-    Serial.flush();
-    ESP.restart();
+    restart("CONFIG_SAVED rebooting (credentials not logged)");
   } else if (line == "read-only true" || line == "read-only false") {
     if (busy.load()) {
-      log("CONFIG_BUSY");
+      logResponse("CONFIG_BUSY");
       return;
     }
     auto stored = Json::parse(preferences.getString("config", "{}").c_str(), nullptr, false);
     if (!stored.is_object()) {
-      log("CONFIG_INVALID; upload config first");
+      logResponse("CONFIG_INVALID; upload config first");
       return;
     }
     stored["read_only"] = line == "read-only true";
@@ -704,12 +717,12 @@ void handle(const std::string& line) {
   } else if (line.rfind("preview ", 0) == 0)
     preview(line.substr(8));
   else if (line == "config-status") {
-    log("device-config " + Json{{"read_only", config.readOnly},
-                                {"sleep_timeout_seconds", config.sleepTimeoutSeconds},
-                                {"rooms", roomConfigJson(config.rooms)},
-                                {"policy", sourcePolicyJson(config.policy)},
-                                {"policyRevision", config.revision}}
-                               .dump());
+    logResponse("device-config " + Json{{"read_only", config.readOnly},
+                                        {"sleep_timeout_seconds", config.sleepTimeoutSeconds},
+                                        {"rooms", roomConfigJson(config.rooms)},
+                                        {"policy", sourcePolicyJson(config.policy)},
+                                        {"policyRevision", config.revision}}
+                                       .dump());
   } else if (line == "rooms" || line == "room-next")
     submit("", true, line == "room-next");
   else if (line.rfind("room-select ", 0) == 0)
@@ -743,12 +756,15 @@ void handle(const std::string& line) {
 }
 } // namespace
 
+RuntimeStatus runtimeStatus() { return {busy.load(), completedJobs.load(), uint32_t(millis())}; }
+
 void begin() {
   // Buffer complete configuration and intent commands while the display task
   // is busy; the native USB default of 256 RX bytes is insufficient.
   const auto usbRxBytes = Serial.setRxBufferSize(8192);
+  Serial.setTxBufferSize(16384); // Fits bounded config replies and ordinary diagnostic bursts.
   Serial.begin(115200);
-  Serial.setTxTimeoutMs(20); // Bounded USB backpressure keeps intent diagnostics complete.
+  Serial.setTxTimeoutMs(0); // A closed/non-reading USB monitor must not delay worker or buttons.
   Serial.printf("[usb] RX buffer=%u bytes\n", unsigned(usbRxBytes));
   Serial.printf("[boot] application reached reset-reason=%d\n", int(esp_reset_reason()));
   stateMutex = xSemaphoreCreateMutex();

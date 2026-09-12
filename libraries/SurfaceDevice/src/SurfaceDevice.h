@@ -3,6 +3,11 @@
 #include "DevicePower.h"
 
 namespace surface::device {
+struct RuntimeStatus {
+  bool workerBusy;
+  uint32_t completedJobs, uptimeMs;
+};
+RuntimeStatus runtimeStatus();
 enum class Input {
   None,
   RoomNext,

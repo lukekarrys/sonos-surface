@@ -1,5 +1,6 @@
 #pragma once
 #include "SurfaceCore.h"
+#include <functional>
 #include <surface_json.hpp>
 
 namespace surface {
@@ -35,6 +36,13 @@ enum class WriterState {
 };
 const char* writerStateName(WriterState state);
 class CardWriter {
+  struct Draft {
+    std::string id;
+    CardDocument card;
+    uint64_t expires;
+  };
+  std::vector<Draft> drafts;
+  std::function<std::string()> draftId;
   WriterState current = WriterState::Idle;
   CardOwner owner = CardOwner::Playback;
   uint64_t deadline = 0;
@@ -46,10 +54,16 @@ class CardWriter {
   bool editing = false;
   CardDocument intended;
   std::string serialized, detail, raw, kind;
-  size_t capacity = 0;
+  size_t capacity = 0, tagPrefixBytes = 0;
   void state(WriterState value, std::string message);
 
 public:
+  // The board supplies random IDs; portable tests supply a deterministic generator.
+  explicit CardWriter(std::function<std::string()> makeDraftId = {})
+      : draftId(std::move(makeDraftId)) {}
+  static constexpr size_t maxDrafts = 4;
+  static constexpr uint64_t draftMs = 10 * 60 * 1000;
+  static bool validDraftId(const std::string& id);
   static constexpr uint64_t armMs = 60000, operationMs = 15000;
   WriterState status() const { return current; }
   bool active() const;
@@ -67,11 +81,14 @@ public:
   Result read(const std::string& uid, const std::string& payload);
   Result checkEdit(const std::string& uid, const std::string& payload) const;
   Result verify(const std::string& payload);
-  void setCapacity(size_t bytes) { capacity = bytes; }
+  void setCapacity(size_t bytes, size_t prefixBytes = 0) {
+    capacity = bytes;
+    tagPrefixBytes = prefixBytes;
+  }
   const std::string& payload() const { return serialized; }
   nlohmann::json snapshot() const;
   // Explicit small LAN API; polling never generates activity. No room/config/Sonos dependency.
   int request(const std::string& method, const std::string& path, const std::string& body,
-              uint64_t now, std::string& response);
+              uint64_t now, std::string& response, const std::string& editorBase = "");
 };
 } // namespace surface

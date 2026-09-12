@@ -178,6 +178,8 @@ inline constexpr char writerPage[] = R"WRITER_PAGE(<!doctype html>
     </p>
     <script>
       const $ = (id) => document.getElementById(id);
+      const query = new URLSearchParams(location.search);
+      let acceptRead = !query.has("draft");
       let editId = 0,
         loadedId = 0,
         active = false,
@@ -191,18 +193,22 @@ inline constexpr char writerPage[] = R"WRITER_PAGE(<!doctype html>
           const controller = new AbortController();
           const timeout = setTimeout(() => controller.abort(), 6000);
           try {
-            const response = await fetch("/api/" + path, {
-              method: data === undefined ? "GET" : "POST",
-              headers:
-                data === undefined
-                  ? {}
-                  : { "Content-Type": "application/json" },
-              body: data === undefined ? undefined : JSON.stringify(data),
-              cache: "no-store",
-              signal: controller.signal,
-            });
+            const response = await fetch(
+              path.startsWith("/") ? path : "/api/" + path,
+              {
+                method: data === undefined ? "GET" : "POST",
+                headers:
+                  data === undefined
+                    ? {}
+                    : { "Content-Type": "application/json" },
+                body: data === undefined ? undefined : JSON.stringify(data),
+                cache: "no-store",
+                signal: controller.signal,
+              },
+            );
             const value = await response.json();
-            if (!response.ok) throw Error(value.error || "Request failed");
+            if (!response.ok)
+              throw Error(value.message || value.error || "Request failed");
             return value;
           } finally {
             clearTimeout(timeout);
@@ -221,6 +227,14 @@ inline constexpr char writerPage[] = R"WRITER_PAGE(<!doctype html>
         $(id).value = values.includes(selected) ? selected : "default";
         $(id + "Row").hidden = values.length === 1;
       }
+      function sourceInfo(info, saved) {
+        validUrl = $("url").value.trim();
+        $("source").textContent = "Source: " + info.kind;
+        options("shuffle", info.choices.shuffle, saved?.shuffle || "default");
+        options("repeat", info.choices.repeat, saved?.repeat || "default");
+        $("write").disabled = active;
+        $("error").textContent = "";
+      }
       async function classify(saved) {
         const request = ++generation,
           url = $("url").value.trim();
@@ -234,12 +248,7 @@ inline constexpr char writerPage[] = R"WRITER_PAGE(<!doctype html>
         try {
           const info = await api("source", { url });
           if (request !== generation) return;
-          validUrl = url;
-          $("source").textContent = "Source: " + info.kind;
-          options("shuffle", info.choices.shuffle, saved?.shuffle || "default");
-          options("repeat", info.choices.repeat, saved?.repeat || "default");
-          $("write").disabled = active;
-          $("error").textContent = "";
+          sourceInfo(info, saved);
         } catch (error) {
           if (request === generation) {
             $("source").textContent = "Unsupported link";
@@ -266,7 +275,9 @@ inline constexpr char writerPage[] = R"WRITER_PAGE(<!doctype html>
             : "";
         $("inspection").hidden = !status.raw;
         $("raw").textContent = status.raw;
-        if (status.editor && status.editor.id !== loadedId) {
+        // A shared/manual new card must not inherit an unrelated tag's hidden fields.
+        if (status.editor && !acceptRead) loadedId = status.editor.id;
+        if (acceptRead && status.editor && status.editor.id !== loadedId) {
           loadedId = editId = status.editor.id;
           $("url").value = status.editor.url;
           $("advanced").hidden = !status.editor.advanced;
@@ -283,6 +294,7 @@ inline constexpr char writerPage[] = R"WRITER_PAGE(<!doctype html>
         $("error").textContent = "";
         try {
           show(await api(path, data));
+          if (path === "read") acceptRead = true;
         } catch (error) {
           $("error").textContent = error.message;
         }
@@ -292,7 +304,10 @@ inline constexpr char writerPage[] = R"WRITER_PAGE(<!doctype html>
         validUrl = "";
         $("write").disabled = true;
         clearTimeout(timer);
-        timer = setTimeout(() => classify(), 450);
+        timer = setTimeout(() => {
+          if (!$("url").value.trim()) api("activity", {}).catch(() => {});
+          classify();
+        }, 450);
       });
       $("write").onclick = () =>
         action("write", {
@@ -303,11 +318,19 @@ inline constexpr char writerPage[] = R"WRITER_PAGE(<!doctype html>
         });
       $("read").onclick = () => action("read", {});
       $("cancel").onclick = () => action("cancel", {});
+      // Only explicit changes send activity; neither draft access nor status polling does.
+      for (const id of ["shuffle", "repeat"]) {
+        $(id).addEventListener("change", () =>
+          api("activity", {}).catch(() => {}),
+        );
+      }
       $("new").onclick = () => {
+        acceptRead = false;
         editId = 0;
         $("advanced").hidden = $("new").hidden = true;
         $("url").value = "";
         classify();
+        api("activity", {}).catch(() => {});
       };
       async function poll() {
         try {
@@ -320,7 +343,25 @@ inline constexpr char writerPage[] = R"WRITER_PAGE(<!doctype html>
         }
         setTimeout(poll, 900);
       }
-      poll();
+      async function start() {
+        if (query.has("draft")) {
+          $("editor").disabled = true;
+          try {
+            const id = query.get("draft");
+            if (!/^[a-f0-9]{32}$/.test(id))
+              throw Error("Draft expired — share again, or paste a URL.");
+            const draft = await api("/writer/drafts/" + id);
+            $("url").value = draft.url;
+            sourceInfo(draft, draft);
+          } catch (error) {
+            $("error").textContent = error.message;
+          } finally {
+            $("editor").disabled = false;
+          }
+        }
+        poll();
+      }
+      start();
     </script>
   </body>
 </html>

@@ -4,7 +4,7 @@
 
 An awake `stick-s3` serves `http://STICK_IP/` on its configured LAN. Use the numeric address shown on the Stick display, serial writer URL, or router DHCP list. All assets are local; no Apple authentication, URL fetch, server, native app, or installed PWA is involved. Waveshare has no writer server or NFC-writing adapter.
 
-Copy an Apple Music share URL and paste it into the page. The backend uses the existing Apple Music normalizer and derives choices from the shared source-mode validator. The editor exposes source, shuffle, and repeat only; every rewrite sets transport to Play. `Default` omits a field so normal source/device/room policy resolves it on a later playback presentation. No room, group, device policy, resolved policy, or configuration enters the card. Current runtime topology eligibility remains authoritative when a card is played; writing does not add grouping support.
+Start authoring by opening the page and pasting an Apple Music share URL, or by using **Share → Make Sonos Card** in Apple Music with the [Shortcut below](#iosipados-share-sheet-shortcut). Both open the same editor. The backend uses the existing Apple Music normalizer and derives choices from the shared source-mode validator. The editor exposes source, shuffle, and repeat only; every rewrite sets transport to Play. `Default` omits a field so normal source/device/room policy resolves it on a later playback presentation. No room, group, device policy, resolved policy, or configuration enters the card. Current runtime topology eligibility remains authoritative when a card is played; writing does not add grouping support.
 
 | Source           | Shuffle            | Repeat              |
 | ---------------- | ------------------ | ------------------- |
@@ -16,6 +16,24 @@ Copy an Apple Music share URL and paste it into the page. The backend uses the e
 
 Raw Apple Music URLs, compact `ss1` Text cards, and structured v1 JSON Text cards are current inputs. Rewrites choose the smallest lossless encoding automatically: raw URL for source + Play + Default modes; `ss1` for explicit shuffle/repeat; structured JSON for hidden fields or retained metadata. The [wire grammar](intent.md#compact-nfc-wire-format) owns exact codes and bounds. The user never selects an encoding. The editor retains supported hidden fields such as volume plus label/optional extension metadata; it announces their presence. The shared validator rejects hidden-field conflicts with a new source. Transport always becomes Play. Unknown versions, required extensions, malformed documents, and unsupported inputs cannot be rewritten; decoded text is inspectable when available.
 
+## iOS/iPadOS Share Sheet Shortcut
+
+Create a shortcut named **Make Sonos Card**. In Details, enable **Show in Share Sheet**; set its Receive input types to **URLs** and **Text**. Add these actions in order:
+
+1. **Get URLs from Input**: input = **Shortcut Input**.
+2. **Get Item from List**: **First Item**, list = **URLs** from step 1.
+3. **Get Contents of URL**: URL = `http://STICK_IP/writer/drafts`; expand its options, set Method = **POST**, Request Body = **JSON**, and add one **Text** field named `source_url`. Set its value to the **Item from List** variable from step 2. Use that single extracted URL, not the full Shortcut Input or URL list.
+4. **Get Dictionary Value**: key = `editor_url`, dictionary = **Contents of URL** from step 3.
+5. **Open URLs**: input = **Dictionary Value** from step 4.
+
+Change only `STICK_IP` in step 3 to the numeric address displayed by the awake Stick. There is no mDNS hostname. A router DHCP reservation can keep that address stable; if it changes, update this one Shortcut value. Use Safari as the phone/tablet's browser for the Safari acceptance flow. The Shortcut extracts a URL, sends it, and opens the result; source kinds, MusicIntent, policy, modes, and card encoding remain entirely on the Stick. Apple's guides describe [Share Sheet setup](https://support.apple.com/guide/shortcuts/apd163eb9f95/ios), [JSON POST requests](https://support.apple.com/guide/shortcuts/apd58d46713f/ios), [list selection](https://support.apple.com/guide/shortcuts/apd9ba41d21b/ios), and [dictionary value extraction](https://support.apple.com/guide/shortcuts/apdf01294032/ios).
+
+A shared URL creates an **unarmed RAM draft** with normalized source/kind and Default shuffle/repeat. Opening its returned URL loads these values without another paste. It does not arm Read/Write, execute playback, or change the selected room, grouping, policy, configuration, or `read_only`. Only **Write Card** arms writing. Draft creation is allowed during an active writer operation and leaves that operation unchanged; the editor waits for it to finish before allowing another arm.
+
+At most four drafts are retained for ten minutes from creation. Creating a fifth evicts the oldest. IDs are random 128-bit lowercase hexadecimal strings. Lookup does not extend lifetime; unknown, evicted, and expired IDs show **Draft expired — share again, or paste a URL.** Sleep/reboot discards them. Changes in the editor stay in that browser tab and go through the existing write endpoint; reloading the draft URL reloads the original shared source and Default selections. No synchronization or persistence is implied.
+
+The Stick must be awake and reachable on the same LAN. If it sleeps, Shortcuts cannot connect or wake it. Press the blue front button, release it, wait for Wi-Fi, and run **Share → Make Sonos Card** again. There are no background retries. Connection errors are handled by Shortcuts; API errors use the small JSON responses below. Optionally check for an `editor_url` before Open URLs and show the returned `message` if it is absent.
+
 ## Arming, verification, and power
 
 `CardWriter` in SurfaceCore owns transient state and has no Sonos, room, configuration, or network dependency. Before tag preparation, Stick assigns one presentation to playback, read/edit, or writing. The existing removal latch prevents a held card from becoming a second operation or playing after verification. Arming is one-shot, failures disarm, cancellation stops further pages, and reboot restores the normal reader. An active card operation has a 15-second deadline in addition to the 60-second arm window.
@@ -24,15 +42,15 @@ Success requires read-back through the ordinary NDEF decoder and MusicIntent par
 
 `read_only` gates Sonos mutations only. Intentional NFC writes work in either mode and never change it or need Sonos availability. A later normal presentation follows normal admission, policy, and dispatch safeguards.
 
-Opening the page and deliberate classify/read/write/cancel actions count as local activity, as do card presentation and writer completion/failure. Armed/active operations postpone automatic sleep until their bounded deadline. Passive status polling does not reset inactivity. Cancel/completion/expiry restore ordinary sleep eligibility. Physical-button wake remains unchanged.
+Opening the page, successful draft creation, and deliberate editor changes/classify/read/write/cancel actions count as local activity, as do card presentation and writer completion/failure. Armed/active operations postpone automatic sleep until their bounded deadline. Draft existence, passive draft/status reads, failed draft creation, and merely listening for HTTP do not reset inactivity or suppress sleep. Cancel/completion/expiry restore ordinary sleep eligibility. Physical-button wake remains unchanged.
 
 ## Capacity
 
 The page reports total NDEF/TLV bytes, inspected capacity, and headroom without asking the user to choose an encoding. Raw URL cards use one URI record (`U`, prefix `0x04` for `https://`); this reuses the normal reader and saves ten bytes versus a Text record. Compact and JSON payloads use one UTF-8/en Text record. For the short records used on NTAG213, URI total bytes equal full URL string bytes; Text total bytes equal string bytes + 10, including TLV and terminator. Longer payloads use NDEF/TLV extended lengths, and the production encoder computes their exact size too.
 
-The writer supports already formatted, unlocked, unprotected NTAG213/215/216 with a single NDEF message TLV and terminator. It uses the smaller of identified user memory and CC capacity, checks four-byte page padding before any write, and refuses unsupported/reserved layouts. An oversized simple card reports `Card needs 145 bytes; tag capacity is 144 bytes`. Oversized advanced JSON reports `Card too small for this advanced intent` with the same exact sizes. No page is changed on a capacity failure. It never formats, unlocks, shortens, or truncates a tag.
+The writer supports unlocked, unprotected NTAG213/215/216 with a valid Type 2 capability container and a single NDEF message TLV and terminator. It accepts both NDEF at the start of user memory and the NTAG213 factory layout: `01 03 A0 0C 34` lock-control TLV followed by NDEF, as specified in [NXP table 5](https://www.nxp.com/docs/en/data-sheet/NTAG213_215_216.pdf). That five-byte descriptor is preserved on initial writes and rewrites; other control/reserved layouts reject. A factory empty NDEF record needs no phone formatting first. It uses the smaller of identified user memory and CC capacity, checks four-byte page padding before any write, and refuses unsupported/reserved layouts. An oversized simple card reports `Card needs 145 bytes; tag capacity is 144 bytes`. Oversized advanced JSON reports `Card too small for this advanced intent` with the same exact sizes. No page is changed on a capacity failure. It never formats, unlocks, shortens, or truncates a tag.
 
-Representative fixtures in `tests/writer_test.cpp`, measured from the production encoder against 144 bytes:
+Representative fixtures in `tests/writer_test.cpp`, measured from the production encoder against 144 bytes, without a leading lock-control descriptor:
 
 | Card | Encoding | Payload bytes | NDEF/TLV bytes | NTAG213 headroom |
 | --- | --- | --- | --- | --- |
@@ -55,7 +73,9 @@ Exact representative source URLs (catalog access is independent of encoding):
 - Long playlist: [Road Trip Songs — The Ultimate Throwback Playlist](https://music.apple.com/us/playlist/road-trip-songs-the-ultimate-throwback-playlist/pl.eb1e77a270934ab58cb71987f03bb2ff).
 - Oversized URL: [喫茶トーキョー（作業用BGM）](https://music.apple.com/us/playlist/%E5%96%AB%E8%8C%B6%E3%83%88%E3%83%BC%E3%82%AD%E3%83%A7%E3%83%BC-%E4%BD%9C%E6%A5%AD%E7%94%A8bgm/pl.66e6d2f8eb49435d9fa8138a9c0623cb). Its normalized percent-encoded URL requires 166 bytes even without overrides. URL normalization retains the supplied slug; there is no extra shortening step.
 
-Headroom is capacity minus the complete NDEF/TLV length; final page padding may consume up to three additional bytes. For example, a 141-byte message occupies 144 bytes of page writes. These are reproducible wire sizes, not physical write acceptance. NTAG213 has a documented measured 144-byte household capacity; NTAG215/216 commonly advertise 496/872 NDEF bytes. Actual tag protection/capacity, writing, read-back, and Safari operation still require physical validation. The 4,096-byte parser ceiling is not an assertion about tag capacity.
+On tags retaining the NTAG213 factory descriptor, add five bytes to the table’s NDEF/TLV sizes and subtract five from headroom. For example, Album defaults uses 88 bytes with 56 bytes headroom; the long playlist with both overrides requires 146 bytes and rejects a 144-byte card. The inspected layout is included in the page/status byte counts before writing.
+
+Headroom is capacity minus the complete NDEF/TLV length and any preserved prefix; final page padding may consume up to three additional bytes. For example, a 141-byte message occupies 144 bytes of page writes. These are reproducible wire sizes, not physical write acceptance. NTAG213 has a documented measured 144-byte household capacity; NTAG215/216 commonly advertise 496/872 NDEF bytes. Actual tag protection/capacity, writing, read-back, and Safari operation still require physical validation. The 4,096-byte parser ceiling is not an assertion about tag capacity.
 
 ## LAN API and implementation
 
@@ -64,12 +84,45 @@ One bounded HTTP/1.1 connection is processed incrementally on the Stick loop: up
 | Method / path | Operation |
 | --- | --- |
 | `GET /` | Local page; explicit opening counts as activity |
+| `GET /?draft=<id>` | Same page, loading the shared draft once |
+| `POST /writer/drafts` | Create an unarmed draft from exactly one `source_url` string |
+| `GET /writer/drafts/<id>` | Passive lookup of normalized source, Default modes, and valid choices |
 | `GET /api/status` | Passive state/result/editor polling |
 | `POST /api/source` | Normalize `url`; return kind and source-valid choices |
+| `POST /api/activity` | Explicit browser mode/new-card/empty-source change; empty object |
 | `POST /api/read` | Arm one read/edit; empty object |
 | `POST /api/write` | Validate/serialize/arm `url`, optional `shuffle`, `repeat`, `editId` |
 | `POST /api/cancel` | Cancel; empty object |
 
-POST requires same-origin `application/json`. Host must be the current numeric Stick IP (optional port 80); foreign origins and DNS names reject, preventing cross-origin submissions and DNS rebinding. No CORS permission is emitted. Duplicate headers/JSON keys, unknown fields/routes/methods, chunking, oversized bodies, and invalid sources reject. One active operation accepts no competing arm. There are no account, persistent pairing, filesystem, configuration, arbitrary fetch, or remote Sonos endpoints. This is a trusted-LAN service, not an internet service.
+POST requires `application/json` (optionally `; charset=utf-8`). Browser actions require the same Origin. Only `POST /writer/drafts` permits an absent Origin for native Shortcuts; an explicit foreign or `null` Origin still rejects. Host must be the current numeric Stick IP (optional port 80); foreign origins and DNS names reject, preventing cross-origin submissions and DNS rebinding. No CORS permission is emitted. Duplicate headers/JSON keys, unknown fields/routes/methods, chunking, oversized bodies, and invalid sources reject. One active operation accepts no competing arm. There are no account, persistent pairing, filesystem, configuration, arbitrary fetch, or remote Sonos endpoints. This is a trusted-LAN service, not an internet service.
 
-Shuffle values are `default`, `on`, `off`; repeat values are `default`, `off`, `all`, `one`, subject to shared validation. The read result supplies the transient `editId`; advanced settings remain on the device and are preserved by that ID. Status exposes `idle`, `armed-read`, `armed-write`, `card-detected`, `reading`, `writing`, `verifying`, `success`, `failed`, and `timed-out`, plus concise result and capacity information. Diagnostic fields `encoding` (`url`, `ss1`, `json`), `payloadBytes`, and `tagBytes` describe the canonical output; serial state logs include them. The phone page displays only size/capacity, while Read card text can inspect a read payload. None of this state is persisted.
+Draft creation contract:
+
+```http
+POST /writer/drafts HTTP/1.1
+Host: STICK_IP
+Content-Type: application/json
+Content-Length: 67
+
+{"source_url":"https://music.apple.com/us/album/example/123456789"}
+```
+
+Success is HTTP **201**, `application/json`, with the current numeric address and generated ID:
+
+```json
+{
+  "draft_id": "b9205bd4f6304ced91a58f4860d327aa",
+  "editor_url": "http://STICK_IP/?draft=b9205bd4f6304ced91a58f4860d327aa"
+}
+```
+
+`GET /writer/drafts/<id>` returns HTTP 200 with `url`, `kind`, `shuffle: "default"`, `repeat: "default"`, and `choices` containing the shared validator's shuffle/repeat lists. Errors contain only `error` and `message`: HTTP 400 `invalid_request` for malformed/duplicate/missing/unknown fields, HTTP 400 `invalid_source` for unsupported URLs, HTTP 413 `body_too_large` for bodies over 4,608 bytes, HTTP 404 `draft_expired` for unavailable IDs, HTTP 405 `method_not_allowed`, or HTTP 503 `draft_unavailable` if a unique ID cannot be generated in eight attempts. HTTP framing errors use `invalid_request`; Host/Origin/content-type rejection uses `forbidden` with HTTP 403. No error creates a draft or counts as draft activity.
+
+```json
+{
+  "error": "invalid_source",
+  "message": "Unsupported Apple Music URL: use an album, playlist, track, or station share URL"
+}
+```
+
+Shuffle values are `default`, `on`, `off`; repeat values are `default`, `off`, `all`, `one`, subject to shared validation. The read result supplies the transient `editId`; advanced settings remain on the device and are preserved by that ID. Status exposes `idle`, `armed-read`, `armed-write`, `card-detected`, `reading`, `writing`, `verifying`, `success`, `failed`, and `timed-out`, plus concise result and capacity information. On the Stick, status also includes a passive `device` diagnostic object: `workerBusy`, `completedJobs`, and `uptimeMs`. These distinguish NFC writer state from Sonos worker progress without opening a USB monitor or resetting inactivity. Diagnostic fields `encoding` (`url`, `ss1`, `json`), `payloadBytes`, and `tagBytes` describe the canonical output; serial state logs include them. The phone page displays only size/capacity, while Read card text can inspect a read payload. None of this state is persisted.
