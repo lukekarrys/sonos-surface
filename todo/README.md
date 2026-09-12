@@ -20,10 +20,38 @@ Dependency graph: `1` → `2` → { `3` ∥ `5A` ∥ `6A` } → `4` → `5B` →
 
 Retired: `0-fsm-testing` (runtime lifecycle machines, fault harness, stress task) landed in `dbacbc2`, `9e15b0c`, `e45dc22`, and `93e48a0`; the prompt is in history at `git show 93e48a0:todo/0-fsm-testing.md`. Its one spec gap, background reads blocking user input, is `2-user-input-priority`.
 
+## How to run
+
+The owner starts one agent per prompt, sequentially, in goal mode, and checks in after each. These rules are the owner's standing instructions for that session; the prompt adds its own. Status cells read: blank = not started, `in progress`, `implemented (<hash>)`, `needs fixes`, `done (<hash>)`.
+
+Implementation session:
+
+1. **Read first.** `AGENTS.md`, this file, and the prompt. Confirm every dependency in the table is `done`; if one is not, stop and say so. Work only that prompt: do not start the next one, and do not edit other prompts except where the prompt says so (`3-lvgl` rewrites `4-ws-1.8-multiscreen`).
+2. **Status.** Set the prompt's Status cell to `in progress` when you start and `implemented (<hash>)` in the same commit as the finished work; `done` belongs to the review session.
+3. **Commits are authorized** by these rules. Use focused imperative subjects prefixed by the prompt number, for example `todo 2: preempt automatic reads for user input`. Commit once the host baseline is green (`node --run check`, `node --run check:full`, and `node --run stress` where the prompt lists it) and before any flashing, then again after device verification. Never commit a red baseline. Never push.
+4. **Devices.** Both boards may be attached. Identify ports before flashing (`node --run ports -- --identify` once `1-device-tooling` exists; before that, `node --run monitor` and read the boot banner). Disable sleep for the session with a throwaway profile through `node --run configure` and restore `config/default.json` before finishing. Real Sonos mutations on the configured rooms are allowed; the owner mutes the amplifier. Put long captures in background commands. You may work for hours.
+5. **Stop and report instead of guessing** when a product decision is genuinely ambiguous, an `OWNER DECISION` is unfilled, the baseline cannot be made green within the prompt's scope, or the prompt's own stop rule fires (physical acceptance, both tracks present, a missing dependency).
+6. **Report.** Write the prompt's final report to `.local/reports/<prompt>-implementation.md` (ignored by git) and repeat it in your final message. Durable findings go to `docs/` under the durability rule; nothing else does.
+
+Review session (a second agent, usually a stronger model):
+
+1. Read `AGENTS.md`, this file, the prompt, `.local/reports/<prompt>-implementation.md`, and the diff of every commit whose subject starts with the prompt's `todo N:` prefix.
+2. Check the prompt's completion list item by item against the code, not the report. Check that tests assert the firmware's own composition rather than a re-implementation of it, that device verification actually ran (logs under `.local`), that docs changed where the prompt required and nowhere else, and that `AGENTS.md` held (no migration code, no diary docs, no scope creep).
+3. Run the green baseline yourself.
+4. Fix clear defects and commit them with a `todo N review:` subject. Write anything larger as an ordered fix list in `.local/reports/<prompt>-review.md` and set Status to `needs fixes`; the owner then runs an implementation session on that list. When nothing remains, set Status to `done (<hash>)` and commit.
+
+Kickoff messages (replace the number and name):
+
+    Implement todo/2-user-input-priority.md following "How to run" in todo/README.md.
+
+    Review todo/2-user-input-priority.md following "How to run" in todo/README.md.
+
+    Apply .local/reports/2-user-input-priority-review.md, then finish per "How to run" in todo/README.md.
+
 ## Conventions
 
 - **Two-track prompt.** `4-ws-1.8-multiscreen` contains an LVGL track and a hand-rolled track. The last step of `3-lvgl` rewrites it to the chosen track and deletes the other. An agent that finds both tracks present stops and reports instead of guessing.
-- **Phases.** `5-new-view-model` and `6-subscription-reconciliation` are split into Phase A (portable, host tests only, no UI) and Phase B (device UI). Phase A work runs in a separate git worktree and is merged before its Phase B starts.
+- **Phases.** `5-new-view-model` and `6-subscription-reconciliation` are split into Phase A (portable, host tests only, no UI) and Phase B (device UI). The default is sequential in the table's order; a Phase A may run beside `3-lvgl` in a separate git worktree only when the owner asks for it, in which case work there and never merge it yourself. A Phase B never starts before its Phase A is merged and `done`.
 - **Autonomous device verification.** Every prompt that touches the device carries a section with the exact USB steps an agent runs before asking the owner for anything. They rely on `1-device-tooling`: `node --run ports -- --identify`, `node --run usb`, `node --run ui` (`ui-touch`, `ui-button`, `ui-state`), and `monitor --until` / `--stats`. Injected input is never local activity and never bypasses admission, read_only, or policy.
 - **Live mutations.** The committed default profile has `read_only: false`; device verification sends real transport, volume, seek, and queue mutations to the configured room because real-world behavior is what is being tested. The owner mutes the amplifier during long loops. `read_only: true` is the deliberate brake for tests where mutations would be disruptive; agents may flash such a profile for that purpose but never flip an existing true flag to false.
 - **Owner decisions** are marked `OWNER DECISION` inside a prompt and must be filled in before the prompt runs. Defaults follow `AGENTS.md`.
