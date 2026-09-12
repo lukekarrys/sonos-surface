@@ -1,15 +1,39 @@
-Implement the INTERACTIVE UI STATE MODEL described by the current UI-state TODO/spec.
+Implement the INTERACTIVE UI STATE MODEL: Observed / Pending / Interaction / ViewModel.
 
-This milestone establishes frontend-like declarative state semantics using the existing
-multi-screen shell and Playground.
+This prompt is self-contained; it is the spec. docs/product.md already states the
+principle ("AppState distinguishes observed facts from pending/requested values and
+outcomes"); this milestone makes it explicit, deterministic, and testable, and uses the
+existing multi-screen shell and Playground for the visible parts.
 
-Do NOT implement Sonos event subscriptions yet.
+PHASES
+
+  PHASE A (host-only, portable)
+    Sections 1-4, 8-13, 15, and the Phase A tests in 16. No display, no screen, no board
+    code. It may run in a separate git worktree in parallel with todo/0-lvgl.md and
+    Phase A of todo/3-subscription-reconcilliation.md.
+
+  PHASE B (device UI)
+    Sections 5-7 (Playground), 9 (Now Playing volume adoption), 14, 17, 18, 19, and the
+    Phase B tests in 16. Requires todo/1-ws-1.8-multiscreen.md and merged Phase A.
+
+If asked to run only Phase A, stop after its completion items and report.
+
+Do NOT add AVTransport/RenderingControl event subscriptions; the existing topology
+subscription stays as it is.
 Do NOT implement grouping yet.
 Do NOT redesign the entire Now Playing layout.
-Do NOT introduce a heavyweight UI framework.
+Do NOT introduce a heavyweight UI framework or a reactive runtime.
 Do NOT add historical checkpoint documentation.
 
-Read the current UI-state TODO/spec and treat it as the product/architecture target.
+Read first: AGENTS.md; docs/product.md (configuration and state); docs/planner-executor.md
+(observation and reconciliation; outcomes); docs/runtime-lifecycles.md (bounded work);
+docs/sonos-capabilities.md (normalized state); libraries/SurfaceCore/src/SurfaceCore.h
+(PlaybackState, AppState, Application) and the Application implementation in
+SurfaceCore.cpp; libraries/SurfaceDevice/src/RuntimeCoordinator.h (enqueueJob returns the
+job id; finishJob is the terminal outcome), Runtime.cpp (submit, publish, the render
+copy under stateMutex), WaveshareUi.h (volumePreview/seekPreview and release-to-submit
+are today's interaction state); tests/waveshare_ui_test.cpp, tests/core_test.cpp,
+tests/runtime_fault_test.cpp.
 
 ==================================================
 1. REQUIRED STATE AUTHORITY MODEL
@@ -39,6 +63,17 @@ InteractionState
 ViewModel
   deterministic visible state derived from those layers + monotonic time
 
+Placement (decide here, not per file):
+
+- ObservedState is the existing PlaybackState inside AppState. Do not rename it; add
+  only what is missing. The position anchor fields already exist (positionMs,
+  observedAtMs, transport, durationMs).
+- PendingState and deriveViewModel(observed, pending, interaction, now) are portable
+  headers in SurfaceCore, board-agnostic, with no display or Arduino includes, so the
+  Stick can consume them later.
+- InteractionState lives in the device UI layer and REPLACES WaveshareUi::volumePreview
+  and seekPreview. Do not keep two preview mechanisms.
+
 ==================================================
 2. NO NETWORK CALLBACK -> WIDGET MUTATION
 ==================================================
@@ -66,7 +101,9 @@ Conceptually:
       -> deriveViewModel()
       -> render
 
-Keep locking/ownership simple and explicit.
+Keep locking/ownership simple and explicit. Today the main task copies sharedState under
+stateMutex every 100 ms and renders from the copy; derive the ViewModel on the main task
+from that copy plus the main task's own InteractionState. Do not derive under the mutex.
 
 ==================================================
 3. FIELD-LEVEL PRECEDENCE
@@ -122,6 +159,12 @@ Do not continuously mutate ObservedState to advance time.
 
 Do not increase Sonos polling merely to make the progress indicator move.
 
+Anchor caveat: DirectSonos::refresh reads RelTime near the start of an ~8-call snapshot
+and stamps observedAtMs at the end, so the anchor can be up to about one second late.
+Either stamp a position-specific observation time at the GetPositionInfo call (a small
+SurfaceSonos change, fixture-tested) or accept the skew and clamp. Choose, and state the
+choice in the report.
+
 ==================================================
 5. PLAYGROUND: PROGRESS CLOCK
 ==================================================
@@ -140,6 +183,11 @@ Update visible projected position locally.
 It is acceptable to render several times per second for a smooth test.
 
 No additional Sonos requests should result merely from these local UI ticks.
+
+Rendering cost: on the hand-rolled track a moving clock makes every 100 ms frame dirty,
+and a full-frame flush costs 43-63 ms of main-task time. Rate-limit clock-only redraws
+to at most 2 Hz on that track and measure the poll gap. On the LVGL track only the
+label/bar invalidates; keep it that way.
 
 ==================================================
 6. PLAYGROUND: SEEK DRAG
@@ -195,6 +243,25 @@ On failure:
   return to observed
 
 Do not make the user wait for HTTP before visual feedback.
+
+Pending identity and lifetime, mapped onto the existing runtime:
+
+- A pending entry is created at successful admission, i.e. when
+  RuntimeCoordinator::enqueueJob accepts the job and returns its id. It carries the
+  accepted intent's explicit fields (transport, volume, seek, shuffle, repeat) and that
+  job id. Local rejections (busy, invalid, room changed, worker unavailable) create no
+  pending state.
+- It clears on that job's terminal outcome (finishJob). Success: the job's own
+  verify/refresh publication is the confirmation. Failure, Timeout, NetworkLost,
+  Shutdown, cancellation: clear. Uncertain: clear the optimistic value but keep
+  recoveryRequired visible exactly as today.
+- A late completion for a different job id never touches it.
+- The single-job contract is unchanged: while a mutation is pending, other inputs still
+  reject as busy. "Optimistic" means immediate visual feedback, not a queue of taps.
+- Pending horizon: the mutation job budget is 90 s. Keep the pending value visible until
+  the terminal outcome and show the existing "Updating..." affordance; do not add a
+  second, shorter timer. If measured behavior makes this feel wrong, propose the change
+  in the report rather than adding it silently.
 
 Use Playground to expose/debug this behavior if useful.
 
@@ -264,7 +331,8 @@ Do not create persistent desired state.
 
 Authoritative Sonos eventually wins.
 
-Reuse existing request/outcome identity semantics where possible.
+Reuse the existing request/outcome identity: the worker job id from the coordinator and
+AppState.requestId/status/detail. Do not invent a second identity.
 
 ==================================================
 12. EXTERNAL CHANGES DURING INTERACTION
@@ -294,6 +362,9 @@ Pending requests time out/fail appropriately.
 
 On reconnect, fresh authoritative observations replace stale state.
 
+A stale observation (observed.stale, Wi-Fi offline, Sonos recovering) stops the
+projection from advancing and is shown as stale, exactly as the current UI marks it.
+
 ==================================================
 14. SCREEN LIFECYCLE
 ==================================================
@@ -305,6 +376,9 @@ Pending accepted Sonos mutations survive screen changes.
 ObservedState is global application state.
 
 ViewModel derivation may be shared while screens choose what subset to render.
+
+A room change clears pending and interaction state along with the observation, through
+the existing selectObservedRoom path.
 
 ==================================================
 15. THREADING
@@ -327,18 +401,19 @@ Do not introduce an elaborate reactive runtime.
 
 Use controlled monotonic time.
 
-Test:
+Phase A (portable, host-only):
 
 PLAYBACK CLOCK
 - playing advances
 - paused does not
 - duration clamps
 - new anchor replaces projection
+- stale observation stops projection
 
-SEEK
+SEEK (model level)
 - drag owns position
 - observed update cannot move active drag
-- release sends exactly one seek
+- release creates exactly one pending seek
 - pending owns after release
 - confirmation clears
 - failure returns to observed
@@ -348,20 +423,31 @@ TRANSPORT
 - confirmation
 - failure
 - contradictory authoritative result eventually wins
+- a late completion for another job id does not clear pending
+- local rejection creates no pending
 
 FIELD INDEPENDENCE
 - seek interaction does not freeze volume
 - volume interaction does not freeze metadata
 - pending shuffle does not freeze transport
 
+STALE/OFFLINE
+- pending timeout (job deadline)
+- stale observation representation
+- reconnect replaces stale state
+
+ROOM CHANGE
+- room change clears pending and interaction
+
+Phase B (device UI model):
+
 SCREEN LIFECYCLE
 - leaving Playground cancels drag
 - pending accepted request survives
 
-STALE/OFFLINE
-- pending timeout
-- stale observation representation
-- reconnect replaces stale state
+UI
+- seek sends exactly one request on release (already true today; keep as regression)
+- volume under an active finger ignores an observed update
 
 ==================================================
 17. PLAYGROUND DIAGNOSTICS
@@ -377,6 +463,10 @@ A small development-only state display may show things such as:
   visible
 
 for the currently exercised field.
+
+Mirror the same values to USB by extending the `ui-state` command from
+todo/0-device-tooling.md (observed/pending/interaction/visible for transport, position,
+and volume, plus the pending job id) so an agent can assert precedence on device.
 
 This is intentionally diagnostic.
 
@@ -400,15 +490,40 @@ Do not redesign its layout.
 
 The goal is to stop maintaining two competing UI state architectures.
 
+Stick may consume the derived transport state for its playback line; it is not required
+in this milestone.
+
 ==================================================
-19. GREEN BASELINE
+19. AUTONOMOUS DEVICE VERIFICATION (PHASE B)
+==================================================
+
+On the identified ws-1.8 port, with the default read-only profile and sleep disabled for
+the session:
+
+1. With the selected room playing and no local interaction, read `ui-state` twice three
+   seconds apart: projected position advanced, observed position unchanged between
+   polls, and no extra Sonos request in the log.
+2. Inject a seek drag (press, moves, hold). Read `ui-state` during the hold and again
+   after an observed poll arrives: interaction owns position while observed still
+   updates. Release: exactly one seek request appears in the log, pending owns the
+   position, and after the job publishes its outcome pending clears.
+3. Inject Play/Pause: `ui-state` shows the pending transport immediately; after the
+   outcome it clears. With read_only true the blocked outcome clears pending and visible
+   returns to observed.
+4. Inject `ui-nav next` mid-drag: interaction cancelled, nothing sent.
+5. Read the heartbeat heap before and after the session.
+
+==================================================
+20. GREEN BASELINE
 ==================================================
 
 Run all canonical checks/builds and preserve editor-green state.
 
 ==================================================
-20. COMPLETION
+21. COMPLETION
 ==================================================
+
+Phase A stops when items 1, 2, 3, 7, 8, 12, and 13 hold with portable tests only.
 
 Stop when:
 
@@ -419,17 +534,19 @@ Stop when:
 5. seek sends once on release
 6. play/pause is optimistic
 7. unrelated fields remain live during interactions
-8. pending state is bounded
+8. pending state is bounded and keyed to the worker job id
 9. screen changes cancel interactions but not accepted mutations
-10. Playground visibly proves the model
+10. Playground visibly proves the model and `ui-state` mirrors it
 11. Now Playing uses the shared model where practical
-12. all tests/builds pass
+12. local rejections create no pending state
+13. all tests/builds pass
 
 Then report:
 
-- final state ownership model
-- pending reconciliation semantics
+- final state ownership model and where each layer lives
+- pending reconciliation semantics and the anchor-skew choice
 - Playground interactions available for testing
+- injected verification results
 - anything that should be physically tested before subscriptions
 
 Do not begin Sonos subscriptions automatically.
