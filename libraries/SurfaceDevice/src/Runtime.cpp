@@ -1,6 +1,7 @@
 #include "SurfaceDevice.h"
 #include "RoomConfig.h"
 #include "ConsoleWrite.h"
+#include "StickPlayback.h"
 #if defined(SURFACE_WAVESHARE_1_8) && !SURFACE_TOUCH_DIAGNOSTIC
 #include "WaveshareArtwork.h"
 #endif
@@ -857,6 +858,19 @@ void loop() {
   case Input::Toggle:
     submitToggle();
     break;
+  case Input::Next:
+    submit(command("next"));
+    break;
+  case Input::StickPrevious: {
+    xSemaphoreTake(stateMutex, portMAX_DELAY);
+    const auto previous =
+        stickPreviousEvent(sharedState, selection.selectedId, WiFi.status() == WL_CONNECTED,
+                           esp_timer_get_time() / 1000);
+    xSemaphoreGive(stateMutex);
+    log(previous.intent.seekPositionMs ? "btnB action=restart-current" : "btnB action=previous");
+    submit("", false, false, true, std::nullopt, &previous);
+    break;
+  }
   case Input::RoomNext:
     handle("room-next");
     break;
@@ -913,7 +927,7 @@ void loop() {
     WiFi.reconnect(); // Covers initial AP absence as well as a later disconnect.
   }
   connected = online;
-  if (online && !busy.load() && millis() - lastRefresh >= 10000) {
+  if (online && !busy.load() && millis() - lastRefresh >= playbackRefreshIntervalMs) {
     lastRefresh = millis();
     submit("", true, false, false);
   }

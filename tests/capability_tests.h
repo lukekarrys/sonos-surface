@@ -1,3 +1,4 @@
+#include "../libraries/SurfaceDevice/src/StickPlayback.h"
 // Shared adapter tests: every mutation here is simulated, never networked.
 struct CapabilityHttp : ControlHttp {
   std::string metadata =
@@ -56,6 +57,64 @@ protected:
 };
 unsigned capabilityTests() {
   unsigned cases = 0;
+  // The Stick's chosen intents retain the normal shared gate, failure path,
+  // and current grouped-room rejection. No button-specific Sonos dispatch.
+  for (unsigned gesture = 1; gesture <= 4; ++gesture) {
+    for (unsigned scenario = 0; scenario < 5; ++scenario) {
+      CapabilityGuard gate;
+      gate.readOnly = scenario == 0;
+      auto& http = gate.fixture;
+      http.track = 2;
+      DirectSonos sonos(gate, {http.id, "52231"});
+      const PolicyContext context{http.id, {}, 1};
+      Application app(sonos, context);
+      assert(app.refresh().ok);
+      auto state = app.state();
+      if (gesture == 4)
+        state.observed.positionMs = 1000;
+      auto event = device::stickPreviousEvent(state, http.id, true, http.clock);
+      if (gesture == 2) {
+        event.intent = {};
+        event.intent.transport = TransportCommand::Next;
+      }
+      if (scenario == 2)
+        http.grouped = true;
+      if (scenario >= 3) {
+        http.failAction = gesture == 1   ? "Play"
+                          : gesture == 2 ? "Next"
+                          : gesture == 3 ? "Seek"
+                                         : "Previous";
+        http.uncertain = scenario == 4;
+      }
+      const auto accepted = resolvePolicy(event.intent, context);
+      auto submit = [&] { return gesture == 1 ? app.submitToggle(context) : app.submit(accepted); };
+      const auto result = submit();
+      assert(result.ok == (scenario == 1));
+      if (scenario == 0) {
+        assert(result.error.find("READ_ONLY_BLOCKED") != std::string::npos);
+        assert(http.writes.empty());
+      } else if (scenario == 2) {
+        assert(http.writes.empty());
+      } else {
+        assert(http.writes.size() == 1);
+        assert(http.writes.front().first == (gesture == 1   ? "Play"
+                                             : gesture == 2 ? "Next"
+                                             : gesture == 3 ? "Seek"
+                                                            : "Previous"));
+        if (scenario == 1 && gesture == 3)
+          assert(http.position == "00:00:00" && http.track == 2);
+        if (scenario == 1 && gesture == 4)
+          assert(http.track == 1);
+        if (scenario == 3)
+          assert(app.state().status == "failed" && !result.uncertain);
+        if (scenario == 4) {
+          assert(result.uncertain && app.state().recoveryRequired);
+          assert(!submit().ok && http.writes.size() == 1);
+        }
+      }
+      ++cases;
+    }
+  }
   for (const auto& example :
        std::vector<std::pair<std::string, uint32_t>>{{"0:00:00", 0},
                                                      {"00:02:05", 125000},

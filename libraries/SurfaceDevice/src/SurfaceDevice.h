@@ -8,12 +8,15 @@ struct RuntimeStatus {
   uint32_t completedJobs, uptimeMs;
 };
 RuntimeStatus runtimeStatus();
+constexpr uint32_t playbackRefreshIntervalMs = 10000;
 enum class Input {
   None,
   RoomNext,
   Play,
   Pause,
   Toggle,
+  Next,
+  StickPrevious,
   Refresh,
   Payload,
   Error,

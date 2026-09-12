@@ -249,8 +249,7 @@ static BoardEvent pollInput() {
   maxButtonGap = std::max<uint32_t>(maxButtonGap, gap);
   lastButtons = now;
   M5.update();
-  if (M5.BtnA.isPressed() || M5.BtnB.isPressed())
-    activity = LocalActivity::Button;
+  activity = stickButtonActivity(M5.BtnA, M5.BtnB);
   // A wake press is consumed by boot, not turned into a refresh/toggle. Wait
   // for release and for the M5 click decision window to expire before actions.
   if (releaseAfterBoot) {
@@ -294,8 +293,13 @@ static BoardEvent pollInput() {
       return {Input::Error, "NFC recovered: tap card"};
   }
   const auto button = stickButtonInput(M5.BtnA, M5.BtnB);
-  if (button != Input::None)
+  if (button != Input::None) {
+    if (button == Input::Toggle)
+      Serial.println("[button] btnB action=play-pause");
+    else if (button == Input::Next)
+      Serial.println("[button] btnB action=next");
     return {button, ""};
+  }
   // Keep sampling an in-progress gesture; resume NFC without resetting its
   // presentation latch once the click count is decided or the hold is released.
   if (stickButtonPending(M5.BtnA, M5.BtnB))
