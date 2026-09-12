@@ -6,16 +6,19 @@ using namespace surface::device;
 using namespace surface::device::sonos_health;
 struct Effects final : SonosEffects {
   std::vector<uint64_t> starts;
-  uint64_t invalidations = 0, reads = 0;
+  uint64_t invalidations = 0, discoveryInvalidations = 0, reads = 0;
   std::string cachedHost, observedRoom = "Office";
   std::vector<std::string> mutations;
   void discoveryRequested(uint64_t id) override {
     assert(starts.empty() || id > starts.back());
     starts.push_back(id);
   }
-  void invalidateAuthority() override {
+  void invalidateAuthority(bool discovery) override {
     ++invalidations;
-    cachedHost.clear();
+    if (discovery) {
+      ++discoveryInvalidations;
+      cachedHost.clear();
+    }
   }
   void reconciliationRequested() override { ++reads; }
   bool mutate(const SonosHealth& health, uint64_t id, const std::string& command) {
@@ -54,7 +57,8 @@ void recoveryAndMutationAuthority() {
   assert(health.snapshot().lastSuccessfulDiscovery == 101012);
   assert(effects.mutate(health, 2, "next"));
   health.process(SessionFailure{101013, 2}); // Uncertain HTTP result: do not replay next.
-  assert(effects.cachedHost.empty() && effects.observedRoom == "Office");
+  assert(effects.cachedHost == "192.0.2.10" && effects.observedRoom == "Office" &&
+         effects.invalidations == 2 && effects.discoveryInvalidations == 1);
   assert(!effects.mutate(health, 2, "next"));
   health.tick(health.snapshot().retryAt);
   s = health.snapshot();
@@ -183,6 +187,7 @@ void chaos(uint64_t seed, uint64_t steps) {
   SonosState expected = SonosState::Offline;
   uint64_t now = 0, id = 0, total = 0, since = 0, deadline = 0, retryAt = 0;
   uint64_t successes = 0, lastSuccess = 0, reads = 0, invalidations = 0, stale = 0;
+  uint64_t discoveryInvalidations = 0;
   uint32_t attempts = 0, sessionFailures = 0;
   bool recovering = false;
   for (uint64_t step = 0; step < steps; ++step) {
@@ -222,6 +227,7 @@ void chaos(uint64_t seed, uint64_t steps) {
         health.process(Shutdown{now});
       if (expected != SonosState::Offline) {
         ++invalidations;
+        ++discoveryInvalidations;
         since = now;
       }
       expected = SonosState::Offline;
@@ -311,6 +317,8 @@ void chaos(uint64_t seed, uint64_t steps) {
       retryAt = now + delay;
       recovering = true;
       ++invalidations;
+      if (choice != 5)
+        ++discoveryInvalidations;
     }
     if (begin) {
       expected = SonosState::Discovering;
@@ -330,8 +338,9 @@ void chaos(uint64_t seed, uint64_t steps) {
                     s.consecutiveSessionFailures == sessionFailures,
                 "independent reference model", describe(s));
     trace.check(effects.starts.size() == total && effects.reads == reads &&
-                    effects.invalidations == invalidations && effects.mutations.empty() &&
-                    effects.observedRoom == "Office",
+                    effects.invalidations == invalidations &&
+                    effects.discoveryInvalidations == discoveryInvalidations &&
+                    effects.mutations.empty() && effects.observedRoom == "Office",
                 "recovery effects retain observations and never replay mutations", describe(s));
     trace.check(health.usable(id) == (expected == SonosState::Ready) && !health.usable(total + 1),
                 "mutation authority requires current discovery and network", describe(s));

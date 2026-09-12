@@ -145,6 +145,7 @@ public:
   std::string host;
   uint64_t jobId = 0;
   uint64_t discoveryId = 0;
+  bool transportFailed = false;
   EspHttp() { readOnly = config.readOnly; }
   std::string baseUrl() const override { return "http://" + host + ":1400"; }
 
@@ -197,6 +198,9 @@ protected:
       status = http.POST(String(body.c_str()));
     }
     HttpResponse result;
+    // HTTPClient uses negative transport errors; an answered HTTP/SOAP fault
+    // still proves reachability, even if its body cannot be consumed.
+    transportFailed = transportFailed || status <= 0;
     result.status = status;
     if (status > 0) {
       // Sonos replies are small; cap even chunked responses before allocating a body.
@@ -531,6 +535,7 @@ void worker(void*) {
         session = std::make_unique<Session>(target);
       jobSession = session.get();
       session->http.jobId = job->id;
+      session->http.transportFailed = false;
       session->http.discoveryId = job->discoveryId;
       session->http.host = target.address;
       session->http.targetAllowed = target.eligible;
@@ -587,8 +592,9 @@ void worker(void*) {
     }
     // Decide terminal acceptance under the same lock as deadline processing.
     // Cleanup occurs on this task before any newer job can reuse its Session.
-    if (!finishJob(job->id, {targetUsable, discovered.ok, queueFailed, false}) && jobSession &&
-        retained)
+    if (!finishJob(job->id, {targetUsable, discovered.ok, queueFailed, false,
+                             jobSession && jobSession->http.transportFailed}) &&
+        jobSession && retained)
       jobSession->app.discardCancelledResult(*retained, !job->refresh);
     delete job;
   }

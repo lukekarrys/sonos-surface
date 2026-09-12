@@ -41,6 +41,9 @@ public:
     bool sessionOk = false;
     bool queueFailed = false; // Optional queue data never decides job health.
     bool unavailable = false;
+    // Recorded at HTTP dispatch, including identity GETs hidden by notSent
+    // mutation rejections. Answered faults are ordinary job failures.
+    bool transportFailed = false;
   };
   struct WifiPending {
     bool connect = false, disconnect = false;
@@ -84,10 +87,12 @@ private:
   } wifiFacts_;
   struct SonosFacts final : SonosEffects {
     bool discoveryPending = false, discardHost = false;
-    bool invalidated = false, reconcile = false;
+    bool invalidated = false, discoveryInvalidated = false, reconcile = false;
     void discoveryRequested(uint64_t) override { discoveryPending = true; }
-    void invalidateAuthority() override {
-      discardHost = invalidated = true;
+    void invalidateAuthority(bool discovery) override {
+      invalidated = true;
+      if (discovery)
+        discardHost = discoveryInvalidated = true;
       discoveryPending = false;
     }
     void reconciliationRequested() override { reconcile = true; }
@@ -111,6 +116,7 @@ private:
   uint64_t workerDiscoveryId_ = 0;
   uint64_t nextAutomaticJobAt_ = 0, lastAutomaticJobAt_ = 0;
   std::vector<std::string> transitions_;
+  std::optional<std::string> routineDiscoveryLog_;
   std::optional<std::string> notice_;
 
   void logWifi(const WifiSnapshot& before) {
@@ -123,11 +129,26 @@ private:
   }
   void logSonos(const SonosSnapshot& before) {
     const auto after = sonos_.snapshot();
-    if (before.state != after.state)
-      transitions_.push_back(std::string("sonos ") + sonosStateName(before.state) + " -> " +
-                             sonosStateName(after.state) +
-                             " generation=" + std::to_string(after.discoveryId) +
-                             " reason=" + sonosErrorName(after.lastError));
+    if (before.state == after.state)
+      return;
+    auto line = std::string("sonos ") + sonosStateName(before.state) + " -> " +
+                sonosStateName(after.state) + " generation=" + std::to_string(after.discoveryId) +
+                " reason=" + sonosErrorName(after.lastError);
+    // Defer a routine refresh's start until its result is known. Successful
+    // polls stay quiet; failed polls retain both transitions for diagnosis.
+    if (before.state == SonosState::Ready && after.state == SonosState::Discovering &&
+        !after.recovering) {
+      routineDiscoveryLog_ = std::move(line);
+      return;
+    }
+    if (routineDiscoveryLog_) {
+      auto pending = std::exchange(routineDiscoveryLog_, std::nullopt);
+      if (before.state == SonosState::Discovering && !before.recovering &&
+          after.state == SonosState::Ready && after.lastError == SonosError::None)
+        return;
+      transitions_.push_back(std::move(*pending));
+    }
+    transitions_.push_back(std::move(line));
   }
   void logSubscription(const SubscriptionSnapshot& before) {
     const auto after = subscription_.snapshot();
@@ -167,8 +188,10 @@ private:
       display_.observed.stale = true;
       display_.queue.reset();
       display_.refreshError = "Sonos unavailable; recovering";
-      subscriptionEvent(subscription_lifecycle::NetworkUnavailable{now});
-      subscriptionFacts_.pending.reset();
+      if (std::exchange(sonosFacts_.discoveryInvalidated, false)) {
+        subscriptionEvent(subscription_lifecycle::NetworkUnavailable{now});
+        subscriptionFacts_.pending.reset();
+      }
     }
     if (sonosFacts_.reconcile || subscriptionFacts_.reconcile) {
       reconciliationPending_ = true;
@@ -387,7 +410,8 @@ public:
           sonos_.snapshot().state == SonosState::Discovering) {
         sonosEvent(sonos_health::DiscoveryFailed{now, workerDiscoveryId_});
         applyFacts(now);
-      } else if (!input.unavailable && input.targetUsable && !input.sessionOk) {
+      } else if (!input.unavailable && input.targetUsable && !input.sessionOk &&
+                 input.transportFailed) {
         sonosEvent(sonos_health::SessionFailure{now, workerDiscoveryId_});
         applyFacts(now);
       } else if (!input.unavailable && input.targetUsable && input.sessionOk) {

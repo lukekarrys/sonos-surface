@@ -17,6 +17,7 @@ struct FaultHttp : GuardedHttp {
   RuntimeFixture& runtime;
   uint64_t jobId = 0, discoveryId = 0, reads = 0, mutations = 0;
   std::string address, identity = "RINCON_A";
+  bool transportFailed = false, failIdentity = false, answeredReadFault = false;
   bool failRead = false, failQueue = false, explicitFailure = false, loseResponse = false;
   std::map<uint64_t, unsigned> writes;
   explicit FaultHttp(RuntimeFixture& value) : runtime(value) {
@@ -83,9 +84,11 @@ struct FaultTransport : SonosTransport {
 struct RuntimeFixture {
   LifecycleTrace trace;
   uint64_t now = 0, connectCalls = 0, disconnectCalls = 0, accepted = 0;
-  uint64_t automaticReads = 0, hostDiscards = 0, livenessWindows = 0;
+  uint64_t automaticReads = 0, hostDiscards = 0, ssdpSweeps = 0, livenessWindows = 0;
+  std::vector<std::string> discoveryProbes;
   bool stopping = false, observedOnline = false;
   std::string selectedId = "RINCON_A", learnedAddress, nextAddress = "192.168.1.2";
+  std::string currentSid;
   std::set<uint64_t> attempted;
   std::deque<SubscriptionRequest> subscriptionRequests;
   AppState display;
@@ -132,6 +135,8 @@ struct RuntimeFixture {
     }
     for (const auto& transition : coordinator.drainTransitions())
       trace.record(transition);
+    if (!events().sidPresent)
+      currentSid.clear();
   }
   void tick(uint64_t elapsed = 0) {
     now += elapsed;
@@ -139,6 +144,7 @@ struct RuntimeFixture {
     coordinator.service(now);
     consumePlatform();
   }
+  void tickUntil(uint64_t at) { tick(at > now ? at - now : 0); }
   void configure() {
     stopping = false;
     coordinator.configAvailable(now);
@@ -171,6 +177,7 @@ struct RuntimeFixture {
   void pickup(uint64_t id) {
     const auto binding = coordinator.bindDiscovery(now, id);
     http.jobId = id;
+    http.transportFailed = false;
     http.discoveryId = binding.discoveryId;
     if (binding.discardHost) {
       ++hostDiscards;
@@ -186,6 +193,12 @@ struct RuntimeFixture {
     return id;
   }
   void discovery(bool succeeds) {
+    if (!learnedAddress.empty())
+      discoveryProbes.push_back(learnedAddress);
+    if (learnedAddress.empty() || !succeeds) {
+      ++ssdpSweeps;
+      discoveryProbes.push_back("SSDP");
+    }
     if (coordinator.discoveryResult(now, http.jobId, http.discoveryId, succeeds, nextAddress)) {
       learnedAddress = nextAddress;
       http.address = learnedAddress;
@@ -193,7 +206,7 @@ struct RuntimeFixture {
     consumePlatform();
   }
   void finish(uint64_t id, bool success) {
-    coordinator.finishJob(now, id, {true, success, false, false});
+    coordinator.finishJob(now, id, {true, success, false, false, http.transportFailed});
     consumePlatform();
   }
   bool publish(uint64_t id, const AppState& state) {
@@ -220,9 +233,15 @@ struct RuntimeFixture {
     check(reconcile().ok, "startup authoritative read");
     finish(id, true);
   }
-  void subscriptionResult(bool ok, const std::string& sid = "sid-1", uint64_t lease = 1000) {
-    coordinator.subscriptionResult(now, events().requestId, ok, sid, lease);
+  void subscriptionResponse(uint64_t id, bool ok, const std::string& sid, uint64_t lease) {
+    const bool active = coordinator.subscriptionActive(id, now, stopping);
+    coordinator.subscriptionResult(now, id, ok, sid, lease);
+    if (active && ok && events().state == SubscriptionState::Healthy)
+      currentSid = sid;
     consumePlatform();
+  }
+  void subscriptionResult(bool ok, const std::string& sid = "sid-1", uint64_t lease = 1000) {
+    subscriptionResponse(events().requestId, ok, sid, lease);
   }
   bool automaticDue() { return coordinator.automaticJobDue(now, true, stopping); }
   void faultFreeWindow() {
@@ -249,7 +268,8 @@ struct RuntimeFixture {
         const auto request = subscriptionRequests.front();
         subscriptionRequests.pop_front();
         if (coordinator.subscriptionActive(request.id, now, stopping))
-          coordinator.subscriptionResult(now, request.id, true, "sid-recovered", 300000);
+          subscriptionResponse(request.id, true, request.renewal ? request.sid : "sid-recovered",
+                               300000);
       }
       // An old hung job is left to its real coordinator deadline. Only jobs
       // emitted by the production automatic predicate receive successful fake
@@ -301,15 +321,22 @@ HttpResponse FaultHttp::dispatch(const std::string&, const std::string& action,
     runtime.check(runtime.usable(discoveryId), "mutation requires current usable topology");
     ++mutations;
     runtime.check(++writes[jobId] == 1, "no duplicate mutation dispatch for same job");
-    if (loseResponse)
+    if (loseResponse) {
+      transportFailed = true;
       return {0, "", "mutation response timed out"};
+    }
     if (explicitFailure)
       return {500, "<errorCode>701</errorCode>", "explicit speaker failure"};
     return {200, "<NextResponse/>", ""};
   }
   ++reads;
-  if (failRead || (failQueue && action.find("#Browse") != std::string::npos))
-    return {0, "", "read failed", true};
+  if (failRead || (failIdentity && action.empty()) ||
+      (failQueue && action.find("#Browse") != std::string::npos)) {
+    transportFailed = true;
+    return {0, "", "read transport failed"};
+  }
+  if (answeredReadFault)
+    return {500, "", "read rejected"};
   if (action.empty())
     return {200,
             "<root><device><deviceType>urn:schemas-upnp-org:device:ZonePlayer:1</deviceType>"
@@ -347,7 +374,7 @@ void scenarios() {
     for (unsigned attempt = 0; attempt < 4; ++attempt) {
       f.tick(wifi::ConnectBudgetMs);
       f.check(f.network().state == WifiState::Backoff, "connection cannot hang forever");
-      f.tick(f.network().retryAt - f.now);
+      f.tickUntil(f.network().retryAt);
     }
     f.tick(500);
     f.connect();
@@ -357,7 +384,7 @@ void scenarios() {
     f.discovery(false);
     f.finish(id, false);
     f.check(f.health().state == SonosState::Backoff, "empty SSDP schedules retry");
-    f.tick(f.health().retryAt - f.now);
+    f.tickUntil(f.health().retryAt);
     id = f.beginJob();
     f.discovery(true);
     f.check(f.reconcile().ok, "SSDP recovery reads authoritative state");
@@ -367,7 +394,7 @@ void scenarios() {
     f.check(f.display.observed.title == observation.title && f.display.observed.stale &&
                 f.coordinator.snapshots().discardHost,
             "outage retains visible observations and discards address authority");
-    f.tick(f.network().retryAt - f.now);
+    f.tickUntil(f.network().retryAt);
     f.connect();
     f.nextAddress = "192.168.1.99";
     id = f.beginJob();
@@ -380,6 +407,9 @@ void scenarios() {
   for (bool uncertain : {false, true}) {
     RuntimeFixture f(2 + uncertain);
     f.ready();
+    f.subscriptionResult(true, "sid-fault", 300000);
+    const auto discards = f.hostDiscards;
+    const auto lease = f.events().leaseUntil;
     auto id = f.beginJob();
     f.discovery(true);
     f.http.explicitFailure = !uncertain;
@@ -388,16 +418,26 @@ void scenarios() {
     f.check(!result.ok && result.uncertain == uncertain && f.http.writes[id] == 1,
             "explicit failure and lost mutation response stay distinct");
     f.finish(id, false);
+    f.check(f.jobs().lastOutcome == JobOutcome::Failure, "rejected command is a failed job");
+    if (uncertain)
+      f.check(f.health().state == SonosState::Backoff && f.health().retryAt > f.now,
+              "lost response enters transport recovery");
+    else
+      f.check(f.health().state == SonosState::Ready && f.health().retryAt == 0 &&
+                  !f.coordinator.snapshots().discardHost && f.hostDiscards == discards &&
+                  f.events().state == SubscriptionState::Healthy &&
+                  f.events().leaseUntil == lease && f.coordinator.admission(f.now, false).allowed,
+              "answered fault preserves Ready, host, lease, and immediate job admission");
     const auto failedId = id;
     const auto requestId = f.app.state().requestId;
-    f.tick(f.health().retryAt - f.now);
+    f.tickUntil(f.health().retryAt);
     id = f.beginJob();
     f.discovery(true);
     f.http.failRead = true;
     f.check(!f.reconcile().ok && f.app.state().recoveryRequired == uncertain,
             "failed reconciliation preserves uncertainty");
     f.finish(id, false);
-    f.tick(f.health().retryAt - f.now);
+    f.tickUntil(f.health().retryAt);
     f.http.failRead = f.http.explicitFailure = f.http.loseResponse = false;
     id = f.beginJob();
     f.discovery(true);
@@ -433,7 +473,7 @@ void scenarios() {
     const auto cancellationDetail = f.app.state().detail;
     f.finish(id, true);
     f.transport.verificationDelay = 0;
-    f.tick(f.health().retryAt - f.now);
+    f.tickUntil(f.health().retryAt);
     id = f.beginJob();
     f.discovery(true);
     f.http.failRead = true;
@@ -442,7 +482,7 @@ void scenarios() {
             "failed recovery cannot resurrect expired session success");
     f.finish(id, false);
     f.http.failRead = false;
-    f.tick(f.health().retryAt - f.now);
+    f.tickUntil(f.health().retryAt);
     id = f.beginJob();
     f.discovery(true);
     f.check(f.reconcile().ok && f.display.status == "uncertain" &&
@@ -466,7 +506,7 @@ void scenarios() {
     f.tick(f.jobs().deadline - f.now);
     f.check(!f.jobs().running && f.display.observed.stale,
             "deadline releases worker and stales observation");
-    f.tick(f.health().retryAt - f.now);
+    f.tickUntil(f.health().retryAt);
     const auto b = f.beginJob();
     f.discovery(true);
     AppState late = f.app.state();
@@ -525,7 +565,7 @@ void scenarios() {
                 !f.app.state().observed.stale,
             "queue read failure retains authoritative basic playback");
     f.finish(id, true);
-    f.tick(f.events().retryAt - f.now);
+    f.tickUntil(f.events().retryAt);
     request = f.events().requestId;
     f.coordinator.subscriptionResult(f.now, request, true, "sid-1", 1000);
     f.tick(800);
@@ -539,6 +579,76 @@ void scenarios() {
     f.discovery(true);
     f.check(f.reconcile().ok, "polling survives renewal failure");
     f.finish(id, true);
+    f.invariants();
+  }
+}
+
+void targetTransportFailureRetainsTopologyAuthority() {
+  RuntimeFixture f(180);
+  f.ready();
+  f.subscriptionResult(true, "sid-topology-host", 300000);
+  const auto host = f.learnedAddress;
+  const auto discards = f.hostDiscards;
+  const auto sweeps = f.ssdpSweeps;
+  const auto subscription = f.events();
+  auto id = f.beginJob();
+  f.discovery(true);
+  f.http.address = "192.168.1.50"; // Target differs from the topology publisher.
+  f.http.failRead = true;
+  f.check(!f.reconcile().ok && f.http.transportFailed, "target read fails at transport dispatch");
+  f.finish(id, false);
+  f.check(f.health().state == SonosState::Backoff && f.display.observed.stale &&
+              !f.coordinator.dispatchAllowed(id, f.http.discoveryId, f.now, false, true),
+          "target outage stales observation and blocks mutations during backoff");
+  f.check(!f.coordinator.snapshots().discardHost && f.hostDiscards == discards &&
+              f.learnedAddress == host && f.events().state == SubscriptionState::Healthy &&
+              f.events().leaseUntil == subscription.leaseUntil &&
+              f.events().totalRequests == subscription.totalRequests,
+          "session failure retains cached topology host and healthy subscription lease");
+  f.tickUntil(f.health().retryAt);
+  f.check(f.health().state == SonosState::Discovering &&
+              f.events().state == SubscriptionState::Healthy && f.automaticDue(),
+          "target transport retry discovers automatically while subscription remains healthy");
+  id = f.beginJob();
+  f.discoveryProbes.clear();
+  f.discovery(true);
+  f.check(f.discoveryProbes == std::vector<std::string>{host} && f.ssdpSweeps == sweeps &&
+              f.hostDiscards == discards,
+          "retry probes cached topology host before considering SSDP");
+  f.http.failRead = false;
+  f.check(f.reconcile().ok, "target recovery reconciles without replay");
+  f.finish(id, true);
+  // If the retained host later fails too, normal discovery failure discards it.
+  id = f.beginJob();
+  f.discovery(false);
+  f.finish(id, false);
+  f.check(f.coordinator.snapshots().discardHost && f.events().state == SubscriptionState::Inactive,
+          "discovery failure still revokes host and subscription authority");
+  f.invariants();
+}
+
+void dispatchFailuresDecideSessionHealth() {
+  for (unsigned fault = 0; fault < 4; ++fault) {
+    RuntimeFixture f(170 + fault);
+    f.ready();
+    f.subscriptionResult(true, "sid-identity", 300000);
+    const auto id = f.beginJob(false);
+    f.discovery(true);
+    f.http.failIdentity = fault == 0;
+    f.http.identity = fault == 1 ? "RINCON_OTHER" : "RINCON_A";
+    f.http.answeredReadFault = fault >= 2;
+    const auto response = fault == 3
+                              ? f.http.request("/read", "urn:AVTransport#GetTransportInfo", "")
+                              : f.http.request("/control", "urn:AVTransport#Next", "");
+    f.check(fault == 3 ? response.status == 500 : response.notSent,
+            "identity rejection blocks the mutation; explicit read fault answers");
+    f.check(f.http.transportFailed == (fault == 0),
+            "dispatch retains identity transport failure behind final notSent rejection");
+    f.finish(id, false);
+    f.check(f.jobs().lastOutcome == JobOutcome::Failure &&
+                f.health().state == (fault == 0 ? SonosState::Backoff : SonosState::Ready) &&
+                (fault == 0 ? f.health().retryAt > f.now : f.health().retryAt == 0),
+            "only transport failure changes usable-target session health");
     f.invariants();
   }
 }
@@ -801,7 +911,7 @@ void optionalQueueFailureIsLifecycleSuccess() {
   f.http.failQueue = true;
   f.check(!f.app.queue(0, 4).ok && !f.display.queueError.empty(),
           "optional queue error is published separately");
-  f.coordinator.finishJob(f.now, id, {true, true, true, false});
+  f.coordinator.finishJob(f.now, id, {true, true, true, false, f.http.transportFailed});
   const auto reads = f.http.reads;
   f.tick(RuntimeCoordinator::AutomaticRateLimitMs);
   f.check(f.jobs().lastOutcome == JobOutcome::Success && f.health().state == SonosState::Ready &&
@@ -902,12 +1012,182 @@ void sharedTicksLogBootAndRecoveryTransitions() {
   f.invariants();
 }
 
+void routineDiscoveryLogging() {
+  RuntimeFixture f(161);
+  const auto contains = [](const std::vector<std::string>& messages, const std::string& prefix) {
+    return std::any_of(messages.begin(), messages.end(),
+                       [&](const std::string& message) { return message.find(prefix) == 0; });
+  };
+  f.configure();
+  f.observedOnline = true;
+  f.coordinator.serviceWifi(f.now, true);
+  f.check(contains(f.coordinator.drainTransitions(), "sonos Offline -> Discovering"),
+          "boot recovery discovery is logged");
+  auto id = f.queueJob();
+  auto binding = f.coordinator.bindDiscovery(f.now, id);
+  f.coordinator.discoveryResult(f.now, id, binding.discoveryId, true, f.nextAddress);
+  f.check(contains(f.coordinator.drainTransitions(), "sonos Discovering -> Ready"),
+          "boot recovery completion is logged");
+  f.finish(id, true);
+
+  id = f.queueJob();
+  binding = f.coordinator.bindDiscovery(f.now, id);
+  f.check(!contains(f.coordinator.drainTransitions(), "sonos "),
+          "routine discovery start waits for its result before logging");
+  f.coordinator.discoveryResult(f.now, id, binding.discoveryId, true, f.nextAddress);
+  f.check(!contains(f.coordinator.drainTransitions(), "sonos "),
+          "successful routine refresh suppresses both Sonos transition lines");
+  f.finish(id, true);
+
+  id = f.queueJob();
+  binding = f.coordinator.bindDiscovery(f.now, id);
+  f.coordinator.discoveryResult(f.now, id, binding.discoveryId, false, "");
+  const auto failure = f.coordinator.drainTransitions();
+  f.check(contains(failure, "sonos Ready -> Discovering") &&
+              contains(failure, "sonos Discovering -> Backoff"),
+          "failed routine refresh logs its deferred start and recovery transition");
+  f.finish(id, false);
+  f.now = f.health().retryAt;
+  f.coordinator.service(f.now);
+  f.check(contains(f.coordinator.drainTransitions(), "sonos Backoff -> Discovering"),
+          "recovery retry discovery remains logged");
+  id = f.queueJob();
+  binding = f.coordinator.bindDiscovery(f.now, id);
+  f.coordinator.discoveryResult(f.now, id, binding.discoveryId, true, f.nextAddress);
+  f.check(contains(f.coordinator.drainTransitions(), "sonos Discovering -> Ready"),
+          "recovery retry completion remains logged");
+  f.finish(id, true);
+  f.invariants();
+}
+
+struct RuntimeChaosCoverage {
+  uint64_t queued = 0, pickups = 0, queuedTimeouts = 0, queuedRejections = 0;
+  uint64_t validNotifies = 0, notifyJobs = 0, automaticSamples = 0, automaticJobs = 0;
+  uint64_t missingTargets = 0, answeredFaults = 0;
+};
+
+bool queuedJobWaiting(const RuntimeFixture& f) {
+  const auto job = f.jobs();
+  return job.running && job.jobId != f.http.jobId;
+}
+
+void pickupQueuedChaosJob(RuntimeFixture& f, RuntimeChaosCoverage& coverage) {
+  if (!queuedJobWaiting(f))
+    return;
+  const auto id = f.jobs().jobId;
+  const auto before = f.coordinator.snapshots();
+  f.pickup(id);
+  ++coverage.pickups;
+  if (before.sonos.state == SonosState::Backoff) {
+    f.check(f.http.discoveryId == 0 && f.health().state == SonosState::Backoff &&
+                f.health().retryAt == before.sonos.retryAt,
+            "queued pickup rejects lost discovery authority without bypassing backoff");
+    f.check(f.coordinator.drainNotice().has_value(), "queued backoff rejection reports recovery");
+    f.coordinator.finishJob(f.now, id, {});
+    f.check(f.jobs().lastJobId == id && f.jobs().lastOutcome == JobOutcome::Failure &&
+                f.health().retryAt == before.sonos.retryAt &&
+                f.coordinator.snapshots().reconciliationPending == before.reconciliationPending,
+            "queued rejection terminates once without an extra reconciliation or retry");
+    ++coverage.queuedRejections;
+  }
+}
+
+bool expireQueuedChaosDiscovery(RuntimeFixture& f, RuntimeChaosCoverage& coverage) {
+  const auto health = f.health();
+  if (!queuedJobWaiting(f) || health.state != SonosState::Discovering ||
+      health.deadline >= f.jobs().deadline)
+    return false;
+  const auto id = f.jobs().jobId;
+  f.tickUntil(health.deadline);
+  f.check(f.jobs().running && f.jobs().jobId == id && f.health().state == SonosState::Backoff,
+          "discovery may time out while an admitted job still waits for pickup");
+  ++coverage.queuedTimeouts;
+  return true;
+}
+
+void sampleChaosAutomaticJob(RuntimeFixture& f, RuntimeChaosCoverage& coverage) {
+  const auto before = f.coordinator.snapshots();
+  const bool discover = before.sonos.state == SonosState::Discovering && before.discoveryPending;
+  const bool expected =
+      !f.stopping && before.wifi.networkReady && !before.worker.running &&
+      f.now >= before.nextAutomaticJobAt &&
+      (discover || (before.sonos.state == SonosState::Ready &&
+                    (before.reconciliationPending ||
+                     f.now - before.lastAutomaticJobAt >= RuntimeCoordinator::PollIntervalMs)));
+  const bool due = f.automaticDue();
+  ++coverage.automaticSamples;
+  f.check(due == expected, "ordinary chaos samples automatic scheduling against current authority");
+  if (!due)
+    return;
+  const auto id = f.queueJob();
+  f.check(id && queuedJobWaiting(f) && !f.coordinator.snapshots().reconciliationPending,
+          "ordinary chaos automatic scheduling admits a fresh job awaiting separate pickup");
+  ++coverage.automaticJobs;
+  ++coverage.queued;
+}
+
+void currentNotifySchedulesChaosRead(RuntimeFixture& f, RuntimeChaosCoverage& coverage) {
+  if (f.currentSid.empty())
+    return;
+  const auto notifications = f.events().notifications;
+  f.check(f.coordinator.notify(f.now, f.currentSid, f.stopping) &&
+              f.events().notifications == notifications + 1 &&
+              f.coordinator.snapshots().reconciliationPending,
+          "current SID NOTIFY requests authoritative reconciliation during chaos");
+  ++coverage.validNotifies;
+  if (f.jobs().running || f.health().state != SonosState::Ready)
+    return;
+  const auto notifiedAt = f.now;
+  bool due = f.automaticDue();
+  if (!due) {
+    const auto next = f.coordinator.snapshots().nextAutomaticJobAt;
+    f.check(next > f.now && next <= notifiedAt + RuntimeCoordinator::AutomaticRateLimitMs,
+            "Ready idle NOTIFY waits only for the automatic rate limit");
+    f.tickUntil(next);
+    due = f.automaticDue();
+  }
+  f.check(due && f.now <= notifiedAt + RuntimeCoordinator::AutomaticRateLimitMs,
+          "Ready idle NOTIFY causes automatic work within the rate limit");
+  const auto id = f.queueJob();
+  f.check(id && queuedJobWaiting(f) && !f.coordinator.snapshots().reconciliationPending,
+          "NOTIFY reconciliation admits an automatic read without user input");
+  ++coverage.notifyJobs;
+  ++coverage.queued;
+}
+
+void finishMissingTargetInChaos(RuntimeFixture& f, RuntimeChaosCoverage& coverage) {
+  const auto job = f.jobs();
+  if (!job.running || job.jobId != f.http.jobId || !f.usable(f.http.discoveryId))
+    return;
+  const auto before = f.coordinator.snapshots();
+  const auto discards = f.hostDiscards;
+  f.check(f.coordinator.finishJob(f.now, job.jobId, {false, false, false, false, false}),
+          "missing target completion belongs to the active job");
+  const auto after = f.coordinator.snapshots();
+  f.check(
+      after.worker.lastOutcome == JobOutcome::Failure && after.sonos.state == before.sonos.state &&
+          after.sonos.retryAt == before.sonos.retryAt && after.discardHost == before.discardHost &&
+          f.hostDiscards == discards && after.subscription.state == before.subscription.state &&
+          after.subscription.leaseUntil == before.subscription.leaseUntil &&
+          after.reconciliationPending == before.reconciliationPending,
+      "missing target in chaos preserves health, host, subscription, and polling cadence");
+  ++coverage.missingTargets;
+}
+
 void chaos(uint64_t seed, uint64_t steps) {
   RuntimeFixture f(seed);
+  RuntimeChaosCoverage coverage;
+  bool pickUpExpiredDiscovery = false;
   f.ready();
   for (uint64_t step = 0; step < steps; ++step) {
     f.tick(f.trace.random() % 250);
-    const auto event = f.trace.random() % 19;
+    auto event = f.trace.random() % 24;
+    // The deadline and pickup remain separate steps. Resolve a queued timeout
+    // before its one-second retry can hide the rejection under test.
+    if (pickUpExpiredDiscovery) {
+      event = 4;
+      pickUpExpiredDiscovery = false;
+    }
     const auto before = f.jobs();
     const auto generation = f.health().discoveryId;
     f.trace.record("event=" + std::to_string(event) + " job=" + std::to_string(before.jobId) +
@@ -922,16 +1202,24 @@ void chaos(uint64_t seed, uint64_t steps) {
     case 2:
       f.drop();
       break;
-    case 3:
+    case 3: {
+      const auto id = f.queueJob(f.trace.random() % 2);
+      if (id) {
+        f.check(queuedJobWaiting(f), "chaos enqueue leaves the accepted job awaiting pickup");
+        ++coverage.queued;
+      }
+      break;
+    }
     case 4:
-      f.beginJob();
+      pickupQueuedChaosJob(f, coverage);
       break;
     case 5:
     case 6:
       f.discovery(event == 5);
       break;
     case 7:
-      if (before.running && f.usable(f.http.discoveryId) && !f.attempted.count(before.jobId)) {
+      if (before.running && before.jobId == f.http.jobId && f.usable(f.http.discoveryId) &&
+          !f.attempted.count(before.jobId)) {
         f.http.loseResponse = f.trace.random() % 3 == 0;
         f.http.explicitFailure = f.trace.random() % 3 == 0;
         f.command();
@@ -939,14 +1227,15 @@ void chaos(uint64_t seed, uint64_t steps) {
       }
       break;
     case 8:
-      if (before.running) {
+      if (before.running && before.jobId == f.http.jobId) {
         f.http.failRead = f.trace.random() % 3 == 0;
         f.reconcile();
         f.http.failRead = false;
       }
       break;
     case 9:
-      f.finish(before.jobId, f.trace.random() % 2);
+      if (before.running && before.jobId == f.http.jobId)
+        f.finish(before.jobId, f.trace.random() % 2);
       break;
     case 10: {
       const auto stale = before.jobId ? before.jobId - 1 : f.accepted;
@@ -958,8 +1247,8 @@ void chaos(uint64_t seed, uint64_t steps) {
       break;
     }
     case 11: {
-      const auto sub = f.events();
-      f.coordinator.subscriptionResult(f.now, sub.requestId, true, "sid-chaos", 1500);
+      const auto sid = f.currentSid.empty() ? "sid-chaos" : f.currentSid;
+      f.subscriptionResult(true, sid, 1500);
       break;
     }
     case 12:
@@ -978,7 +1267,7 @@ void chaos(uint64_t seed, uint64_t steps) {
       f.shutdown();
       break;
     case 16:
-      if (before.running) {
+      if (before.running && before.jobId == f.http.jobId) {
         f.http.failQueue = true;
         const auto observed = f.app.state().observed;
         f.check(!f.app.queue(0, 4).ok && f.app.state().observed.title == observed.title,
@@ -990,7 +1279,29 @@ void chaos(uint64_t seed, uint64_t steps) {
       f.coordinator.finishJob(f.now, before.jobId, {false, false, false, true});
       break;
     case 18:
-      f.finish(before.jobId, false);
+      if (before.running && before.jobId == f.http.jobId)
+        f.finish(before.jobId, false);
+      break;
+    case 19:
+      if (before.running && before.jobId == f.http.jobId && f.usable(f.http.discoveryId)) {
+        const auto health = f.health();
+        f.coordinator.finishJob(f.now, before.jobId, {true, false, false, false, false});
+        f.check(f.health().state == health.state && f.health().retryAt == health.retryAt,
+                "speaker answered with a fault leaves Sonos state and retry unchanged");
+        ++coverage.answeredFaults;
+      }
+      break;
+    case 20:
+      currentNotifySchedulesChaosRead(f, coverage);
+      break;
+    case 21:
+      pickUpExpiredDiscovery = expireQueuedChaosDiscovery(f, coverage);
+      break;
+    case 22:
+      sampleChaosAutomaticJob(f, coverage);
+      break;
+    case 23:
+      finishMissingTargetInChaos(f, coverage);
       break;
     }
     f.consumePlatform();
@@ -1010,13 +1321,29 @@ void chaos(uint64_t seed, uint64_t steps) {
   }
   f.tick(sonos::DiscoveryBudgetMs + wifi::ConnectBudgetMs);
   f.check(!f.jobs().running, "final running work always reaches deadline");
+  if (steps >= 100000)
+    f.check(coverage.queued && coverage.pickups && coverage.queuedTimeouts &&
+                coverage.queuedRejections && coverage.validNotifies && coverage.notifyJobs &&
+                coverage.automaticSamples && coverage.automaticJobs && coverage.missingTargets &&
+                coverage.answeredFaults,
+            "ordinary and stress chaos runs exercise every composed fault event");
   std::cout << "runtime faults: composed scenarios + " << steps << " events seed=" << seed
             << " mutations=" << f.http.mutations << " reads=" << f.http.reads
             << " connections=" << f.network().connections
-            << " liveness-windows=" << f.livenessWindows << '\n';
+            << " liveness-windows=" << f.livenessWindows << " queued=" << coverage.queued
+            << " pickups=" << coverage.pickups << " queued-timeouts=" << coverage.queuedTimeouts
+            << " queued-rejections=" << coverage.queuedRejections
+            << " valid-notifies=" << coverage.validNotifies
+            << " notify-jobs=" << coverage.notifyJobs
+            << " automatic-samples=" << coverage.automaticSamples
+            << " automatic-jobs=" << coverage.automaticJobs
+            << " missing-targets=" << coverage.missingTargets
+            << " answered-faults=" << coverage.answeredFaults << '\n';
 }
 int main(int argc, char** argv) {
   scenarios();
+  targetTransportFailureRetainsTopologyAuthority();
+  dispatchFailuresDecideSessionHealth();
   unavailableTargetsKeepNormalPolling();
   busyWinsOverDiscoveryRecovery();
   recoveryRejectsWithoutClearingRoom();
@@ -1026,6 +1353,7 @@ int main(int argc, char** argv) {
   optionalQueueFailureIsLifecycleSuccess();
   publicDecisionsHonorDeadlinesBeforeTimerService();
   sharedTicksLogBootAndRecoveryTransitions();
+  routineDiscoveryLogging();
   chaos(argc > 1 ? std::stoull(argv[1]) : 0x72756e74696d65ULL,
         argc > 2 ? std::stoull(argv[2]) : 100000ULL);
 }

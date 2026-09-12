@@ -55,8 +55,9 @@ struct SonosSnapshot {
 struct SonosEffects {
   virtual ~SonosEffects() = default;
   virtual void discoveryRequested(uint64_t discoveryId) = 0;
-  // Discard transient session/address authority, retaining observed UI state.
-  virtual void invalidateAuthority() = 0;
+  // Always revoke session authority, retaining observed UI state. Discovery
+  // invalidation also discards the topology host and subscription authority.
+  virtual void invalidateAuthority(bool discovery) = 0;
   // Recovery schedules an authoritative read, never a saved mutation command.
   virtual void reconciliationRequested() = 0;
 };
@@ -138,7 +139,7 @@ struct Context {
     data.retryAt = now + delay;
     data.lastError = error;
     data.recovering = true;
-    effects.invalidateAuthority();
+    effects.invalidateAuthority(error != SonosError::SessionFailure);
   }
   void stop(uint64_t now, SonosError error) {
     data.since = now;
@@ -146,7 +147,7 @@ struct Context {
     data.attempts = data.consecutiveSessionFailures = 0;
     data.networkAvailable = data.recovering = false;
     data.lastError = error;
-    effects.invalidateAuthority();
+    effects.invalidateAuthority(true);
   }
 };
 struct Table {
