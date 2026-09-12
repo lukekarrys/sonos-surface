@@ -971,7 +971,12 @@ void begin() {
   handle("config-status");
   savedPreference = preferences.getString("preferred-id", "").c_str();
   selection.configured = config.rooms;
-  selection.preferredId = savedPreference;
+  selection.restorePreference(savedPreference);
+  if (selection.preferredId != savedPreference) {
+    if (!preferences.remove("preferred-id"))
+      log("Preferred room clear failed");
+    savedPreference = selection.preferredId;
+  }
   if (!config.ssid.empty()) {
     xSemaphoreTake(stateMutex, portMAX_DELAY);
     coordinator.configAvailable(nowMs());

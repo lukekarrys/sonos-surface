@@ -99,6 +99,8 @@ public:
   ResolvedRoomPolicies resolvedPolicies;
   std::string selectedId, preferredId, warning; // Selected UUID; preferred display ID.
   bool initialized = false;
+  // Restore after loading configured rooms, before discovery checks availability.
+  void restorePreference(const std::string& savedId);
   void update(std::vector<Room> discovered);
   const Room* selected() const;
   bool cycle();

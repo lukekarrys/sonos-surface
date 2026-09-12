@@ -24,6 +24,9 @@ std::string roomDisplayId(const std::string& name) {
   return id.size() <= 64 ? id : "";
 }
 bool validRoomDisplayId(const std::string& id) { return !id.empty() && id == roomDisplayId(id); }
+void RoomSelection::restorePreference(const std::string& savedId) {
+  preferredId = configured.count(savedId) ? savedId : "";
+}
 const Room* RoomSelection::selected() const {
   for (const auto& room : rooms)
     if (room.id == selectedId)

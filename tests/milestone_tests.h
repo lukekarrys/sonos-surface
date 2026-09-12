@@ -152,7 +152,7 @@ unsigned milestoneTests() {
   Room b{"RINCON_B", "Living Room", "192.168.1.3", "RINCON_B", "b", true, "living-room"};
   RoomSelection rooms;
   rooms.configured = {{"office", {}}, {"living-room", {}}};
-  rooms.preferredId = "living-room";
+  rooms.restorePreference("living-room");
   rooms.update({b, a});
   assert(rooms.selectedId == b.id && rooms.warning.empty() && rooms.rooms.front().id == b.id);
   ++cases;
@@ -177,8 +177,8 @@ unsigned milestoneTests() {
   assert(rooms.warning.empty());
   ++cases;
   RoomSelection fallback;
-  fallback.configured = {{"office", {}}, {"living-room", {}}};
-  fallback.preferredId = "missing";
+  fallback.configured = {{"office", {}}, {"living-room", {}}, {"missing", {}}};
+  fallback.restorePreference("missing");
   fallback.update({b, a});
   assert(fallback.selectedId == b.id && !fallback.warning.empty() &&
          fallback.preferredId == "missing");

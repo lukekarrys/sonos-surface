@@ -16,7 +16,7 @@ unsigned policyTests() {
   assert(parseDeviceRooms(config, readOnly, selection.configured, devicePolicy) && !readOnly);
   assert(roomConfigJson(selection.configured) == config["rooms"]);
   ++cases;
-  selection.preferredId = "office";
+  selection.restorePreference("office");
   selection.update({{"RINCON_A", "Office", "1", "RINCON_A", "a", true, ""},
                     {"RINCON_B", "Living Room", "2", "RINCON_B", "b", true, ""},
                     {"RINCON_C", "Sons Room", "3", "RINCON_C", "c", true, ""},
@@ -59,6 +59,57 @@ unsigned policyTests() {
   Json document;
   assert(parseConfigDocument(config.dump(), document) && document == config);
   ++cases;
+  // Restore only configured preferences, independently of discovery availability.
+  {
+    const Room office{"RINCON_A", "Office", "192.0.2.1", "RINCON_A", "a", true, ""};
+    const Room kitchen{"RINCON_B", "Kitchen", "192.0.2.2", "RINCON_B", "b", true, ""};
+    for (const std::string& savedId : {std::string("kitchen"), std::string()}) {
+      RoomSelection restored;
+      restored.configured = {{"office", {}}};
+      restored.restorePreference(savedId);
+      assert(restored.preferredId.empty() && !restored.selected());
+      restored.update({kitchen, office});
+      assert(restored.selectedId == office.id && restored.rooms.size() == 1 &&
+             restored.problems.empty() && restored.warning.empty());
+      // Choosing the fallback does not manufacture a new saved preference.
+      assert(restored.preferredId.empty());
+      ++cases;
+    }
+    RoomSelection valid;
+    valid.configured = {{"office", {}}, {"kitchen", {}}};
+    valid.restorePreference("office");
+    assert(valid.preferredId == "office" && !valid.selected());
+    valid.update({office, kitchen});
+    assert(valid.rooms.front().id == kitchen.id && valid.selectedId == office.id &&
+           valid.preferredId == "office" && valid.warning.empty());
+    ++cases;
+    for (bool missing : {true, false}) {
+      RoomSelection unavailable;
+      unavailable.configured = {{"office", {}}, {"kitchen", {}}};
+      unavailable.restorePreference("kitchen");
+      assert(unavailable.preferredId == "kitchen" && !unavailable.selected());
+      auto ineligible = kitchen;
+      ineligible.eligible = false;
+      unavailable.update(missing ? std::vector<Room>{office}
+                                 : std::vector<Room>{office, ineligible});
+      assert(unavailable.selectedId == office.id && unavailable.preferredId == "kitchen" &&
+             unavailable.warning ==
+                 std::string(missing ? "ROOM MISSING: " : "ROOM UNAVAILABLE: ") + "kitchen");
+      assert(std::find(unavailable.problems.begin(), unavailable.problems.end(),
+                       "PREFERRED UNAVAILABLE: kitchen") != unavailable.problems.end());
+      unavailable.update({office, kitchen});
+      assert(unavailable.rooms.size() == 2 && unavailable.selectedId == office.id &&
+             unavailable.preferredId == "kitchen" && unavailable.warning.empty());
+      ++cases;
+    }
+    RoomSelection unconfigured;
+    unconfigured.restorePreference("kitchen");
+    assert(unconfigured.preferredId.empty());
+    unconfigured.update({office, kitchen});
+    assert(!unconfigured.selected() && unconfigured.rooms.empty() &&
+           unconfigured.problems == std::vector<std::string>{"ROOM CONFIG ERROR: set rooms"});
+    ++cases;
+  }
   // Discovery must resolve configured keys. A failed key does not enroll a
   // different speaker or prevent another valid configured room from working.
   {
