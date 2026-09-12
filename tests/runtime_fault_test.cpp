@@ -1,7 +1,7 @@
-#include "RuntimeAdmission.h"
-#include "SubscriptionLifecycle.h"
+#include "RuntimeCoordinator.h"
 #include "lifecycle_test_support.h"
 #include <SurfaceSonos.h>
+#include <algorithm>
 #include <deque>
 #include <map>
 #include <set>
@@ -9,10 +9,8 @@
 
 using namespace surface;
 using namespace surface::device;
-namespace worker = surface::device::worker_lifecycle;
 namespace wifi = surface::device::wifi_lifecycle;
 namespace sonos = surface::device::sonos_health;
-namespace subscription = surface::device::subscription_lifecycle;
 
 struct RuntimeFixture;
 struct FaultHttp : GuardedHttp {
@@ -79,30 +77,19 @@ struct FaultTransport : SonosTransport {
   }
 };
 
-// Peer models never own one another. Effects enqueue adapter events; drain()
-// delivers them only after the emitting transition has completed.
-struct RuntimeFixture : WorkerEffects, WifiEffects, SonosEffects, SubscriptionEffects {
-  enum class Message { Online, Offline, PublisherUnavailable };
+// The fixture supplies only platform responses. All lifecycle events, admission,
+// discovery binding, result policy, and automatic scheduling run in the same
+// coordinator as firmware.
+struct RuntimeFixture {
   LifecycleTrace trace;
-  uint64_t now = 0, connectCalls = 0, disconnectCalls = 0, discoveryRequests = 0;
-  uint64_t reconciliations = 0, accepted = 0, terminalCount = 0;
-  bool stopping = false, reconcilePending = false, topologyPending = false;
+  uint64_t now = 0, connectCalls = 0, disconnectCalls = 0, accepted = 0;
+  uint64_t automaticReads = 0, hostDiscards = 0, livenessWindows = 0;
+  bool stopping = false, observedOnline = false;
   std::string selectedId = "RINCON_A", learnedAddress, nextAddress = "192.168.1.2";
-  std::deque<Message> messages;
-  std::map<uint64_t, unsigned> terminals;
-  std::map<uint64_t, uint64_t> generations;
   std::set<uint64_t> attempted;
-  struct SubscriptionRequest {
-    uint64_t id;
-    bool renewal;
-    std::string address, sid;
-  };
   std::deque<SubscriptionRequest> subscriptionRequests;
-  WorkerLifecycle jobs{*this};
-  WifiLifecycle network{*this};
-  SonosHealth health{*this};
-  SubscriptionLifecycle events{*this};
   AppState display;
+  RuntimeCoordinator coordinator{display};
   FaultHttp http{*this};
   FaultTransport transport{http};
   Application app{transport, {"RINCON_A", {}, 1}, [this](const AppState& state) {
@@ -110,148 +97,107 @@ struct RuntimeFixture : WorkerEffects, WifiEffects, SonosEffects, SubscriptionEf
                   }};
 
   explicit RuntimeFixture(uint64_t seed) : trace(seed) { display.observed.targetId = selectedId; }
+  WorkerSnapshot jobs() const { return coordinator.snapshots().worker; }
+  WifiSnapshot network() const { return coordinator.snapshots().wifi; }
+  SonosSnapshot health() const { return coordinator.snapshots().sonos; }
+  SubscriptionSnapshot events() const { return coordinator.snapshots().subscription; }
+  bool usable(uint64_t generation) const {
+    return coordinator.sonosUsable() && health().discoveryId == generation;
+  }
   std::string snapshot() const {
-    const auto j = jobs.snapshot();
+    const auto j = jobs();
     return "now=" + std::to_string(now) + " worker=" + (j.running ? "Running" : "Idle") +
            " job=" + std::to_string(j.jobId) + " deadline=" + std::to_string(j.deadline) +
-           " wifi=" + wifiStateName(network.snapshot().state) +
-           " sonos=" + sonosStateName(health.snapshot().state) +
-           " generation=" + std::to_string(health.snapshot().discoveryId) +
-           " subscription=" + subscriptionStateName(events.snapshot().state) +
-           " selected=" + selectedId + " display=" + display.observed.targetId;
+           " wifi=" + wifiStateName(network().state) + " sonos=" + sonosStateName(health().state) +
+           " generation=" + std::to_string(health().discoveryId) +
+           " subscription=" + subscriptionStateName(events().state) + " selected=" + selectedId +
+           " display=" + display.observed.targetId;
   }
   void check(bool valid, const char* condition) const {
     if (!valid)
       trace.check(false, condition, snapshot());
   }
-  void started(uint64_t id, uint64_t) override {
-    ++accepted;
-    check(id == accepted, "monotonic job identity");
-  }
-  void finished(uint64_t id, JobOutcome outcome) override {
-    ++terminalCount;
-    check(++terminals[id] == 1, "one terminal callback per accepted job");
-    if (outcome != JobOutcome::Success) {
-      reconcilePending = true;
+  void consumePlatform() {
+    const auto pending = coordinator.drainWifi();
+    if (pending.connect)
+      ++connectCalls;
+    if (pending.disconnect) {
+      ++disconnectCalls;
+      observedOnline = false;
     }
-    if (outcome != JobOutcome::Success && outcome != JobOutcome::Failure) {
-      display.observed.stale = true;
-      display.queue.reset();
-      if (display.status == "pending") {
-        display.status = "failed";
-        display.detail = outcomeName(outcome);
-      }
+    if (const auto request = coordinator.drainSubscription()) {
+      subscriptionRequests.push_back(*request);
+      if (subscriptionRequests.size() > 32)
+        subscriptionRequests.pop_front();
     }
-  }
-  void staleResult(uint64_t) override {}
-  void beginConnect(uint64_t) override { ++connectCalls; }
-  void disconnect() override { ++disconnectCalls; }
-  void availabilityChanged(bool online) override {
-    messages.push_back(online ? Message::Online : Message::Offline);
-  }
-  void discoveryRequested(uint64_t) override { ++discoveryRequests; }
-  void invalidateAuthority() override {
-    learnedAddress.clear();
-    display.observed.stale = true;
-    display.queue.reset();
-    messages.push_back(Message::PublisherUnavailable);
-  }
-  void reconciliationRequested() override {
-    ++reconciliations;
-    reconcilePending = true;
-  }
-  void request(uint64_t id, bool renewal, const std::string& address,
-               const std::string& sid) override {
-    subscriptionRequests.push_back({id, renewal, address, sid});
-    if (subscriptionRequests.size() > 32)
-      subscriptionRequests.pop_front();
-  }
-  void topologyChanged() override { topologyPending = true; }
-  void drain() {
-    while (!messages.empty()) {
-      const auto message = messages.front();
-      messages.pop_front();
-      if (message == Message::Online)
-        health.process(sonos::NetworkAvailable{now});
-      else if (message == Message::Offline) {
-        health.process(sonos::NetworkUnavailable{now});
-        jobs.process(worker::NetworkUnavailable{});
-        events.process(subscription::NetworkUnavailable{now});
-      } else if (network.snapshot().networkReady)
-        events.process(subscription::NetworkAvailable{now, ""});
-      else
-        events.process(subscription::NetworkUnavailable{now});
-    }
+    for (const auto& transition : coordinator.drainTransitions())
+      trace.record(transition);
   }
   void tick(uint64_t elapsed = 0) {
     now += elapsed;
-    network.tick(now);
-    drain();
-    const auto before = jobs.snapshot();
-    jobs.process(worker::DeadlineExpired{now});
-    if (before.running && !jobs.snapshot().running && generations[before.jobId])
-      health.process(sonos::SessionFailure{now, generations[before.jobId]});
-    health.tick(now);
-    events.tick(now);
-    drain();
+    coordinator.serviceWifi(now, observedOnline);
+    coordinator.service(now);
+    consumePlatform();
   }
   void configure() {
     stopping = false;
-    network.process(wifi::ConfigAvailable{now});
-    drain();
+    coordinator.configAvailable(now);
+    consumePlatform();
   }
   void connect() {
-    network.process(wifi::Connected{now, network.snapshot().attemptId});
-    drain();
+    observedOnline = true;
+    coordinator.serviceWifi(now, observedOnline);
+    consumePlatform();
   }
   void drop() {
-    network.process(wifi::Disconnected{now, network.snapshot().attemptId});
-    drain();
+    observedOnline = false;
+    coordinator.serviceWifi(now, observedOnline);
+    consumePlatform();
   }
-  uint64_t beginJob() {
-    tick();
-    const auto id = stopping ? 0 : jobs.submit(now, 1000);
-    if (!id)
-      return 0;
-    if (health.snapshot().state == SonosState::Ready)
-      health.process(sonos::RefreshRequested{now});
+  void shutdown() {
+    stopping = true;
+    coordinator.shutdown(now);
+    consumePlatform();
+  }
+  uint64_t queueJob(bool refresh = true) {
+    const auto id = coordinator.enqueueJob(now, refresh, [](uint64_t) { return true; }, stopping);
+    if (id) {
+      ++accepted;
+      check(id == accepted, "monotonic accepted job identity");
+    }
+    consumePlatform();
+    return id;
+  }
+  void pickup(uint64_t id) {
+    const auto binding = coordinator.bindDiscovery(now, id);
     http.jobId = id;
-    http.discoveryId = health.snapshot().discoveryId;
-    generations[id] = http.discoveryId;
+    http.discoveryId = binding.discoveryId;
+    if (binding.discardHost) {
+      ++hostDiscards;
+      learnedAddress.clear();
+    }
+    consumePlatform();
+  }
+  uint64_t beginJob(bool refresh = true) {
+    tick();
+    const auto id = queueJob(refresh);
+    if (id)
+      pickup(id);
     return id;
   }
   void discovery(bool succeeds) {
-    const auto id = http.discoveryId;
-    if (!runtimeJobActive(jobs.snapshot(), http.jobId, now, stopping))
-      return;
-    if (succeeds)
-      health.process(sonos::DiscoverySucceeded{now, id});
-    else
-      health.process(sonos::DiscoveryFailed{now, id});
-    if (succeeds && health.usable(id)) {
+    if (coordinator.discoveryResult(now, http.jobId, http.discoveryId, succeeds, nextAddress)) {
       learnedAddress = nextAddress;
       http.address = learnedAddress;
-      events.process(subscription::NetworkAvailable{now, learnedAddress});
     }
-    drain();
+    consumePlatform();
   }
-  void finish(uint64_t id, bool success, bool unhealthy = false) {
-    tick();
-    if (runtimeJobActive(jobs.snapshot(), id, now, stopping)) {
-      if (unhealthy)
-        health.process(sonos::SessionFailure{now, generations[id]});
-      else if (success)
-        health.process(sonos::SessionSucceeded{now, generations[id]});
-    }
-    if (success)
-      jobs.process(worker::Success{id});
-    else
-      jobs.process(worker::Failure{id});
-    drain();
+  void finish(uint64_t id, bool success) {
+    coordinator.finishJob(now, id, {true, success, false, false});
+    consumePlatform();
   }
   bool publish(uint64_t id, const AppState& state) {
-    return runtimeJobActive(jobs.snapshot(), id, now, stopping) &&
-           publishSelectedState(display, state, selectedId);
+    return coordinator.publish(now, id, state, selectedId, "", stopping);
   }
   Result command() {
     check(attempted.insert(http.jobId).second, "one deliberate command per worker job");
@@ -263,8 +209,6 @@ struct RuntimeFixture : WorkerEffects, WifiEffects, SonosEffects, SubscriptionEf
     const auto writes = http.writes;
     const auto result = app.reconcile();
     check(http.writes == writes, "reconciliation never dispatches mutations");
-    if (result.ok)
-      reconcilePending = false;
     return result;
   }
   void ready() {
@@ -276,17 +220,71 @@ struct RuntimeFixture : WorkerEffects, WifiEffects, SonosEffects, SubscriptionEf
     check(reconcile().ok, "startup authoritative read");
     finish(id, true);
   }
+  void subscriptionResult(bool ok, const std::string& sid = "sid-1", uint64_t lease = 1000) {
+    coordinator.subscriptionResult(now, events().requestId, ok, sid, lease);
+    consumePlatform();
+  }
+  bool automaticDue() { return coordinator.automaticJobDue(now, true, stopping); }
+  void faultFreeWindow() {
+    // Shutdown deliberately cannot recover by itself. A model boot restores
+    // persisted configuration before the no-input recovery window begins.
+    if (stopping)
+      configure();
+    http.failRead = http.failQueue = http.explicitFailure = http.loseResponse = false;
+    transport.verificationDelay = 0;
+    const auto oldJob = jobs().jobId;
+    const auto readsBefore = automaticReads;
+    const auto writesBefore = http.writes;
+    constexpr uint64_t bound = wifi::ConnectBudgetMs + 2 * sonos::MaximumBackoffMs +
+                               sonos::DiscoveryBudgetMs + RuntimeCoordinator::MutationBudgetMs +
+                               RuntimeCoordinator::PollIntervalMs;
+    const auto deadline = now + bound;
+    trace.record("fault-free window begins; no user refresh or intent");
+    while (now < deadline) {
+      tick(100);
+      // The fake AP answers a pending beginConnect within one second.
+      if (network().state == WifiState::Connecting && now - network().since >= 500)
+        connect();
+      while (!subscriptionRequests.empty()) {
+        const auto request = subscriptionRequests.front();
+        subscriptionRequests.pop_front();
+        if (coordinator.subscriptionActive(request.id, now, stopping))
+          coordinator.subscriptionResult(now, request.id, true, "sid-recovered", 300000);
+      }
+      // An old hung job is left to its real coordinator deadline. Only jobs
+      // emitted by the production automatic predicate receive successful fake
+      // discovery/HTTP completions; no prior mutation is replayed.
+      if (automaticDue()) {
+        const auto id = beginJob();
+        check(id && id != oldJob, "automatic scheduler queues fresh work");
+        discovery(true);
+        const auto result = reconcile();
+        check(result.ok, "fault-free automatic authoritative read succeeds");
+        ++automaticReads;
+        finish(id, true);
+      }
+      consumePlatform();
+      invariants();
+      if (!jobs().running && network().state == WifiState::Online &&
+          health().state == SonosState::Ready && events().state == SubscriptionState::Healthy &&
+          !display.observed.stale && automaticReads > readsBefore) {
+        check(http.writes == writesBefore, "automatic recovery never replays a mutation");
+        ++livenessWindows;
+        return;
+      }
+    }
+    check(false, "bounded automatic recovery reaches Idle/Online/Ready/Healthy/fresh display");
+  }
   void invariants() const {
-    check(workerInvariant(jobs.snapshot()), "worker invariant");
-    check(wifiInvariant(network.snapshot()), "wifi invariant");
-    check(sonosInvariant(health.snapshot()), "sonos invariant");
-    check(subscriptionInvariant(events.snapshot()), "subscription invariant");
-    check(health.snapshot().networkAvailable == network.snapshot().networkReady,
+    check(workerInvariant(jobs()), "worker invariant");
+    check(wifiInvariant(network()), "wifi invariant");
+    check(sonosInvariant(health()), "sonos invariant");
+    check(subscriptionInvariant(events()), "subscription invariant");
+    check(health().networkAvailable == network().networkReady,
           "network event delivered to Sonos health");
-    check(!events.snapshot().networkAvailable || network.snapshot().networkReady,
+    check(!events().networkAvailable || network().networkReady,
           "subscription cannot outlive network");
-    check(jobs.snapshot().accepted == accepted && jobs.snapshot().completed == terminalCount,
-          "worker model matches effect counts");
+    check(jobs().accepted == accepted, "only queued work allocates monotonic IDs");
     check(display.observed.targetId == selectedId, "only selected UUID is published");
     check(http.writes.size() == http.mutations, "at most one Next dispatch per accepted job");
   }
@@ -296,12 +294,11 @@ void FaultHttp::pollWait(uint32_t ms) { runtime.tick(ms); }
 HttpResponse FaultHttp::dispatch(const std::string&, const std::string& action,
                                  const std::string&) {
   const bool mutation = !isReadOnlySonosAction(action);
-  if (!runtimeDispatchAllowed(runtime.jobs.snapshot(), runtime.network.snapshot(),
-                              runtime.health.snapshot(), jobId, discoveryId, runtime.now,
-                              runtime.stopping, mutation))
+  if (!runtime.coordinator.dispatchAllowed(jobId, discoveryId, runtime.now, runtime.stopping,
+                                           mutation))
     return {0, "", "runtime dispatch blocked", true};
   if (mutation) {
-    runtime.check(runtime.health.usable(discoveryId), "mutation requires current usable topology");
+    runtime.check(runtime.usable(discoveryId), "mutation requires current usable topology");
     ++mutations;
     runtime.check(++writes[jobId] == 1, "no duplicate mutation dispatch for same job");
     if (loseResponse)
@@ -325,44 +322,42 @@ HttpResponse FaultHttp::dispatch(const std::string&, const std::string& action,
 void scenarios() {
   {
     RuntimeFixture f(7);
-    f.configure();
-    f.connect();
-    const auto id = f.jobs.submit(f.now, 90000);
-    const auto discovery = f.health.snapshot().discoveryId;
+    f.ready();
+    const auto id = f.beginJob(false);
+    const auto discovery = f.health().discoveryId;
     f.now += sonos::DiscoveryBudgetMs;
-    f.check(f.jobs.active(id, f.now) && f.health.snapshot().state == SonosState::Discovering,
+    f.check(f.coordinator.jobActive(id, f.now, false) &&
+                f.health().state == SonosState::Discovering,
             "worker outlives discovery deadline before model tick arrives");
-    f.check(!runtimeDispatchAllowed(f.jobs.snapshot(), f.network.snapshot(), f.health.snapshot(),
-                                    id, discovery, f.now, false, false),
+    f.check(!f.coordinator.dispatchAllowed(id, discovery, f.now, false, false),
             "discovery deadline independently blocks reads before timer callback");
-    f.check(!runtimeDispatchAllowed(f.jobs.snapshot(), f.network.snapshot(), f.health.snapshot(),
-                                    id, discovery, f.now, false, true),
+    f.check(!f.coordinator.dispatchAllowed(id, discovery, f.now, false, true),
             "expired discovery never authorizes mutations");
     f.tick();
-    f.check(f.health.snapshot().state == SonosState::Backoff,
-            "delayed discovery timer schedules recovery");
+    f.check(f.health().state == SonosState::Backoff, "delayed discovery timer schedules recovery");
     f.finish(id, false);
     f.invariants();
   }
   {
     RuntimeFixture f(1);
     f.tick(100000);
-    f.check(f.connectCalls == 0 && f.discoveryRequests == 0, "unconfigured boot stays quiet");
+    f.check(f.connectCalls == 0 && f.health().totalDiscoveries == 0,
+            "unconfigured boot stays quiet");
     f.configure();
     for (unsigned attempt = 0; attempt < 4; ++attempt) {
       f.tick(wifi::ConnectBudgetMs);
-      f.check(f.network.snapshot().state == WifiState::Backoff, "connection cannot hang forever");
-      f.tick(f.network.snapshot().retryAt - f.now);
+      f.check(f.network().state == WifiState::Backoff, "connection cannot hang forever");
+      f.tick(f.network().retryAt - f.now);
     }
     f.tick(500);
     f.connect();
-    f.check(f.network.snapshot().networkReady && f.discoveryRequests == 1,
+    f.check(f.network().networkReady && f.health().totalDiscoveries == 1,
             "delayed connection eventually starts discovery");
     auto id = f.beginJob();
     f.discovery(false);
-    f.finish(id, false, true);
-    f.check(f.health.snapshot().state == SonosState::Backoff, "empty SSDP schedules retry");
-    f.tick(f.health.snapshot().retryAt - f.now);
+    f.finish(id, false);
+    f.check(f.health().state == SonosState::Backoff, "empty SSDP schedules retry");
+    f.tick(f.health().retryAt - f.now);
     id = f.beginJob();
     f.discovery(true);
     f.check(f.reconcile().ok, "SSDP recovery reads authoritative state");
@@ -370,9 +365,9 @@ void scenarios() {
     const auto observation = f.display.observed;
     f.drop();
     f.check(f.display.observed.title == observation.title && f.display.observed.stale &&
-                f.learnedAddress.empty(),
+                f.coordinator.snapshots().discardHost,
             "outage retains visible observations and discards address authority");
-    f.tick(f.network.snapshot().retryAt - f.now);
+    f.tick(f.network().retryAt - f.now);
     f.connect();
     f.nextAddress = "192.168.1.99";
     id = f.beginJob();
@@ -395,13 +390,14 @@ void scenarios() {
     f.finish(id, false);
     const auto failedId = id;
     const auto requestId = f.app.state().requestId;
+    f.tick(f.health().retryAt - f.now);
     id = f.beginJob();
     f.discovery(true);
     f.http.failRead = true;
     f.check(!f.reconcile().ok && f.app.state().recoveryRequired == uncertain,
             "failed reconciliation preserves uncertainty");
-    f.finish(id, false, true);
-    f.tick(f.health.snapshot().retryAt - f.now);
+    f.finish(id, false);
+    f.tick(f.health().retryAt - f.now);
     f.http.failRead = f.http.explicitFailure = f.http.loseResponse = false;
     id = f.beginJob();
     f.discovery(true);
@@ -422,8 +418,8 @@ void scenarios() {
     auto id = f.beginJob();
     f.discovery(true);
     const auto retained = f.app.state();
-    f.transport.verificationDelay = 1000;
-    f.check(f.command().ok && !f.jobs.snapshot().running && f.app.state().status == "succeeded",
+    f.transport.verificationDelay = uint32_t(f.jobs().deadline - f.now);
+    f.check(f.command().ok && !f.jobs().running && f.app.state().status == "succeeded",
             "simulate successful verification returning after worker deadline");
     f.check(f.display.status != "succeeded" && f.http.writes[id] == 1,
             "late success cannot publish directly or dispatch twice");
@@ -437,16 +433,16 @@ void scenarios() {
     const auto cancellationDetail = f.app.state().detail;
     f.finish(id, true);
     f.transport.verificationDelay = 0;
-    f.tick(f.health.snapshot().retryAt - f.now);
+    f.tick(f.health().retryAt - f.now);
     id = f.beginJob();
     f.discovery(true);
     f.http.failRead = true;
     f.check(!f.reconcile().ok && f.display.status == "uncertain" &&
                 f.display.detail == cancellationDetail && f.http.writes.size() == 1,
             "failed recovery cannot resurrect expired session success");
-    f.finish(id, false, true);
+    f.finish(id, false);
     f.http.failRead = false;
-    f.tick(f.health.snapshot().retryAt - f.now);
+    f.tick(f.health().retryAt - f.now);
     id = f.beginJob();
     f.discovery(true);
     f.check(f.reconcile().ok && f.display.status == "uncertain" &&
@@ -467,23 +463,21 @@ void scenarios() {
     const auto a = f.beginJob();
     f.discovery(true);
     const auto oldGeneration = f.http.discoveryId;
-    f.tick(1000);
-    f.check(!f.jobs.snapshot().running && f.display.observed.stale,
+    f.tick(f.jobs().deadline - f.now);
+    f.check(!f.jobs().running && f.display.observed.stale,
             "deadline releases worker and stales observation");
-    f.tick(f.health.snapshot().retryAt - f.now);
+    f.tick(f.health().retryAt - f.now);
     const auto b = f.beginJob();
     f.discovery(true);
     AppState late = f.app.state();
     late.observed.title = "Late A must never display";
     f.check(!f.publish(a, late), "late A publication cannot overwrite B");
-    f.jobs.process(worker::Success{a});
-    f.jobs.process(worker::Failure{a});
-    f.check(f.jobs.snapshot().jobId == b, "late A completion cannot complete B");
-    f.check(!runtimeDispatchAllowed(f.jobs.snapshot(), f.network.snapshot(), f.health.snapshot(), a,
-                                    oldGeneration, f.now, false, true),
+    f.finish(a, true);
+    f.finish(a, false);
+    f.check(f.jobs().jobId == b, "late A completion cannot complete B");
+    f.check(!f.coordinator.dispatchAllowed(a, oldGeneration, f.now, false, true),
             "expired A cannot dispatch another operation");
-    f.check(!runtimeDispatchAllowed(f.jobs.snapshot(), f.network.snapshot(), f.health.snapshot(), b,
-                                    oldGeneration, f.now, false, true),
+    f.check(!f.coordinator.dispatchAllowed(b, oldGeneration, f.now, false, true),
             "new job cannot reuse old topology generation");
     f.selectedId = "RINCON_B";
     Room selected;
@@ -520,8 +514,8 @@ void scenarios() {
   {
     RuntimeFixture f(5);
     f.ready();
-    auto request = f.events.snapshot().requestId;
-    f.events.process(subscription::RequestFailed{f.now, request});
+    auto request = f.events().requestId;
+    f.coordinator.subscriptionResult(f.now, request, false, "", 0);
     auto id = f.beginJob();
     f.discovery(true);
     f.check(f.reconcile().ok, "polling works while subscription failed");
@@ -531,15 +525,15 @@ void scenarios() {
                 !f.app.state().observed.stale,
             "queue read failure retains authoritative basic playback");
     f.finish(id, true);
-    f.tick(f.events.snapshot().retryAt - f.now);
-    request = f.events.snapshot().requestId;
-    f.events.process(subscription::RequestSucceeded{f.now, request, "sid-1", 1000});
+    f.tick(f.events().retryAt - f.now);
+    request = f.events().requestId;
+    f.coordinator.subscriptionResult(f.now, request, true, "sid-1", 1000);
     f.tick(800);
-    f.check(f.events.snapshot().state == SubscriptionState::Renewing, "renewal becomes due");
-    f.events.process(subscription::RequestFailed{f.now, f.events.snapshot().requestId});
-    const auto notifications = f.events.snapshot().notifications;
-    f.events.process(subscription::NotifyReceived{f.now, "sid-1"});
-    f.check(!f.events.snapshot().sidPresent && f.events.snapshot().notifications == notifications,
+    f.check(f.events().state == SubscriptionState::Renewing, "renewal becomes due");
+    f.subscriptionResult(false);
+    const auto notifications = f.events().notifications;
+    f.coordinator.notify(f.now, "sid-1", f.stopping);
+    f.check(!f.events().sidPresent && f.events().notifications == notifications,
             "failed renewal cannot be revived by stale SID");
     id = f.beginJob();
     f.discovery(true);
@@ -549,14 +543,373 @@ void scenarios() {
   }
 }
 
+void unavailableTargetsKeepNormalPolling() {
+  // Grouping, a renamed configured room, and a vanished accepted UUID all
+  // leave the household/publisher reachable. Exercise actual RoomSelection
+  // warnings and publication through the production coordinator.
+  for (unsigned missing = 0; missing < 3; ++missing) {
+    RuntimeFixture f(100 + missing);
+    f.ready();
+    f.subscriptionResult(true, "sid-room-warning", 300000);
+    RoomSelection selection;
+    selection.configured["office"] = {};
+    selection.update({{"RINCON_A", "Office", f.nextAddress, "", "", true, "office"}});
+    const auto boundId = selection.selectedId;
+    const auto originalHost = f.learnedAddress;
+    const auto originalDiscards = f.hostDiscards;
+    const auto originalSubscription = f.events().totalRequests;
+    uint64_t previousPoll = 0;
+    for (unsigned poll = 0; poll < (missing == 2 ? 4U : 3U); ++poll) {
+      // The intent is accepted while A is eligible, then its frozen UUID
+      // disappears during discovery. The following reads are automatic.
+      uint64_t id = 0;
+      if (missing == 2 && poll == 0) {
+        id = f.beginJob(false);
+      } else {
+        const auto dueAt =
+            f.coordinator.snapshots().lastAutomaticJobAt + RuntimeCoordinator::PollIntervalMs;
+        f.tick(dueAt - f.now);
+        f.check(f.automaticDue(), "normal poll remains scheduled for unavailable room");
+        if (previousPoll)
+          f.check(f.now - previousPoll == RuntimeCoordinator::PollIntervalMs,
+                  "unavailable room uses exactly the ordinary ten-second poll cadence");
+        previousPoll = f.now;
+        id = f.beginJob();
+        ++f.automaticReads;
+      }
+      f.check(id != 0, "unavailable room job is admitted against healthy household");
+      f.discovery(true);
+      if (missing == 0)
+        selection.update({{boundId, "Office", f.nextAddress, "RINCON_B", "", false, "office"}});
+      else if (missing == 1)
+        selection.update({{boundId, "Study", f.nextAddress, "", "", true, "study"}});
+      else
+        selection.update({{"RINCON_B", "Kitchen", f.nextAddress, "", "", true, "kitchen"}});
+      f.check(selection.selected() == nullptr, "discovered rooms contain no eligible target");
+      const auto warning =
+          missing == 2 ? std::string("Selected room unavailable/grouped") : selection.warning;
+      f.check(!warning.empty(), "missing/renamed/grouped target has a specific warning");
+      auto unavailable = f.display;
+      unavailable.observed.stale = true;
+      unavailable.refreshError = warning;
+      f.check(f.coordinator.publish(f.now, id, unavailable, f.selectedId, warning),
+              "unavailable observation publishes its room warning");
+      f.coordinator.finishJob(f.now, id, {false, false, false, false});
+      f.consumePlatform();
+      f.check(f.jobs().lastOutcome == JobOutcome::Failure && f.health().state == SonosState::Ready,
+              "missing target is a failed job without a Sonos session failure");
+      f.check(!f.coordinator.snapshots().discardHost && f.hostDiscards == originalDiscards &&
+                  f.learnedAddress == originalHost,
+              "missing target never invalidates authority or discards SSDP host");
+      f.check(f.events().state == SubscriptionState::Healthy &&
+                  f.events().totalRequests == originalSubscription,
+              "missing target retains healthy publisher without resubscription");
+      f.check(f.display.refreshError == warning, "specific room warning survives completion");
+      f.check(!f.coordinator.snapshots().reconciliationPending,
+              "missing target does not schedule extra reconciliation");
+      f.tick(RuntimeCoordinator::AutomaticRateLimitMs);
+      f.check(!f.automaticDue(), "unavailable target does not cause an immediate retry");
+      f.invariants();
+    }
+    f.check(f.automaticReads == 3, "all three ordinary missing-room polls ran");
+  }
+}
+
+void busyWinsOverDiscoveryRecovery() {
+  RuntimeFixture f(110);
+  f.ready();
+  const auto id = f.beginJob();
+  f.check(f.health().state == SonosState::Discovering, "routine poll discovers current topology");
+  for (bool refresh : {false, true}) {
+    const auto rejected = f.coordinator.admission(f.now, refresh);
+    f.check(!rejected.allowed && rejected.notice == "Busy; input ignored" &&
+                rejected.reason == "worker busy",
+            "busy wins over Sonos discovery for toggle, intent, and refresh admission");
+  }
+  f.finish(id, false);
+  f.invariants();
+}
+
+void recoveryRejectsWithoutClearingRoom() {
+  for (bool offline : {false, true}) {
+    RuntimeFixture f(120 + offline);
+    f.ready();
+    if (offline)
+      f.drop();
+    else {
+      const auto id = f.beginJob();
+      f.discovery(false);
+      f.finish(id, false);
+    }
+    const auto retained = f.display.observed;
+    const auto worker = f.jobs();
+    const auto sonosBefore = f.health();
+    const auto wifiBefore = f.network();
+    const auto reconcile = f.coordinator.snapshots().reconciliationPending;
+    unsigned queueCalls = 0;
+    for (const auto* action : {"refresh", "room-next", "room-select", "queue-page"}) {
+      f.trace.record(action);
+      const auto rejected = f.coordinator.admission(f.now, true);
+      f.check(!rejected.allowed && rejected.retryAt > f.now &&
+                  rejected.notice.find("Sonos recovering; retrying in ") == 0 &&
+                  rejected.reason.find("retryAt=" + std::to_string(rejected.retryAt)) !=
+                      std::string::npos,
+              "recovery rejection exposes its reason and pending retry time");
+      f.check(f.coordinator.enqueueJob(f.now, true,
+                                       [&](uint64_t) {
+                                         ++queueCalls;
+                                         return true;
+                                       }) == 0,
+              "refresh and room/queue inputs cannot bypass recovery backoff");
+    }
+    f.check(queueCalls == 0 && f.jobs().accepted == worker.accepted &&
+                f.jobs().completed == worker.completed &&
+                f.coordinator.snapshots().reconciliationPending == reconcile,
+            "local recovery rejection allocates no worker and requests no reconciliation");
+    f.check(f.health().state == sonosBefore.state && f.health().retryAt == sonosBefore.retryAt &&
+                f.network().retryAt == wifiBefore.retryAt,
+            "explicit refresh preserves both peers' existing retry schedule");
+    f.check(f.display.observed.targetId == retained.targetId &&
+                f.display.observed.title == retained.title && f.display.observed.stale,
+            "rejected room action preserves stale selected-room observation");
+    f.invariants();
+  }
+}
+
+void boundDiscoveryFailureIsImmediate() {
+  RuntimeFixture f(130);
+  f.ready();
+  const auto id = f.beginJob();
+  const auto deadline = f.health().deadline;
+  f.check(f.http.discoveryId != 0 && !f.coordinator.snapshots().discoveryPending,
+          "worker owns the pending discovery generation");
+  f.coordinator.finishJob(f.now, id, {});
+  f.consumePlatform();
+  f.check(!f.jobs().running && f.health().state == SonosState::Backoff &&
+              f.health().lastError == SonosError::DiscoveryFailed && f.health().retryAt < deadline,
+          "bound job without a result fails discovery immediately instead of stalling forty-five "
+          "seconds");
+  f.invariants();
+}
+
+void queuedDiscoveryRejectionReportsRecovery() {
+  RuntimeFixture f(135);
+  f.configure();
+  f.connect();
+  f.tick(10000);
+  const auto id = f.queueJob();
+  f.tick(sonos::DiscoveryBudgetMs - 10000);
+  f.check(f.jobs().running && f.health().state == SonosState::Backoff,
+          "discovery deadline can precede a queued worker's deadline");
+  const auto retryAt = f.health().retryAt;
+  const auto reconcile = f.coordinator.snapshots().reconciliationPending;
+  const auto binding = f.coordinator.bindDiscovery(f.now, id);
+  const auto notice = f.coordinator.drainNotice();
+  const auto messages = f.coordinator.drainTransitions();
+  f.check(binding.discoveryId == 0 && notice &&
+              notice->find("Sonos recovering; retrying in ") == 0 &&
+              std::any_of(messages.begin(), messages.end(),
+                          [&](const std::string& message) {
+                            return message.find("queued job rejected:") == 0 &&
+                                   message.find("retryAt=" + std::to_string(retryAt)) !=
+                                       std::string::npos;
+                          }),
+          "unbound queued job reports its recovery notice and logged retry time");
+  f.coordinator.finishJob(f.now, id, {});
+  f.check(f.health().retryAt == retryAt &&
+              f.coordinator.snapshots().reconciliationPending == reconcile,
+          "queued local rejection leaves backoff and reconciliation unchanged");
+  f.check(!f.coordinator.drainNotice(), "queued recovery notice is emitted once");
+  f.invariants();
+}
+
+void localRejectionsCreateNoWork() {
+  RuntimeFixture f(138);
+  f.ready();
+  const auto before = f.coordinator.snapshots();
+  const auto reads = f.http.reads;
+  const auto writes = f.http.writes;
+  const auto connectCalls = f.connectCalls;
+  unsigned queueCalls = 0;
+  const auto enqueue = [&] {
+    return f.coordinator.enqueueJob(f.now, false, [&](uint64_t) {
+      ++queueCalls;
+      return true;
+    });
+  };
+  MusicIntent malformed;
+  const auto parsed = parseIntent("{ malformed card", malformed);
+  if (parsed.ok)
+    enqueue();
+  f.check(!parsed.ok, "malformed card rejects before enqueue");
+  Room room{f.selectedId, "Office", f.nextAddress, "", "", true, "office"};
+  f.display.observed.trackUri = "current-track";
+  f.display.observed.queueRevision = 1;
+  for (unsigned mismatch = 0; mismatch < 5; ++mismatch) {
+    BoardEvent event;
+    event.targetId = f.selectedId;
+    event.trackIdentity = "current-track";
+    event.queueRevision = 1;
+    if (mismatch == 0)
+      event.targetId = "RINCON_B";
+    else if (mismatch == 1) {
+      event.intent.seekPositionMs = 5000;
+      event.trackIdentity = "old-track";
+    } else if (mismatch == 2) {
+      event.intent.seekPositionMs = 5000;
+      event.queueRevision = 0;
+    } else if (mismatch == 3) {
+      event.intent.queueIndex = 1;
+      event.queueRevision = 0;
+    }
+    const auto matches =
+        runtimeUiMatches(mismatch == 4 ? nullptr : &room, f.display.observed, event);
+    if (matches)
+      enqueue();
+    f.check(!matches,
+            "stale target, track, queue revision, or missing room rejects before enqueue");
+  }
+  f.tick(RuntimeCoordinator::AutomaticRateLimitMs);
+  const auto after = f.coordinator.snapshots();
+  f.check(queueCalls == 0 && after.worker.accepted == before.worker.accepted &&
+              after.worker.completed == before.worker.completed &&
+              after.reconciliationPending == before.reconciliationPending && !f.automaticDue() &&
+              f.http.reads == reads && f.http.writes == writes && f.connectCalls == connectCalls &&
+              after.sonos.totalDiscoveries == before.sonos.totalDiscoveries &&
+              after.subscription.totalRequests == before.subscription.totalRequests,
+          "pure local rejections consume no job ID, completion, reconciliation, or network work");
+  f.check(f.coordinator.enqueueJob(f.now, false, [](uint64_t) { return false; }) == 0 &&
+              f.jobs().accepted == before.worker.accepted &&
+              f.jobs().completed == before.worker.completed &&
+              !f.coordinator.snapshots().reconciliationPending,
+          "failed platform queue admission also leaves the worker lifecycle untouched");
+  const auto id = f.beginJob(false);
+  f.check(id == before.worker.accepted + 1, "next valid request gets the next unconsumed identity");
+  f.discovery(true);
+  f.finish(id, true);
+  f.invariants();
+}
+
+void optionalQueueFailureIsLifecycleSuccess() {
+  RuntimeFixture f(140);
+  f.ready();
+  f.tick(RuntimeCoordinator::PollIntervalMs);
+  f.check(f.automaticDue(), "ordinary automatic queue/read job becomes due");
+  const auto id = f.beginJob();
+  f.discovery(true);
+  f.check(f.reconcile().ok, "basic authoritative read succeeds before optional queue failure");
+  f.http.failQueue = true;
+  f.check(!f.app.queue(0, 4).ok && !f.display.queueError.empty(),
+          "optional queue error is published separately");
+  f.coordinator.finishJob(f.now, id, {true, true, true, false});
+  const auto reads = f.http.reads;
+  f.tick(RuntimeCoordinator::AutomaticRateLimitMs);
+  f.check(f.jobs().lastOutcome == JobOutcome::Success && f.health().state == SonosState::Ready &&
+              !f.coordinator.snapshots().reconciliationPending && !f.automaticDue() &&
+              f.http.reads == reads && !f.display.observed.stale,
+          "optional queue failure completes successfully without an extra authoritative read");
+  f.invariants();
+}
+
+void publicDecisionsHonorDeadlinesBeforeTimerService() {
+  {
+    RuntimeFixture f(150);
+    f.configure();
+    f.connect();
+    f.now = f.health().deadline;
+    const auto rejected = f.coordinator.admission(f.now, true);
+    f.check(!rejected.allowed && f.health().state == SonosState::Backoff &&
+                rejected.retryAt > f.now && !f.jobs().running,
+            "admission observes an expired discovery before the main timer callback");
+    f.now = rejected.retryAt;
+    f.check(f.automaticDue(), "automatic predicate services due discovery retry itself");
+    const auto id = f.beginJob();
+    f.discovery(true);
+    f.finish(id, true);
+    f.invariants();
+  }
+  {
+    RuntimeFixture f(151);
+    f.configure();
+    f.connect();
+    f.tick(10000);
+    const auto id = f.queueJob();
+    f.now = f.health().deadline;
+    const auto binding = f.coordinator.bindDiscovery(f.now, id);
+    f.check(binding.discoveryId == 0 && f.health().state == SonosState::Backoff &&
+                f.coordinator.drainNotice().has_value(),
+            "pickup observes expired discovery and reports recovery without a separate tick");
+    f.coordinator.finishJob(f.now, id, {});
+    f.invariants();
+  }
+  {
+    RuntimeFixture f(152);
+    f.ready();
+    const auto id = f.beginJob();
+    f.discovery(true);
+    f.now = f.jobs().deadline;
+    f.check(!f.automaticDue() && !f.jobs().running && f.jobs().lastJobId == id &&
+                f.jobs().lastOutcome == JobOutcome::Timeout &&
+                f.health().state == SonosState::Backoff,
+            "automatic predicate expires worker before deciding whether work is due");
+    f.now = f.health().retryAt;
+    f.check(f.automaticDue(), "timed-out worker recovers automatically at the existing backoff");
+    const auto next = f.beginJob();
+    f.discovery(true);
+    f.check(f.reconcile().ok, "automatic recovery reads fresh state after unsignaled deadline");
+    f.finish(next, true);
+    f.invariants();
+  }
+}
+
+void sharedTicksLogBootAndRecoveryTransitions() {
+  RuntimeFixture f(160);
+  const auto logged = [&](const std::string& transition) {
+    const auto messages = f.coordinator.drainTransitions();
+    return std::any_of(messages.begin(), messages.end(),
+                       [&](const std::string& message) { return message.find(transition) == 0; });
+  };
+  f.coordinator.configAvailable(f.now);
+  f.check(logged("wifi Unconfigured -> Connecting"),
+          "boot ConfigAvailable uses the same transition logger as later Wi-Fi events");
+  f.consumePlatform();
+  f.connect();
+  f.now = f.health().deadline;
+  f.coordinator.service(f.now);
+  f.check(f.health().lastError == SonosError::DiscoveryTimeout &&
+              logged("sonos Discovering -> Backoff"),
+          "coordinator calls and logs the shared Sonos deadline tick");
+  f.now = f.health().retryAt;
+  f.coordinator.service(f.now);
+  f.check(logged("sonos Backoff -> Discovering"),
+          "coordinator calls and logs the shared Sonos retry tick");
+  const auto id = f.beginJob();
+  f.discovery(true);
+  f.check(f.reconcile().ok, "automatic retry can perform authoritative work");
+  f.finish(id, true);
+  f.subscriptionResult(true, "sid-shared-tick", 1000);
+  f.now = f.events().renewAt;
+  f.coordinator.service(f.now);
+  f.check(logged("subscription Healthy -> Renewing"),
+          "coordinator calls and logs the shared subscription renewal tick");
+  f.now = f.events().leaseUntil;
+  f.coordinator.service(f.now);
+  f.check(f.events().lastError == SubscriptionError::LeaseExpired &&
+              logged("subscription Renewing -> Backoff"),
+          "coordinator calls and logs the shared subscription lease-expiry tick");
+  f.coordinator.service(f.now);
+  f.check(f.coordinator.drainTransitions().empty(), "unchanged service polls produce no log noise");
+  f.invariants();
+}
+
 void chaos(uint64_t seed, uint64_t steps) {
   RuntimeFixture f(seed);
   f.ready();
   for (uint64_t step = 0; step < steps; ++step) {
     f.tick(f.trace.random() % 250);
     const auto event = f.trace.random() % 19;
-    const auto before = f.jobs.snapshot();
-    const auto generation = f.health.snapshot().discoveryId;
+    const auto before = f.jobs();
+    const auto generation = f.health().discoveryId;
     f.trace.record("event=" + std::to_string(event) + " job=" + std::to_string(before.jobId) +
                    " generation=" + std::to_string(generation) + " now=" + std::to_string(f.now));
     switch (event) {
@@ -578,8 +931,7 @@ void chaos(uint64_t seed, uint64_t steps) {
       f.discovery(event == 5);
       break;
     case 7:
-      if (before.running && f.health.usable(f.http.discoveryId) &&
-          !f.attempted.count(before.jobId)) {
+      if (before.running && f.usable(f.http.discoveryId) && !f.attempted.count(before.jobId)) {
         f.http.loseResponse = f.trace.random() % 3 == 0;
         f.http.explicitFailure = f.trace.random() % 3 == 0;
         f.command();
@@ -598,38 +950,32 @@ void chaos(uint64_t seed, uint64_t steps) {
       break;
     case 10: {
       const auto stale = before.jobId ? before.jobId - 1 : f.accepted;
-      f.jobs.process(worker::Success{stale});
-      f.jobs.process(worker::Failure{stale});
-      f.check(f.jobs.snapshot().jobId == before.jobId, "stale completion leaves active job intact");
+      f.finish(stale, true);
+      f.finish(stale, false);
+      f.check(f.jobs().jobId == before.jobId, "stale completion leaves active job intact");
       AppState late = f.app.state();
       f.check(!f.publish(stale, late), "stale job cannot publish");
       break;
     }
     case 11: {
-      const auto sub = f.events.snapshot();
-      f.events.process(subscription::RequestSucceeded{f.now, sub.requestId, "sid-chaos", 1500});
+      const auto sub = f.events();
+      f.coordinator.subscriptionResult(f.now, sub.requestId, true, "sid-chaos", 1500);
       break;
     }
     case 12:
-      f.events.process(subscription::RequestFailed{f.now, f.events.snapshot().requestId});
+      f.subscriptionResult(false);
       break;
     case 13: {
-      const auto notifications = f.events.snapshot().notifications;
-      f.events.process(subscription::NotifyReceived{f.now, "sid-stale"});
-      f.check(f.events.snapshot().notifications == notifications,
-              "stale SID never invalidates topology");
+      const auto notifications = f.events().notifications;
+      f.coordinator.notify(f.now, "sid-stale", f.stopping);
+      f.check(f.events().notifications == notifications, "stale SID never invalidates topology");
       break;
     }
     case 14:
       f.nextAddress = f.nextAddress == "192.168.1.2" ? "192.168.1.99" : "192.168.1.2";
       break;
     case 15:
-      f.stopping = true;
-      f.jobs.process(worker::Shutdown{});
-      f.network.process(wifi::Shutdown{f.now});
-      f.health.process(sonos::Shutdown{f.now});
-      f.events.process(subscription::Shutdown{f.now});
-      f.drain();
+      f.shutdown();
       break;
     case 16:
       if (before.running) {
@@ -641,33 +987,45 @@ void chaos(uint64_t seed, uint64_t steps) {
       }
       break;
     case 17:
-      f.jobs.process(worker::WorkerUnavailable{});
+      f.coordinator.finishJob(f.now, before.jobId, {false, false, false, true});
       break;
     case 18:
-      f.finish(before.jobId, false, true);
+      f.finish(before.jobId, false);
       break;
     }
-    f.drain();
-    const auto j = f.jobs.snapshot();
-    const auto w = f.network.snapshot();
-    const auto s = f.health.snapshot();
+    f.consumePlatform();
+    const auto j = f.jobs();
+    const auto w = f.network();
+    const auto s = f.health();
     const bool authorized = j.running && j.jobId == f.http.jobId && f.now < j.deadline &&
                             !f.stopping && w.state == WifiState::Online &&
                             s.state == SonosState::Ready && s.discoveryId == f.http.discoveryId &&
                             f.http.discoveryId != 0;
-    f.check(runtimeDispatchAllowed(j, w, s, f.http.jobId, f.http.discoveryId, f.now, f.stopping,
-                                   true) == authorized,
+    f.check(f.coordinator.dispatchAllowed(f.http.jobId, f.http.discoveryId, f.now, f.stopping,
+                                          true) == authorized,
             "real mutation fence matches independent combined authority model");
     f.invariants();
+    if ((step + 1) % 1000 == 0)
+      f.faultFreeWindow();
   }
   f.tick(sonos::DiscoveryBudgetMs + wifi::ConnectBudgetMs);
-  f.check(!f.jobs.snapshot().running, "final running work always reaches deadline");
+  f.check(!f.jobs().running, "final running work always reaches deadline");
   std::cout << "runtime faults: composed scenarios + " << steps << " events seed=" << seed
             << " mutations=" << f.http.mutations << " reads=" << f.http.reads
-            << " connections=" << f.network.snapshot().connections << '\n';
+            << " connections=" << f.network().connections
+            << " liveness-windows=" << f.livenessWindows << '\n';
 }
 int main(int argc, char** argv) {
   scenarios();
+  unavailableTargetsKeepNormalPolling();
+  busyWinsOverDiscoveryRecovery();
+  recoveryRejectsWithoutClearingRoom();
+  boundDiscoveryFailureIsImmediate();
+  queuedDiscoveryRejectionReportsRecovery();
+  localRejectionsCreateNoWork();
+  optionalQueueFailureIsLifecycleSuccess();
+  publicDecisionsHonorDeadlinesBeforeTimerService();
+  sharedTicksLogBootAndRecoveryTransitions();
   chaos(argc > 1 ? std::stoull(argv[1]) : 0x72756e74696d65ULL,
         argc > 2 ? std::stoull(argv[2]) : 100000ULL);
 }

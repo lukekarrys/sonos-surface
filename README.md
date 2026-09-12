@@ -43,7 +43,7 @@ npm installs TypeScript, Node type definitions, Prettier, and serialport. Setup 
 | `node --run check` | Typecheck, Prettier check, clang-format check, host fixtures and C++ tests under address/undefined-behavior sanitizers; host warnings are errors |
 | `node --run check:full` | Everything in check, then `stick-s3` and `ws-1.8` firmware builds with Arduino `--warnings more` |
 | `node --run test` | Host TypeScript fixtures and sanitizer-backed portable C++ tests; no Sonos or physical devices |
-| `node --run stress -- --seed 1592594996` | Reproducible lifecycle fault testing; optional `--steps`, three default seeds when omitted; see [runtime lifecycles](docs/runtime-lifecycles.md) |
+| `node --run stress -- --seed 12345` | Reproducible lifecycle fault testing; optional `--steps`, three default seeds when omitted; see [runtime lifecycles](docs/runtime-lifecycles.md) |
 | `node --run typecheck` | Static TypeScript checking with no emit |
 | `node --run format`, `node --run format:check` | Write/check Prettier formatting for supported text formats |
 | `node --run format:cpp`, `node --run format:cpp:check` | Write/check clang-format for owned C++, headers, and sketch |

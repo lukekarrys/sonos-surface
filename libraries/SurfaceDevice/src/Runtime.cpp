@@ -2,12 +2,8 @@
 #include "RoomConfig.h"
 #include "ConsoleWrite.h"
 #include "StickPlayback.h"
-#include "WorkerLifecycle.h"
-#include "WifiLifecycle.h"
-#include "SonosHealth.h"
-#include "RuntimeAdmission.h"
+#include "RuntimeCoordinator.h"
 #include "JobNetworkClient.h"
-#include "SubscriptionLifecycle.h"
 #if defined(SURFACE_WAVESHARE_1_8) && !SURFACE_TOUCH_DIAGNOSTIC
 #include "WaveshareArtwork.h"
 #endif
@@ -41,7 +37,6 @@ SemaphoreHandle_t stateMutex;
 QueueHandle_t jobs;
 TaskHandle_t workerTask = nullptr;
 uint64_t workerRetryAt = 0;
-std::atomic<uint32_t> completedJobs{0};
 std::atomic<bool> stopping{false};
 DevicePower power;
 AppState sharedState;
@@ -50,150 +45,26 @@ std::string savedPreference;
 std::string notice, serialLine;
 bool transientNotice = false;
 bool serialOverflow = false;
-std::vector<std::string> lifecycleLogs;
-std::atomic<bool> reconciliationPending{false};
+RuntimeCoordinator coordinator(sharedState);
 uint64_t nowMs() { return esp_timer_get_time() / 1000; }
-uint64_t workerDiscoveryId = 0;
-void workerFailedLocked(uint64_t generation);
-void subscriptionUnavailableLocked();
-struct RuntimeWorkerEffects final : WorkerEffects {
-  void started(uint64_t id, uint64_t deadline) override {
-    lifecycleLogs.push_back("worker Idle -> Running id=" + std::to_string(id) +
-                            " deadline=" + std::to_string(deadline));
-  }
-  void finished(uint64_t id, JobOutcome outcome) override {
-    completedJobs.fetch_add(1);
-    lifecycleLogs.push_back("worker Running -> Idle id=" + std::to_string(id) +
-                            " outcome=" + outcomeName(outcome));
-    if (outcome != JobOutcome::Success)
-      reconciliationPending.store(true);
-    if (outcome != JobOutcome::Success && outcome != JobOutcome::Failure) {
-      workerFailedLocked(workerDiscoveryId);
-      sharedState.observed.stale = true;
-      sharedState.queue.reset();
-      sharedState.refreshError = std::string("Worker ") + outcomeName(outcome);
-      if (sharedState.status == "pending") {
-        sharedState.status = "uncertain";
-        sharedState.recoveryRequired = true;
-        sharedState.detail = sharedState.refreshError;
-      }
-    }
-  }
-  void staleResult(uint64_t id) override {
-    lifecycleLogs.push_back("worker stale-result id=" + std::to_string(id));
-  }
-} workerEffects;
-WorkerLifecycle workerLifecycle(workerEffects);
-struct RuntimeWifiEffects final : WifiEffects {
-  bool connectRequested = false, disconnectRequested = false;
-  std::optional<bool> availability;
-  void beginConnect(uint64_t) override { connectRequested = true; }
-  void disconnect() override { disconnectRequested = true; }
-  void availabilityChanged(bool available) override { availability = available; }
-} wifiEffects;
-WifiLifecycle wifiLifecycle(wifiEffects);
-struct RuntimeSonosEffects final : SonosEffects {
-  bool discoveryPending = false, discardHost = false;
-  void discoveryRequested(uint64_t) override { discoveryPending = true; }
-  void invalidateAuthority() override {
-    discardHost = true;
-    discoveryPending = false;
-    sharedState.observed.stale = true;
-    sharedState.queue.reset();
-    sharedState.refreshError = "Sonos unavailable; recovering";
-    subscriptionUnavailableLocked();
-  }
-  void reconciliationRequested() override { reconciliationPending.store(true); }
-} sonosEffects;
-SonosHealth sonosHealth(sonosEffects);
-struct SubscriptionRequest {
-  uint64_t id;
-  bool renewal;
-  std::string address, sid;
-};
-struct RuntimeSubscriptionEffects final : SubscriptionEffects {
-  std::optional<SubscriptionRequest> pending;
-  void request(uint64_t id, bool renewal, const std::string& address,
-               const std::string& sid) override {
-    pending = SubscriptionRequest{id, renewal, address, sid};
-  }
-  void topologyChanged() override { reconciliationPending.store(true); }
-} subscriptionEffects;
-SubscriptionLifecycle subscriptionLifecycle(subscriptionEffects);
-template <class Event> bool subscriptionEventLocked(const Event& event) {
-  const auto before = subscriptionLifecycle.snapshot();
-  const bool accepted = subscriptionLifecycle.process(event);
-  const auto after = subscriptionLifecycle.snapshot();
-  if (before.state != after.state || before.requestId != after.requestId)
-    lifecycleLogs.push_back(std::string("subscription ") + subscriptionStateName(before.state) +
-                            " -> " + subscriptionStateName(after.state) +
-                            " reason=" + subscriptionErrorName(after.lastError));
-  return accepted;
-}
-void subscriptionUnavailableLocked() {
-  subscriptionEventLocked(subscription_lifecycle::NetworkUnavailable{nowMs()});
-  subscriptionEffects.pending.reset();
-}
-template <class Event> void sonosEventLocked(const Event& event) {
-  const auto before = sonosHealth.snapshot();
-  sonosHealth.process(event);
-  const auto after = sonosHealth.snapshot();
-  if (before.state != after.state)
-    lifecycleLogs.push_back(std::string("sonos ") + sonosStateName(before.state) + " -> " +
-                            sonosStateName(after.state) +
-                            " generation=" + std::to_string(after.discoveryId) +
-                            " reason=" + sonosErrorName(after.lastError));
-}
-void workerFailedLocked(uint64_t generation) {
-  if (generation)
-    sonosEventLocked(sonos_health::SessionFailure{nowMs(), generation});
-}
-bool sonosUsable() {
-  xSemaphoreTake(stateMutex, portMAX_DELAY);
-  const bool usable = wifiLifecycle.snapshot().networkReady &&
-                      sonosHealth.usable(sonosHealth.snapshot().discoveryId);
-  xSemaphoreGive(stateMutex);
-  return usable;
-}
-// stateMutex serializes the model and publication; effects above only update
-// local state. Console/network work always runs after releasing this mutex.
+// Coordinator calls and publication share this mutex. Platform work runs after
+// unlocking, except the nonblocking enqueue that commits validated admission.
 bool workerBusy() {
   xSemaphoreTake(stateMutex, portMAX_DELAY);
-  const bool running = workerLifecycle.snapshot().running;
+  const bool running = coordinator.snapshots().worker.running;
   xSemaphoreGive(stateMutex);
   return running;
 }
-bool jobActiveLocked(uint64_t id) {
-  return runtimeJobActive(workerLifecycle.snapshot(), id, nowMs(), stopping.load());
-}
+bool jobActiveLocked(uint64_t id) { return coordinator.jobActive(id, nowMs(), stopping.load()); }
 bool jobActive(uint64_t id) {
   xSemaphoreTake(stateMutex, portMAX_DELAY);
   const bool active = jobActiveLocked(id);
   xSemaphoreGive(stateMutex);
   return active;
 }
-uint64_t reserveJob(bool refresh) {
+bool finishJob(uint64_t id, RuntimeCoordinator::JobOutcomeInput outcome = {}) {
   xSemaphoreTake(stateMutex, portMAX_DELAY);
-  workerLifecycle.process(worker_lifecycle::DeadlineExpired{nowMs()});
-  const auto id = workerLifecycle.submit(nowMs(), refresh ? 45000 : 90000);
-  if (id)
-    workerDiscoveryId = 0;
-  xSemaphoreGive(stateMutex);
-  return id;
-}
-bool finishJob(uint64_t id, bool success, bool unavailable = false, bool unhealthy = false) {
-  xSemaphoreTake(stateMutex, portMAX_DELAY);
-  workerLifecycle.process(worker_lifecycle::DeadlineExpired{nowMs()});
-  const auto snapshot = workerLifecycle.snapshot();
-  const bool accepted = snapshot.running && snapshot.jobId == id;
-  if (unhealthy && accepted)
-    workerFailedLocked(workerDiscoveryId);
-  if (unavailable && workerLifecycle.snapshot().jobId == id)
-    workerLifecycle.process(worker_lifecycle::WorkerUnavailable{});
-  else if (success)
-    workerLifecycle.process(worker_lifecycle::Success{id});
-  else
-    workerLifecycle.process(worker_lifecycle::Failure{id});
+  const bool accepted = coordinator.finishJob(nowMs(), id, outcome);
   xSemaphoreGive(stateMutex);
   return accepted;
 }
@@ -218,67 +89,18 @@ void consoleLine(const std::string& message, uint32_t waitMs) {
 void log(const std::string& message) { consoleLine(message, 0); }
 void logResponse(const std::string& message) { consoleLine(message, 250); }
 void serviceWifi() {
-  const auto now = nowMs();
   const bool observedOnline = WiFi.status() == WL_CONNECTED;
   xSemaphoreTake(stateMutex, portMAX_DELAY);
-  const auto before = wifiLifecycle.snapshot();
-  wifiLifecycle.tick(now);
-  const auto current = wifiLifecycle.snapshot();
-  // A status sampled before a newly emitted beginConnect is not its result.
-  if (current.state == WifiState::Connecting && observedOnline && !wifiEffects.connectRequested)
-    wifiLifecycle.process(wifi_lifecycle::Connected{now, current.attemptId});
-  else if (current.state == WifiState::Online && !observedOnline)
-    wifiLifecycle.process(wifi_lifecycle::Disconnected{now, current.attemptId});
-  const auto after = wifiLifecycle.snapshot();
-  if (before.state != after.state)
-    lifecycleLogs.push_back(std::string("wifi ") + wifiStateName(before.state) + " -> " +
-                            wifiStateName(after.state) +
-                            " attempt=" + std::to_string(after.totalAttempts) +
-                            " reason=" + wifiErrorName(after.lastError));
-  if (wifiEffects.availability) {
-    if (*wifiEffects.availability) {
-      sonosEventLocked(sonos_health::NetworkAvailable{now});
-      reconciliationPending.store(true);
-    } else {
-      sonosEventLocked(sonos_health::NetworkUnavailable{now});
-      workerLifecycle.process(worker_lifecycle::NetworkUnavailable{});
-      sharedState.observed.stale = true;
-      sharedState.queue.reset();
-      sharedState.refreshError = "WiFi unavailable";
-    }
-    wifiEffects.availability.reset();
-  }
-  const bool disconnect = wifiEffects.disconnectRequested;
-  const bool connect = wifiEffects.connectRequested;
-  wifiEffects.disconnectRequested = wifiEffects.connectRequested = false;
+  coordinator.serviceWifi(nowMs(), observedOnline);
+  const auto effects = coordinator.drainWifi();
   xSemaphoreGive(stateMutex);
-  // SDK calls can block briefly; they never run while holding the model/UI lock.
-  if (disconnect)
+  if (effects.disconnect)
     WiFi.disconnect(false, false);
-  if (connect) {
+  if (effects.connect) {
     WiFi.mode(WIFI_STA);
     WiFi.setAutoReconnect(false);
     WiFi.begin(config.ssid.c_str(), config.password.c_str());
   }
-}
-void serviceSonos() {
-  xSemaphoreTake(stateMutex, portMAX_DELAY);
-  const auto health = sonosHealth.snapshot();
-  if (health.state == SonosState::Discovering)
-    sonosEventLocked(sonos_health::DiscoveryTimeout{nowMs()});
-  else if (health.state == SonosState::Backoff)
-    sonosEventLocked(sonos_health::RetryDue{nowMs()});
-  const auto subscription = subscriptionLifecycle.snapshot();
-  if (subscription.sidPresent && nowMs() >= subscription.leaseUntil)
-    subscriptionEventLocked(subscription_lifecycle::LeaseExpired{nowMs()});
-  else if (subscription.state == SubscriptionState::Subscribing ||
-           subscription.state == SubscriptionState::Renewing)
-    subscriptionEventLocked(subscription_lifecycle::DeadlineExpired{nowMs()});
-  else if (subscription.state == SubscriptionState::Healthy)
-    subscriptionEventLocked(subscription_lifecycle::RenewalDue{nowMs()});
-  else if (subscription.state == SubscriptionState::Backoff)
-    subscriptionEventLocked(subscription_lifecycle::RetryDue{nowMs()});
-  xSemaphoreGive(stateMutex);
 }
 void restart(const std::string& message) {
   stopping.store(true);
@@ -290,20 +112,13 @@ void restart(const std::string& message) {
   ESP.restart();
 }
 void publish(uint64_t id, const AppState& state) {
-  if (stopping.load())
-    return;
   xSemaphoreTake(stateMutex, portMAX_DELAY);
-  if (!jobActiveLocked(id)) {
-    xSemaphoreGive(stateMutex);
-    return;
-  }
-  // An accepted request may finish after topology switches the selection.
-  // Keep its outcome in its Session; never publish it as the new room's state.
   const auto* room = selection.selected();
-  publishSelectedState(sharedState, state, room ? room->id : "");
-  if (!selection.warning.empty())
-    sharedState.refreshError = selection.warning;
+  const bool published = coordinator.publish(nowMs(), id, state, room ? room->id : "",
+                                             selection.warning, stopping.load());
   xSemaphoreGive(stateMutex);
+  if (!published)
+    return;
   log("request=" + std::to_string(state.requestId) + " status=" + state.status + " " +
       state.detail + " refresh-error=" + state.refreshError);
 }
@@ -344,20 +159,18 @@ protected:
       if (WiFi.status() != WL_CONNECTED)
         return false;
       xSemaphoreTake(stateMutex, portMAX_DELAY);
-      const bool result = runtimeDispatchAllowed(
-          workerLifecycle.snapshot(), wifiLifecycle.snapshot(), sonosHealth.snapshot(), jobId,
-          discoveryId, surface::device::nowMs(), stopping.load(), !isReadOnlySonosAction(action));
+      const bool result =
+          coordinator.dispatchAllowed(jobId, discoveryId, surface::device::nowMs(), stopping.load(),
+                                      !isReadOnlySonosAction(action));
       xSemaphoreGive(stateMutex);
       return result;
     };
     if (!allowed())
       return {0, "", "Job or Sonos authority expired/unavailable", true};
-    if (WiFi.status() != WL_CONNECTED)
-      return {0, "", "WiFi disconnected", true};
     if (host.empty())
       return {0, "", "No discovered address", true};
     xSemaphoreTake(stateMutex, portMAX_DELAY);
-    const auto deadline = workerLifecycle.snapshot().deadline;
+    const auto deadline = coordinator.snapshots().worker.deadline;
     xSemaphoreGive(stateMutex);
     JobNetworkClient client(
         deadline, [] { return surface::device::nowMs(); }, allowed, [] { vTaskDelay(1); });
@@ -414,7 +227,7 @@ protected:
     http.end();
     return result;
   }
-  uint64_t nowMs() override { return esp_timer_get_time() / 1000; }
+  uint64_t nowMs() override { return surface::device::nowMs(); }
   void pollWait(uint32_t ms) override {
     if (jobActive(jobId))
       vTaskDelay(pdMS_TO_TICKS(ms));
@@ -515,10 +328,9 @@ class TopologyEvents {
       }
     }
     xSemaphoreTake(stateMutex, portMAX_DELAY);
-    const bool valid =
-        first.rfind("NOTIFY /topology ", 0) == 0 && headersComplete && bytes < 8192 &&
-        nowMs() < deadline && !stopping.load() &&
-        subscriptionEventLocked(subscription_lifecycle::NotifyReceived{nowMs(), sid});
+    const bool valid = first.rfind("NOTIFY /topology ", 0) == 0 && headersComplete &&
+                       bytes < 8192 && nowMs() < deadline && !stopping.load() &&
+                       coordinator.notify(nowMs(), sid, stopping.load());
     xSemaphoreGive(stateMutex);
     const std::string response =
         valid
@@ -541,16 +353,14 @@ public:
     }
     poll();
     xSemaphoreTake(stateMutex, portMAX_DELAY);
-    auto pending = std::move(subscriptionEffects.pending);
-    subscriptionEffects.pending.reset();
-    const auto deadline = subscriptionLifecycle.snapshot().deadline;
+    auto pending = coordinator.drainSubscription();
+    const auto deadline = coordinator.snapshots().subscription.deadline;
     xSemaphoreGive(stateMutex);
     if (!pending)
       return;
     const auto active = [id = pending->id] {
       xSemaphoreTake(stateMutex, portMAX_DELAY);
-      const bool result = !stopping.load() && wifiLifecycle.snapshot().networkReady &&
-                          subscriptionLifecycle.active(id, nowMs());
+      const bool result = coordinator.subscriptionActive(id, nowMs(), stopping.load());
       xSemaphoreGive(stateMutex);
       return result;
     };
@@ -581,11 +391,8 @@ public:
     const std::string timeout = http.header("TIMEOUT").c_str();
     http.end();
     xSemaphoreTake(stateMutex, portMAX_DELAY);
-    if (status == 200)
-      subscriptionEventLocked(subscription_lifecycle::RequestSucceeded{
-          nowMs(), pending->id, sid, parseSubscriptionLeaseMs(timeout)});
-    else
-      subscriptionEventLocked(subscription_lifecycle::RequestFailed{nowMs(), pending->id});
+    coordinator.subscriptionResult(nowMs(), pending->id, status == 200, sid,
+                                   parseSubscriptionLeaseMs(timeout));
     xSemaphoreGive(stateMutex);
   }
   void stop() {
@@ -609,26 +416,18 @@ void worker(void*) {
     if (xQueueReceive(jobs, &job, pdMS_TO_TICKS(100)) != pdTRUE)
       continue;
     if (!jobActive(job->id)) {
-      finishJob(job->id, false);
+      finishJob(job->id);
       delete job;
       continue;
     }
     xSemaphoreTake(stateMutex, portMAX_DELAY);
-    if (jobActiveLocked(job->id)) {
-      sonosEventLocked(sonos_health::RefreshRequested{nowMs()});
-      const auto health = sonosHealth.snapshot();
-      if (health.state == SonosState::Discovering) {
-        job->discoveryId = workerDiscoveryId = health.discoveryId;
-        sonosEffects.discoveryPending = false;
-      }
-    }
-    if (sonosEffects.discardHost) {
-      discoveryHost.clear();
-      sonosEffects.discardHost = false;
-    }
+    const auto binding = coordinator.bindDiscovery(nowMs(), job->id);
+    job->discoveryId = binding.discoveryId;
     xSemaphoreGive(stateMutex);
+    if (binding.discardHost)
+      discoveryHost.clear();
     if (!job->discoveryId) {
-      finishJob(job->id, false);
+      finishJob(job->id);
       delete job;
       continue;
     }
@@ -666,22 +465,17 @@ void worker(void*) {
     xSemaphoreTake(stateMutex, portMAX_DELAY);
     if (!jobActiveLocked(job->id)) {
       xSemaphoreGive(stateMutex);
-      finishJob(job->id, false);
+      finishJob(job->id);
       delete job;
       continue;
     }
-    if (discovered.ok)
-      sonosEventLocked(sonos_health::DiscoverySucceeded{nowMs(), job->discoveryId});
-    else
-      sonosEventLocked(sonos_health::DiscoveryFailed{nowMs(), job->discoveryId});
     // A result at/after the discovery deadline cannot refresh topology authority.
-    if (discovered.ok && !sonosHealth.usable(job->discoveryId))
+    const bool discoveryAccepted = coordinator.discoveryResult(nowMs(), job->id, job->discoveryId,
+                                                               discovered.ok, discoveryHost);
+    if (discovered.ok && !discoveryAccepted)
       discovered = Result::fail("Discovery expired");
-    if (discovered.ok && job->refresh)
-      reconciliationPending.store(false); // This job performs the recovery read below.
     if (discovered.ok) {
       selection.update(std::move(rooms));
-      subscriptionEventLocked(subscription_lifecycle::NetworkAvailable{nowMs(), discoveryHost});
     } else {
       sharedState.observed.stale = true;
       sharedState.queue.reset();
@@ -717,18 +511,18 @@ void worker(void*) {
     if (job->refresh && !selectedRoom.id.empty())
       log("selected=" + selectedRoom.name + " uuid=" + selectedRoom.id + " " + warning);
     bool queueFailed = false;
+    const bool targetUsable = discovered.ok && target.eligible && !target.address.empty();
     Session* jobSession = nullptr;
     std::optional<AppState> retained;
-    if (!discovered.ok || !target.eligible || target.address.empty()) {
+    if (!targetUsable) {
       xSemaphoreTake(stateMutex, portMAX_DELAY);
       AppState unavailable = sharedState;
       xSemaphoreGive(stateMutex);
       unavailable.observed.stale = true;
       unavailable.queue.reset();
-      unavailable.observed.targetId = target.id;
-      unavailable.observed.room = target.name;
-      unavailable.refreshError =
-          discovered.ok ? "Selected room unavailable/grouped" : discovered.error;
+      unavailable.refreshError = !warning.empty() ? warning
+                                 : discovered.ok  ? "Selected room unavailable/grouped"
+                                                  : discovered.error;
       unavailable.detail = warning;
       publish(job->id, unavailable);
     } else {
@@ -791,14 +585,10 @@ void worker(void*) {
           log("command rejected/result: " + result.error);
       }
     }
-    const bool sessionOk = discovered.ok && target.eligible && !target.address.empty();
-    xSemaphoreTake(stateMutex, portMAX_DELAY);
-    if (jobActiveLocked(job->id) && sessionOk)
-      sonosEventLocked(sonos_health::SessionSucceeded{nowMs(), job->discoveryId});
-    xSemaphoreGive(stateMutex);
     // Decide terminal acceptance under the same lock as deadline processing.
     // Cleanup occurs on this task before any newer job can reuse its Session.
-    if (!finishJob(job->id, sessionOk && !queueFailed, false, !sessionOk) && jobSession && retained)
+    if (!finishJob(job->id, {targetUsable, discovered.ok, queueFailed, false}) && jobSession &&
+        retained)
       jobSession->app.discardCancelledResult(*retained, !job->refresh);
     delete job;
   }
@@ -815,137 +605,133 @@ void ensureWorker() {
     return;
   }
   log("worker available");
-  reconciliationPending.store(true);
+  xSemaphoreTake(stateMutex, portMAX_DELAY);
+  coordinator.workerAvailable();
+  xSemaphoreGive(stateMutex);
+}
+// The queue send and model admission commit together under stateMutex. The
+// worker takes that mutex before using a queued job, so it sees the committed ID.
+bool enqueueJobLocked(Job* job) {
+  return coordinator.enqueueJob(
+             nowMs(), job->refresh,
+             [&](uint64_t id) {
+               job->id = id;
+               return workerTask && jobs && xQueueSend(jobs, &job, 0) == pdTRUE;
+             },
+             stopping.load()) != 0;
+}
+void rejectInput(const std::string& input, const RuntimeCoordinator::Admission& admission) {
+  notice = admission.notice;
+  transientNotice = true;
+  log("input=" + input + " rejected: " + admission.reason);
 }
 void submit(const std::string& payload, bool refresh = false, bool cycle = false,
             bool announce = true,
             std::optional<std::pair<uint32_t, uint32_t>> queuePage = std::nullopt,
             const BoardEvent* uiEvent = nullptr) {
-  if (stopping.load())
-    return;
-  if (!refresh && !sonosUsable()) {
-    notice = "Sonos unavailable; recovering";
-    transientNotice = true;
-    log("input rejected: Sonos authority unavailable");
-    return;
-  }
   const std::string input = cycle ? "room-next" : refresh ? "refresh" : "intent";
-  const auto jobId = reserveJob(refresh);
-  if (!jobId) {
-    if (announce) {
-      notice = "Busy; input ignored";
-      transientNotice = true;
-      log("input=" + input + " rejected: worker busy");
-    }
+  xSemaphoreTake(stateMutex, portMAX_DELAY);
+  auto admission = coordinator.admission(nowMs(), refresh, stopping.load());
+  xSemaphoreGive(stateMutex);
+  if (!admission.allowed) {
+    rejectInput(input, admission);
     return;
   }
-  if (announce)
-    log("input=" + input + " accepted");
-  if (announce)
-    transientNotice = false;
-  auto job = new Job{refresh, cycle, {}};
-  job->id = jobId;
+  MusicIntent intent;
+  Result result;
+  if (!refresh)
+    result =
+        uiEvent ? (intent = uiEvent->intent, validateIntent(intent)) : parseIntent(payload, intent);
+  if (!result.ok) {
+    notice = result.error;
+    transientNotice = true;
+    log("Rejected: " + result.error);
+    return;
+  }
+  auto job = std::make_unique<Job>(Job{refresh, cycle, {}});
   job->queuePage = queuePage;
-  if (uiEvent) {
-    xSemaphoreTake(stateMutex, portMAX_DELAY);
-    const auto* selected = selection.selected();
-    const bool matches = selected && selected->eligible && selected->id == uiEvent->targetId;
-    const bool contentMatches = !uiEvent->intent.seekPositionMs ||
-                                (sharedState.observed.trackUri == uiEvent->trackIdentity &&
-                                 sharedState.observed.queueRevision == uiEvent->queueRevision);
-    const bool queueMatches =
-        !uiEvent->intent.queueIndex || sharedState.observed.queueRevision == uiEvent->queueRevision;
-    xSemaphoreGive(stateMutex);
-    if (!matches || !contentMatches || !queueMatches) {
-      notice = "Room changed - try again";
-      transientNotice = true;
-      log("UI rejected: room/content differs from displayed observation");
-      delete job;
-      finishJob(jobId, false);
-      return;
-    }
+  Room acceptedRoom;
+  Plan plan;
+  xSemaphoreTake(stateMutex, portMAX_DELAY);
+  admission = coordinator.admission(nowMs(), refresh, stopping.load());
+  const auto* selected = selection.selected();
+  if (admission.allowed && uiEvent && !runtimeUiMatches(selected, sharedState.observed, *uiEvent))
+    result = Result::fail("Room changed - try again");
+  if (admission.allowed && result.ok && uiEvent)
     job->readTarget = uiEvent->targetId;
+  if (admission.allowed && result.ok && !refresh) {
+    if (!selected || !selected->eligible || selected->address.empty())
+      result = Result::fail("Selected room unavailable; refresh targets");
+    else {
+      acceptedRoom = *selected;
+      job->accepted = resolvePolicy(
+          intent, {selected->id, selection.resolvedPolicies, config.revision, config.policy});
+      result = makePlan(job->accepted, plan);
+    }
+  }
+  // Capture diagnostics before transferring ownership to the worker.
+  const auto description = !refresh && result.ok ? describeIntent(intent, job->accepted) : "";
+  const bool queued = admission.allowed && result.ok && enqueueJobLocked(job.get());
+  if (queued)
+    job.release();
+  xSemaphoreGive(stateMutex);
+  if (!admission.allowed) {
+    rejectInput(input, admission);
+    return;
+  }
+  if (!result.ok) {
+    notice = result.error;
+    transientNotice = true;
+    log("input=" + input + " rejected: " + result.error);
+    return;
+  }
+  if (!queued) {
+    notice = "Worker unavailable";
+    transientNotice = true;
+    log("input=" + input + " rejected: queue unavailable");
+    return;
   }
   if (!refresh) {
-    MusicIntent intent;
-    auto result =
-        uiEvent ? (intent = uiEvent->intent, validateIntent(intent)) : parseIntent(payload, intent);
-    xSemaphoreTake(stateMutex, portMAX_DELAY);
-    const auto* room = selection.selected();
-    if (result.ok && (!room || !room->eligible))
-      result = Result::fail("Selected room unavailable; refresh targets");
-    const Room acceptedRoom = room ? *room : Room{};
-    if (result.ok)
-      job->accepted = resolvePolicy(
-          intent, {room->id, selection.resolvedPolicies, config.revision, config.policy});
-    xSemaphoreGive(stateMutex);
-    if (result.ok) {
-      log("accepted room=" + acceptedRoom.name + " roomDisplayId=" + acceptedRoom.displayId + " " +
-          describeIntent(intent, job->accepted));
-      Plan plan;
-      result = makePlan(job->accepted, plan);
-      std::string effects;
-      for (auto op : plan.operations)
-        effects += std::string(operationName(op)) + " ";
-      log("planned effects=" + effects);
-    }
-    if (!result.ok) {
-      notice = result.error;
-      log("Rejected: " + result.error);
-      delete job;
-      finishJob(jobId, false);
-      return;
-    }
+    log("accepted room=" + acceptedRoom.name + " roomDisplayId=" + acceptedRoom.displayId + " " +
+        description);
+    std::string effects;
+    for (auto op : plan.operations)
+      effects += std::string(operationName(op)) + " ";
+    log("planned effects=" + effects);
   }
-  if (!workerTask || !jobs || xQueueSend(jobs, &job, 0) != pdTRUE) {
-    delete job;
-    finishJob(jobId, false, true);
-    notice = "Worker unavailable";
-  } else if (announce) {
+  if (announce) {
+    log("input=" + input + " accepted");
     notice = cycle ? "Switching room" : refresh ? "Refreshing rooms/state" : "Intent accepted";
     transientNotice = true;
   }
 }
-// Direct room selection uses only the existing configured/eligible projection.
-// Admission clears displayed state immediately; discovery/read runs on the worker.
+// Direct room selection uses only the configured/eligible projection. Clear
+// the observation only after the validated read has entered the queue.
 void selectRoom(const std::string& displayId) {
-  if (stopping.load())
-    return;
-  const auto jobId = reserveJob(true);
-  if (!jobId) {
-    notice = "Busy - try again";
-    transientNotice = true;
-    return;
-  }
-  auto job = new Job{true, false, {}};
-  job->id = jobId;
+  auto job = std::make_unique<Job>(Job{true, false, {}});
   job->roomChanged = true;
   xSemaphoreTake(stateMutex, portMAX_DELAY);
-  const auto previousSelection = selection.selectedId;
-  const auto previousPreference = selection.preferredId;
-  const auto previousState = sharedState;
+  const auto admission = coordinator.admission(nowMs(), true, stopping.load());
   const auto it = std::find_if(selection.rooms.begin(), selection.rooms.end(), [&](const Room& r) {
     return r.displayId == displayId && r.eligible && !r.address.empty();
   });
-  bool accepted = false;
-  if (it != selection.rooms.end()) {
+  const bool valid = it != selection.rooms.end();
+  const bool queued = admission.allowed && valid && enqueueJobLocked(job.get());
+  if (queued) {
+    job.release();
     selection.selectedId = it->id;
     selection.preferredId = it->displayId;
     selection.initialized = true;
     selectObservedRoom(sharedState, *it);
-    if (workerTask && jobs && xQueueSend(jobs, &job, 0) == pdTRUE)
-      accepted = true;
-    else {
-      selection.selectedId = previousSelection;
-      selection.preferredId = previousPreference;
-      sharedState = previousState;
-    }
   }
   xSemaphoreGive(stateMutex);
-  if (!accepted) {
-    delete job;
-    finishJob(jobId, false);
-    notice = "Room unavailable - refresh";
+  if (!admission.allowed) {
+    rejectInput("room-select", admission);
+    return;
+  }
+  if (!queued) {
+    notice = valid ? "Worker unavailable" : "Room unavailable - refresh";
+    log("input=room-select rejected: " + notice);
   } else {
     notice = "Reading selected room";
     log("room-select accepted displayId=" + displayId +
@@ -954,48 +740,33 @@ void selectRoom(const std::string& displayId) {
   transientNotice = true;
 }
 void submitToggle() {
-  if (stopping.load())
-    return;
-  if (!sonosUsable()) {
-    notice = "Sonos unavailable; recovering";
-    transientNotice = true;
-    return;
-  }
-  const auto jobId = reserveJob(false);
-  if (!jobId) {
-    notice = "Busy; input ignored";
-    transientNotice = true;
-    log("input=toggle rejected: worker busy");
-    return;
-  }
-  auto job = new Job{false, false, {}};
-  job->id = jobId;
+  auto job = std::make_unique<Job>(Job{false, false, {}});
   xSemaphoreTake(stateMutex, portMAX_DELAY);
+  const auto admission = coordinator.admission(nowMs(), false, stopping.load());
   const auto* selected = selection.selected();
   const Room room = selected ? *selected : Room{};
-  if (room.eligible)
+  const bool valid = room.eligible && !room.address.empty();
+  if (admission.allowed && valid)
     job->toggleContext =
         PolicyContext{room.id, selection.resolvedPolicies, config.revision, config.policy};
+  const auto revision = config.revision;
+  const bool queued = admission.allowed && valid && enqueueJobLocked(job.get());
+  if (queued)
+    job.release();
   xSemaphoreGive(stateMutex);
-  if (!job->toggleContext) {
-    delete job;
-    finishJob(jobId, false);
-    notice = "Selected room unavailable; refresh targets";
-    transientNotice = false;
-    log("input=toggle rejected: " + notice);
+  if (!admission.allowed) {
+    rejectInput("toggle", admission);
     return;
   }
-  log("toggle requested room=" + room.name + " roomDisplayId=" + room.displayId +
-      " uuid=" + room.id + " policyRevision=" + std::to_string(job->toggleContext->revision));
-  if (!workerTask || !jobs || xQueueSend(jobs, &job, 0) != pdTRUE) {
-    delete job;
-    finishJob(jobId, false, true);
-    notice = "Worker unavailable";
-    transientNotice = false;
+  if (!queued) {
+    notice = valid ? "Worker unavailable" : "Selected room unavailable; refresh targets";
+    log("input=toggle rejected: " + notice);
   } else {
+    log("toggle requested room=" + room.name + " roomDisplayId=" + room.displayId +
+        " uuid=" + room.id + " policyRevision=" + std::to_string(revision));
     notice = "Reading play/pause state";
-    transientNotice = true;
   }
+  transientNotice = true;
 }
 std::string command(const char* transport) {
   return Json{{"format", "sonos-surface"}, {"version", 1}, {"intent", {{"transport", transport}}}}
@@ -1033,48 +804,48 @@ void preview(const std::string& payload) {
 }
 void lifecycleStatus() {
   xSemaphoreTake(stateMutex, portMAX_DELAY);
-  const auto worker = workerLifecycle.snapshot();
-  const auto wifi = wifiLifecycle.snapshot();
-  const auto sonos = sonosHealth.snapshot();
-  const auto subscription = subscriptionLifecycle.snapshot();
+  const auto snapshots = coordinator.snapshots();
   xSemaphoreGive(stateMutex);
-  logResponse("lifecycles " + Json{{"worker",
-                                    {{"state", worker.running ? "Running" : "Idle"},
-                                     {"jobId", worker.jobId},
-                                     {"startedAt", worker.startedAt},
-                                     {"deadline", worker.deadline},
-                                     {"lastJobId", worker.lastJobId},
-                                     {"lastOutcome", outcomeName(worker.lastOutcome)},
-                                     {"accepted", worker.accepted},
-                                     {"completed", worker.completed},
-                                     {"staleResults", worker.staleResults},
-                                     {"taskAvailable", workerTask != nullptr}}},
-                                   {"wifi",
-                                    {{"state", wifiStateName(wifi.state)},
-                                     {"since", wifi.since},
-                                     {"deadline", wifi.deadline},
-                                     {"retryAt", wifi.retryAt},
-                                     {"attempts", wifi.attempts},
-                                     {"lastError", wifiErrorName(wifi.lastError)}}},
-                                   {"sonos",
-                                    {{"state", sonosStateName(sonos.state)},
-                                     {"since", sonos.since},
-                                     {"deadline", sonos.deadline},
-                                     {"retryAt", sonos.retryAt},
-                                     {"discoveryId", sonos.discoveryId},
-                                     {"lastSuccessfulDiscovery", sonos.lastSuccessfulDiscovery},
-                                     {"lastError", sonosErrorName(sonos.lastError)}}},
-                                   {"subscription",
-                                    {{"state", subscriptionStateName(subscription.state)},
-                                     {"sidPresent", subscription.sidPresent},
-                                     {"requestId", subscription.requestId},
-                                     {"deadline", subscription.deadline},
-                                     {"retryAt", subscription.retryAt},
-                                     {"renewAt", subscription.renewAt},
-                                     {"leaseUntil", subscription.leaseUntil},
-                                     {"lastNotifyAt", subscription.lastNotifyAt},
-                                     {"lastError", subscriptionErrorName(subscription.lastError)}}}}
-                                  .dump());
+  // Build fields incrementally: nested initializer lists enlarge the caller's
+  // stack frame and leave too little of the Arduino loop stack for board commands.
+  Json status = Json::object();
+  auto& worker = status["worker"];
+  worker["state"] = snapshots.worker.running ? "Running" : "Idle";
+  worker["jobId"] = snapshots.worker.jobId;
+  worker["startedAt"] = snapshots.worker.startedAt;
+  worker["deadline"] = snapshots.worker.deadline;
+  worker["lastJobId"] = snapshots.worker.lastJobId;
+  worker["lastOutcome"] = outcomeName(snapshots.worker.lastOutcome);
+  worker["accepted"] = snapshots.worker.accepted;
+  worker["completed"] = snapshots.worker.completed;
+  worker["staleResults"] = snapshots.worker.staleResults;
+  worker["taskAvailable"] = workerTask != nullptr;
+  auto& wifi = status["wifi"];
+  wifi["state"] = wifiStateName(snapshots.wifi.state);
+  wifi["since"] = snapshots.wifi.since;
+  wifi["deadline"] = snapshots.wifi.deadline;
+  wifi["retryAt"] = snapshots.wifi.retryAt;
+  wifi["attempts"] = snapshots.wifi.attempts;
+  wifi["lastError"] = wifiErrorName(snapshots.wifi.lastError);
+  auto& sonos = status["sonos"];
+  sonos["state"] = sonosStateName(snapshots.sonos.state);
+  sonos["since"] = snapshots.sonos.since;
+  sonos["deadline"] = snapshots.sonos.deadline;
+  sonos["retryAt"] = snapshots.sonos.retryAt;
+  sonos["discoveryId"] = snapshots.sonos.discoveryId;
+  sonos["lastSuccessfulDiscovery"] = snapshots.sonos.lastSuccessfulDiscovery;
+  sonos["lastError"] = sonosErrorName(snapshots.sonos.lastError);
+  auto& subscription = status["subscription"];
+  subscription["state"] = subscriptionStateName(snapshots.subscription.state);
+  subscription["sidPresent"] = snapshots.subscription.sidPresent;
+  subscription["requestId"] = snapshots.subscription.requestId;
+  subscription["deadline"] = snapshots.subscription.deadline;
+  subscription["retryAt"] = snapshots.subscription.retryAt;
+  subscription["renewAt"] = snapshots.subscription.renewAt;
+  subscription["leaseUntil"] = snapshots.subscription.leaseUntil;
+  subscription["lastNotifyAt"] = snapshots.subscription.lastNotifyAt;
+  subscription["lastError"] = subscriptionErrorName(snapshots.subscription.lastError);
+  logResponse("lifecycles " + status.dump());
 }
 void handle(const std::string& line) {
   if (stopping.load())
@@ -1163,7 +934,12 @@ void handle(const std::string& line) {
 }
 } // namespace
 
-RuntimeStatus runtimeStatus() { return {workerBusy(), completedJobs.load(), uint32_t(millis())}; }
+RuntimeStatus runtimeStatus() {
+  xSemaphoreTake(stateMutex, portMAX_DELAY);
+  const auto worker = coordinator.snapshots().worker;
+  xSemaphoreGive(stateMutex);
+  return {worker.running, uint32_t(worker.completed), uint32_t(millis())};
+}
 
 void begin() {
   // Buffer complete configuration and intent commands while the display task
@@ -1197,8 +973,9 @@ void begin() {
   selection.configured = config.rooms;
   selection.preferredId = savedPreference;
   if (!config.ssid.empty()) {
-    wifiLifecycle.process(wifi_lifecycle::ConfigAvailable{nowMs()});
-    log("wifi Unconfigured -> Connecting attempt=1");
+    xSemaphoreTake(stateMutex, portMAX_DELAY);
+    coordinator.configAvailable(nowMs());
+    xSemaphoreGive(stateMutex);
     serviceWifi();
   } else
     log("No WiFi configuration; NFC/input diagnostics still active");
@@ -1212,12 +989,16 @@ void loop() {
   }
   ensureWorker();
   xSemaphoreTake(stateMutex, portMAX_DELAY);
-  workerLifecycle.process(worker_lifecycle::DeadlineExpired{nowMs()});
-  std::vector<std::string> transitions;
-  transitions.swap(lifecycleLogs);
+  coordinator.service(nowMs());
+  auto transitions = coordinator.drainTransitions();
+  const auto feedback = coordinator.drainNotice();
   xSemaphoreGive(stateMutex);
   for (const auto& transition : transitions)
     log(transition);
+  if (feedback) {
+    notice = *feedback;
+    transientNotice = true;
+  }
   // Sample physical activity before admission or background work. USB commands
   // do not extend appliance uptime (use timeout=0 during development).
   const auto event = boardPoll();
@@ -1228,10 +1009,7 @@ void loop() {
   if (power.poll(esp_timer_get_time() / 1000, event.activity, writerActive)) {
     stopping.store(true);
     xSemaphoreTake(stateMutex, portMAX_DELAY);
-    workerLifecycle.process(worker_lifecycle::Shutdown{});
-    wifiLifecycle.process(wifi_lifecycle::Shutdown{nowMs()});
-    sonosEventLocked(sonos_health::Shutdown{nowMs()});
-    subscriptionEventLocked(subscription_lifecycle::Shutdown{nowMs()});
+    coordinator.shutdown(nowMs());
     xSemaphoreGive(stateMutex);
     log("SLEEP_REQUESTED: local inactivity; cancelling device work");
 #if defined(SURFACE_WAVESHARE_1_8) && !SURFACE_TOUCH_DIAGNOSTIC
@@ -1247,7 +1025,6 @@ void loop() {
     boardSleep();
   }
   serviceWifi();
-  serviceSonos();
   while (Serial.available()) {
     char c = Serial.read();
     if (c == '\n') {
@@ -1323,12 +1100,14 @@ void loop() {
   case Input::None:
     break;
   }
-  static uint32_t lastRefresh = 0, lastRender = 0, lastHeartbeat = 0;
-  static uint64_t nextAutomaticJobAt = 0;
+  static uint32_t lastRender = 0, lastHeartbeat = 0;
   xSemaphoreTake(stateMutex, portMAX_DELAY);
-  const bool online = wifiLifecycle.snapshot().networkReady;
-  const auto health = sonosHealth.snapshot();
-  const bool discover = health.state == SonosState::Discovering && sonosEffects.discoveryPending;
+  const bool online = coordinator.snapshots().wifi.networkReady;
+  if (coordinator.automaticJobDue(nowMs(), workerTask != nullptr, stopping.load())) {
+    auto job = std::make_unique<Job>(Job{true, false, {}});
+    if (enqueueJobLocked(job.get()))
+      job.release();
+  }
   const auto preference = selection.preferredId;
   xSemaphoreGive(stateMutex);
   // Main task owns NVS writes. An expired worker can never persist an older
@@ -1337,15 +1116,6 @@ void loop() {
     savedPreference = preference;
     if (!preferences.putString("preferred-id", preference.c_str()))
       log("Preferred room save failed");
-  }
-  if (online && workerTask && !workerBusy() && nowMs() >= nextAutomaticJobAt &&
-      (discover ||
-       (health.state == SonosState::Ready &&
-        (reconciliationPending.load() || millis() - lastRefresh >= playbackRefreshIntervalMs)))) {
-    nextAutomaticJobAt = nowMs() + 1000;
-    reconciliationPending.store(false);
-    lastRefresh = millis();
-    submit("", true, false, false);
   }
   if (millis() - lastRender >= 100) {
     lastRender = millis();
@@ -1367,7 +1137,9 @@ void loop() {
     // Operational feedback is short-lived; diagnostics stay in serial/AppState.
     if (inputNotice == "Busy; input ignored" || inputNotice == "Busy - try again" ||
         inputNotice == "Room changed - try again" || inputNotice == "Room unavailable - refresh" ||
-        inputNotice == "Worker unavailable")
+        inputNotice == "Worker unavailable" || inputNotice.find("Sonos recovering;") == 0 ||
+        inputNotice == "Sonos unavailable; recovering" ||
+        inputNotice == "WiFi not configured; Sonos unavailable")
       context.feedback = inputNotice;
     boardContext(context);
     boardRender(state, inputNotice);

@@ -48,6 +48,8 @@ Calibrated Pause/Play center taps, a Refresh tap after a power-button restart, t
 
 ## Resource and performance constraints
 
+Arduino's main loop has an 8,192-byte stack. Build lifecycle-status JSON incrementally: a large nested initializer can inflate the inlined USB command handler's frame enough to overflow when touch-calibration serialization also formats floating-point values. The Sonos worker has a separate 24,576-byte stack.
+
 The [frontend artwork contract](waveshare-frontend.md#album-artwork) owns exact worker limits: one in-flight generation, PSRAM buffers, bounded baseline JPEG, and only the current thumbnail retained. Late/changed-room images are discarded; artwork runs separately from the Sonos worker and UI locks. No shared layer fetches images, and raw touch diagnostics start no artwork worker.
 
 Measured V2 examples, not worst-case guarantees:
@@ -142,12 +144,14 @@ Flash uses watchdog reset at 115200 baud and verifies application READY/idle hea
 
 Waveshare may stay powered by its battery after USB removal. PWR held alone for six seconds turns off; release and click PWR to turn on. BOOT must be released for normal startup; holding BOOT during power-on selects download mode. Stick has a side reset button. Preserve NVS; no erase is needed as routine recovery.
 
-Both boards recovered without reboot from a measured approximately 291-second Wi-Fi outage and resumed independent Sonos reads. The current bounded connection/retry policy is specified in [runtime lifecycles](runtime-lifecycles.md); that outage measurement does not validate every current transition. Startup with the AP already absent is implemented but not physically exercised. An unplugged Stick capture showed brownout near USB disconnection; the cause of later owner-reported battery/busy/topology glitches remains unrecorded. There is no persistent device log history; use live laptop capture for those observations.
+The [runtime lifecycle policy](runtime-lifecycles.md) owns Wi-Fi connection deadlines and retry timing. Startup with the AP already absent is implemented but not physically exercised. An unplugged Stick capture showed brownout near USB disconnection; the cause of later owner-reported battery/busy/topology glitches remains unrecorded. There is no persistent device log history; use live laptop capture for those observations.
 
 Topology listener startup must wait for a Wi-Fi connection. Opening its socket while Wi-Fi is uninitialized can cause an ESP32 network semaphore assertion. Manual discovery also rejects before opening UDP while disconnected. This assertion is distinct from the unresolved native USB/early-boot stalls above.
 
 ## Sonos evidence and open validation
 
+On Sonos Port S23 with fixed output (`GetOutputFixed` returns `CurrentFixed=1`), volume reads report 100 and a request to change volume returns HTTP 500 / Sonos 501. Fixed-output capability is not currently normalized by the runtime; a displayed volume does not establish that volume can be changed. This speaker setting is independent of the device's mutation gate and room policy.
+
 The owner confirmed NFC album/playlist/personal-station playback and physical Stick room cycling. Both boards independently read configured-room state. Waveshare source/pause/play also completed through USB; Play acknowledgment often preceded observed PLAYING by about two seconds. This supports condition polling, not a new fixed delay. URI mapping findings live in [capabilities](sonos-capabilities.md#apple-source-mapping-and-playback-evidence).
 
-Paused seek and selection of the third existing queue item are owner-confirmed; playing/stopped variants, single-track playback mapping, full repeat/shuffle mutation combinations, real rename/group changes, and topology subscription outage/renewal remain primarily fixture-tested. The frontend's broad acceptance is not a claim that every control mutation was traced on hardware.
+Paused seek and selection of the third existing queue item are owner-confirmed; playing/stopped variants, single-track playback mapping, full repeat/shuffle mutation combinations, real rename/group changes, and publisher-side subscription failures remain primarily fixture-tested. The frontend's broad acceptance is not a claim that every control mutation was traced on hardware.
