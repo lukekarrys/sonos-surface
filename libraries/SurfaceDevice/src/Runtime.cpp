@@ -921,8 +921,8 @@ void loop() {
     lastRender = millis();
     xSemaphoreTake(stateMutex, portMAX_DELAY);
     auto state = sharedState;
-#if defined(SURFACE_WAVESHARE_1_8)
     BoardContext context;
+#if defined(SURFACE_WAVESHARE_1_8)
     context.rooms = selection.rooms;
 #endif
     xSemaphoreGive(stateMutex);
@@ -931,7 +931,6 @@ void loop() {
       notice = "Ready";
       transientNotice = false;
     }
-#if defined(SURFACE_WAVESHARE_1_8)
     context.readOnly = config.readOnly;
     context.online = online;
     context.busy = busy.load();
@@ -941,9 +940,7 @@ void loop() {
         inputNotice == "Worker unavailable")
       context.feedback = inputNotice;
     boardContext(context);
-#endif
-    boardRender(state, std::string(config.readOnly ? "READ ONLY | " : "CONTROL | ") +
-                           std::string(online ? "WiFi OK | " : "WiFi offline | ") + notice);
+    boardRender(state, inputNotice);
   }
   if (millis() - lastHeartbeat >= 5000) {
     lastHeartbeat = millis();

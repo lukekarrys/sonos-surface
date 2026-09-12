@@ -37,9 +37,7 @@ struct BoardContext {
   bool readOnly = true, online = false, busy = false;
   std::string feedback;
 };
-#if defined(SURFACE_WAVESHARE_1_8)
 void boardContext(const BoardContext& context);
-#endif
 #if defined(SURFACE_STICK_S3)
 bool boardWriterActive();
 #endif

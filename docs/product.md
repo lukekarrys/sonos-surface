@@ -50,6 +50,8 @@ The [local Stick writer](tag-writer.md) accepts manual URL entry and an iOS/iPad
 
 AppState distinguishes observed facts from pending/requested values and outcomes. Boot/reconnect fetches existing playback without input. Unknown/stale data must remain visibly unknown/stale, not fabricated zero volume or stopped state. Controllers independently converge on Sonos through polling and topology invalidation; concurrent external control is best effort. Commands are one-shot, never a standing desired state to enforce continuously. Artwork and queue work are bounded and do not become prerequisites for basic control.
 
+The Stick's normal display separates observed Sonos information (room, song, artist, album, playback, volume, and mode) from device diagnostics (Wi-Fi, mutation gate, worker activity, input notice, and request progress/errors). Horizontal rules separate those sections and the bottom writer address/button reminders. Text is bounded to its section; long values are truncated with an ellipsis. Active card-writing operations retain their dedicated status screen.
+
 ## Inactivity and physical wake
 
 Device configuration `sleep_timeout_seconds` is an integer from 0 to 4294967295, defaulting to 300 when omitted. Positive values request sleep after that many seconds without local interaction; zero disables automatic sleep for development. Profiles choose the timeout independently of target, room policy, and `read_only`. USB power does not suppress sleep.

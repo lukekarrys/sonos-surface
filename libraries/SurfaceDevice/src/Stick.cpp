@@ -46,6 +46,7 @@ bool latched = false;
 unsigned misses = 0;
 uint32_t lastPoll = 0;
 std::string lastScreen;
+BoardContext context;
 LocalActivity activity = LocalActivity::None;
 bool releaseAfterBoot = true;
 } // namespace
@@ -419,6 +420,32 @@ void boardPrepareSleep() {
   rtc_gpio_pulldown_dis(GPIO_NUM_11);
   esp_deep_sleep_start();
 }
+void boardContext(const BoardContext& value) { context = value; }
+
+// Fixed-height text rows cannot wrap into another section. Fit complete UTF-8
+// characters to the panel width, marking any text that exceeds its row budget.
+static void displayText(int y, std::string text, unsigned rows = 1) {
+  for (char& c : text)
+    if (static_cast<unsigned char>(c) < 0x20)
+      c = ' ';
+  for (unsigned row = 0; row < rows; ++row) {
+    size_t end = 0;
+    while (end < text.size()) {
+      size_t next = end + 1;
+      while (next < text.size() && (static_cast<unsigned char>(text[next]) & 0xc0) == 0x80)
+        ++next;
+      const bool ellipsis = row + 1 == rows && next < text.size();
+      if (M5.Display.textWidth((text.substr(0, next) + (ellipsis ? "..." : "")).c_str()) > 236)
+        break;
+      end = next;
+    }
+    const auto line = text.substr(0, end) + (row + 1 == rows && end < text.size() ? "..." : "");
+    M5.Display.setCursor(2, y + int(row) * 8);
+    M5.Display.print(line.c_str());
+    text.erase(0, end);
+  }
+}
+
 void boardRender(const AppState& state, const std::string& notice) {
   if (!displayReady)
     return;
@@ -431,6 +458,7 @@ void boardRender(const AppState& state, const std::string& notice) {
       lastScreen = screen;
       M5.Display.fillScreen(TFT_BLACK);
       M5.Display.setTextColor(TFT_WHITE);
+      M5.Display.setTextWrap(true);
       M5.Display.setCursor(0, 0);
       M5.Display.println(screen.c_str());
       M5.Display.printf("\nhttp://%s/\n", writerServer.address().c_str());
@@ -439,30 +467,37 @@ void boardRender(const AppState& state, const std::string& notice) {
   }
   const auto& observed = state.observed;
   const auto detail = state.refreshError.empty() ? state.detail : "Refresh: " + state.refreshError;
-  auto screen = std::string("sonos-surface / NFC\n") + notice + "\n" +
-                (observed.known ? observed.room + ": " + observed.playback : "Playback: unknown") +
-                (observed.stale ? " [stale]" : "") + "\n" + observed.title + "\n" + state.status +
-                ": " + detail + "\nA: refresh  B: play/pause";
-  screen += writerServer.address();
+  const auto playback = std::string(observed.known ? observed.playback : "Unknown playback") +
+                        (observed.stale ? " [stale]" : "") + " | Vol " +
+                        (observed.volume ? std::to_string(*observed.volume) : "?") +
+                        (observed.mute.value_or(false) ? " muted" : "");
+  const auto modes = "Mode: " + (observed.mode.empty() ? "unknown" : observed.mode);
+  const auto device = std::string(context.online ? "WiFi OK" : "WiFi offline") + " | " +
+                      (context.readOnly ? "READ ONLY" : "CONTROL") + " | " +
+                      (context.busy ? "Busy" : "Idle");
+  const auto screen = observed.room + "\n" + observed.title + "\n" + observed.artist + "\n" +
+                      observed.album + "\n" + playback + "\n" + modes + "\n" + device + "\n" +
+                      notice + "\n" + state.status + "\n" + detail + "\n" + writerServer.address();
   if (screen == lastScreen)
     return;
   lastScreen = screen;
   M5.Display.fillScreen(TFT_BLACK);
   M5.Display.setTextColor(TFT_WHITE);
-  M5.Display.setCursor(0, 0);
-  // Bound each section to keep result and current-state visible on a 240x135 UI.
-  M5.Display.println(observed.room.empty() ? "Discovering rooms..."
-                                           : observed.room.substr(0, 38).c_str());
-  M5.Display.println(notice.substr(0, 76).c_str());
-  M5.Display.printf("%s%s\n", observed.known ? observed.playback.c_str() : "Unknown playback",
-                    observed.stale ? " [stale]" : "");
-  M5.Display.println(observed.title.substr(0, 70).c_str());
-  M5.Display.println(state.status.c_str());
-  M5.Display.println(detail.substr(0, 100).c_str());
-  M5.Display.setCursor(0, 110);
-  M5.Display.printf("Writer: http://%s/", writerServer.address().c_str());
-  M5.Display.setCursor(0, 124);
-  M5.Display.println("A:refresh AA:room B:play/pause");
+  M5.Display.setTextWrap(false);
+  displayText(0, observed.room.empty() ? "Discovering rooms..." : observed.room);
+  displayText(10, "Song: " + (observed.title.empty() ? "unknown" : observed.title));
+  displayText(20, "Artist: " + (observed.artist.empty() ? "unknown" : observed.artist));
+  displayText(30, "Album: " + (observed.album.empty() ? "unknown" : observed.album));
+  displayText(40, playback);
+  displayText(50, modes);
+  M5.Display.drawFastHLine(0, 61, 240, TFT_DARKGREY);
+  displayText(66, device);
+  displayText(74, notice);
+  displayText(82, "Request: " + state.status);
+  displayText(90, detail, 2);
+  M5.Display.drawFastHLine(0, 109, 240, TFT_DARKGREY);
+  displayText(113, "Writer: http://" + writerServer.address() + "/");
+  displayText(125, "A:refresh AA:room B:play/pause");
 }
 } // namespace surface::device
 #endif
