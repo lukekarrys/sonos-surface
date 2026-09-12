@@ -33,6 +33,11 @@ WHAT ALREADY EXISTS (extend it)
   tests/runtime_fault_test.cpp (composed harness with fake subscription requests and
   NOTIFYs, plus a liveness window).
 - docs/runtime-lifecycles.md describes all of it.
+- Job origins and preemption from todo/2-user-input-priority.md: automatic reads are
+  preemptible by user input and never cause a busy rejection, `busy` means a user job
+  is running, routine polls read topology from the selected room's own address, and an
+  automatic poll is bounded to at most ten requests. Every automatic read this
+  milestone adds must keep those properties.
 
 This milestone generalizes that machinery to N subscriptions and gives NOTIFY bodies
 meaning.
@@ -41,12 +46,12 @@ PHASES
 
   PHASE A (runtime, host-first)
     Sections 1-7, 10-16, the lifecycle/observation/fallback/power tests in 19, 21, 22.
-    Needs no UI. It may run in a separate git worktree in parallel with todo/0-lvgl.md
-    and Phase A of todo/2-new-view-model.md.
+    Needs no UI. Requires todo/2-user-input-priority.md. It may run in a separate git
+    worktree in parallel with todo/3-lvgl.md and Phase A of todo/5-new-view-model.md.
 
   PHASE B (UI integration)
     Sections 8, 17, 18, the optimistic tests in 19, and 20. Requires
-    todo/2-new-view-model.md (Phase B) and merged Phase A of this prompt.
+    todo/5-new-view-model.md (Phase B) and merged Phase A of this prompt.
 
 Read first: AGENTS.md; docs/runtime-lifecycles.md; docs/planner-executor.md (observation
 and reconciliation); docs/sonos-capabilities.md (normalized state, observation);
@@ -218,9 +223,21 @@ Do not treat these exact numbers as product constants if an adaptive/simple appr
 cleaner.
 
 Today RuntimeCoordinator::PollIntervalMs (= playbackRefreshIntervalMs, 10 s) drives
-automaticJobDue. Make the interval a function of (AV/RC subscription health, observed
-transport) inside the coordinator so the fault harness covers it. No config field.
-Without healthy AV/RC subscriptions keep the existing 10 s cadence.
+automaticJobDue, and one full snapshot costs about ten requests after
+todo/2-user-input-priority.md (thirteen before it). A 5 s full snapshot would double
+today's background load, so split the two reads:
+
+- position-anchor read: GetTransportInfo + GetPositionInfo only (two requests, no
+  topology, no identity), used for the fast PLAYING cadence; it replaces the position
+  anchor and transport state and touches nothing else
+- full reconciliation snapshot: the existing refresh, used for the slow cadence and
+  after any event that changes track/source identity
+
+Make both intervals a function of (AV/RC subscription health, observed transport) inside
+the coordinator so the fault harness covers them. No config field. Without healthy AV/RC
+subscriptions keep the existing 10 s full-snapshot cadence. Both reads are automatic
+jobs and therefore preemptible by user input; the responsiveness invariant from
+todo/2-user-input-priority.md must still hold in the fault harness at the new cadence.
 
 The key invariant:
 
@@ -459,7 +476,7 @@ Show enough development information to answer:
 - when was last reconciliation poll?
 - is subscription healthy?
 
-Mirror the same information through `ui-state` (todo/0-device-tooling.md) so an agent
+Mirror the same information through `ui-state` (todo/1-device-tooling.md) so an agent
 can read it over USB.
 
 Do not turn the Playground into a permanent network-monitor UI.
@@ -549,15 +566,17 @@ the session:
 4. Access-point interruption is not automatable; use the host fault harness for
    reconnect, and on the device only observe that lease expiry recovers.
 
-OWNER DECISION (recorded, see AGENTS.md): the agent MAY perform Sonos mutations from
-the Mac against any room listed in the `rooms` allowlist of the configuration currently
-flashed to the device under test (config/default.json unless another profile was
-flashed). Read the allowlist from that device's `config-status` reply, never from a
-guessed file. Rooms outside it are never touched. Prefer bounded, reversible changes
-and restore the prior state afterward: volume +1 then -1; pause then resume only a room
-that was already playing; seek within the current track; next then previous. Do not
-flip the device's read_only flag; event-latency measurement drives the speaker from the
-host, not through the device.
+OWNER DECISION (recorded, see AGENTS.md): the agent MAY perform Sonos mutations against
+any room listed in the `rooms` allowlist of the configuration currently flashed to the
+device under test (config/default.json unless another profile was flashed), both from
+the Mac and through the device itself. Read the allowlist from that device's
+`config-status` reply, never from a guessed file. Rooms outside it are never touched.
+Prefer bounded, reversible changes and restore the prior state afterward: volume +1 then
+-1; pause then resume only a room that was already playing; seek within the current
+track; next then previous. The owner mutes the amplifier during long loops. Do not flip
+read_only to complete a test; use a read_only=true profile deliberately when mutations
+would be disruptive. External-change latency is still measured by driving the speaker
+from the host, because "external" means "not this device".
 
 Host tool for this: add scripts/sonos-external.ts exposed as
 

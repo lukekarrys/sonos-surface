@@ -80,9 +80,10 @@ Do NOT add historical checkpoint documentation.
 0. CURRENT REPOSITORY FACTS
 ==================================================
 
-Prerequisite: todo/0-device-tooling.md is complete (non-interactive USB command tool,
-port identification, ui-touch / ui-nav injection, ui-state). If it is not, do that
-prompt first.
+Prerequisites: todo/1-device-tooling.md (non-interactive USB command tool, port
+identification, ui-touch / ui-nav injection, ui-state) and todo/2-user-input-priority.md
+(user input preempts automatic reads; `busy` means a user job is running) are complete.
+If either is not, do it first.
 
 Read first: AGENTS.md; docs/waveshare-frontend.md; docs/hardware.md (Waveshare rendering
 and calibration; resource and performance constraints; inactivity and buttons);
@@ -271,7 +272,7 @@ make the smallest clean adapter change.
 
 Do not duplicate calibration in LVGL.
 
-Injected samples from `ui-touch` (todo/0-device-tooling.md) arrive already in screen
+Injected samples from `ui-touch` (todo/1-device-tooling.md) arrive already in screen
 coordinates and must enter the same LVGL indev path as hardware samples so USB
 verification exercises the real pipeline.
 
@@ -392,7 +393,7 @@ multi-screen milestone can reuse it:
 
 PWR is PMIC-owned and a long press powers the board off; leave it unused.
 
-Expose the same action over USB as `ui-nav next` (todo/0-device-tooling.md) so screen
+Expose the same action over USB as `ui-nav next` (todo/1-device-tooling.md) so screen
 switching can be exercised without a finger. USB navigation does not count as activity.
 
 Do NOT implement global swipe navigation.
@@ -853,7 +854,7 @@ Then report only:
 - injected and physical interaction results
 - recommendation: adopt / reject / adopt-with-limitations
 
-Then, as the final step of this milestone, rewrite todo/1-ws-1.8-multiscreen.md to the
+Then, as the final step of this milestone, rewrite todo/4-ws-1.8-multiscreen.md to the
 chosen track: keep the sections marked for that track, delete the other track's sections
 and the TRACK SELECTION preamble, and fold in anything this evaluation learned (button
 mechanics, render mode, threading rule). Note in the report any other todo prompt that

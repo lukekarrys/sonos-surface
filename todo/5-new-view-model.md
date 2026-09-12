@@ -9,12 +9,13 @@ PHASES
 
   PHASE A (host-only, portable)
     Sections 1-4, 8-13, 15, and the Phase A tests in 16. No display, no screen, no board
-    code. It may run in a separate git worktree in parallel with todo/0-lvgl.md and
-    Phase A of todo/3-subscription-reconcilliation.md.
+    code. Requires todo/2-user-input-priority.md (job origins, preemption, and the
+    user-job meaning of `busy`). It may run in a separate git worktree in parallel with
+    todo/3-lvgl.md and Phase A of todo/6-subscription-reconciliation.md.
 
   PHASE B (device UI)
     Sections 5-7 (Playground), 9 (Now Playing volume adoption), 14, 17, 18, 19, and the
-    Phase B tests in 16. Requires todo/1-ws-1.8-multiscreen.md and merged Phase A.
+    Phase B tests in 16. Requires todo/4-ws-1.8-multiscreen.md and merged Phase A.
 
 If asked to run only Phase A, stop after its completion items and report.
 
@@ -256,8 +257,10 @@ Pending identity and lifetime, mapped onto the existing runtime:
   Shutdown, cancellation: clear. Uncertain: clear the optimistic value but keep
   recoveryRequired visible exactly as today.
 - A late completion for a different job id never touches it.
-- The single-job contract is unchanged: while a mutation is pending, other inputs still
-  reject as busy. "Optimistic" means immediate visual feedback, not a queue of taps.
+- One user job at a time (todo/2-user-input-priority.md): while a user mutation is
+  pending, another user tap still rejects as busy, while automatic reads yield to user
+  input and never cause a rejection. "Optimistic" means immediate visual feedback, not a
+  queue of taps.
 - Pending horizon: the mutation job budget is 90 s. Keep the pending value visible until
   the terminal outcome and show the existing "Updating..." affordance; do not add a
   second, shorter timer. If measured behavior makes this feel wrong, propose the change
@@ -465,7 +468,7 @@ A small development-only state display may show things such as:
 for the currently exercised field.
 
 Mirror the same values to USB by extending the `ui-state` command from
-todo/0-device-tooling.md (observed/pending/interaction/visible for transport, position,
+todo/1-device-tooling.md (observed/pending/interaction/visible for transport, position,
 and volume, plus the pending job id) so an agent can assert precedence on device.
 
 This is intentionally diagnostic.
@@ -497,8 +500,9 @@ in this milestone.
 19. AUTONOMOUS DEVICE VERIFICATION (PHASE B)
 ==================================================
 
-On the identified ws-1.8 port, with the default read-only profile and sleep disabled for
-the session:
+On the identified ws-1.8 port, with the default profile (read_only=false, so injected
+taps really mutate the configured room; the owner mutes the amplifier) and sleep
+disabled for the session:
 
 1. With the selected room playing and no local interaction, read `ui-state` twice three
    seconds apart: projected position advanced, observed position unchanged between
@@ -508,8 +512,9 @@ the session:
    updates. Release: exactly one seek request appears in the log, pending owns the
    position, and after the job publishes its outcome pending clears.
 3. Inject Play/Pause: `ui-state` shows the pending transport immediately; after the
-   outcome it clears. With read_only true the blocked outcome clears pending and visible
-   returns to observed.
+   job's verify publication it clears and observed matches the requested state. Repeat
+   once with a read_only=true profile to confirm the blocked outcome clears pending and
+   visible returns to observed, then restore the default profile.
 4. Inject `ui-nav next` mid-drag: interaction cancelled, nothing sent.
 5. Read the heartbeat heap before and after the session.
 

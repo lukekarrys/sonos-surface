@@ -97,13 +97,15 @@ Semantics:
   drag is a sequence of ui-touch commands. A physical finger detected during injection
   cancels the queue and logs it.
 - `ui-button boot` enters whatever action the BOOT release will map to. Until
-  todo/0-lvgl.md and todo/1-ws-1.8-multiscreen.md assign one, it logs
+  todo/3-lvgl.md and todo/4-ws-1.8-multiscreen.md assign one, it logs
   `[ui] inject button=boot (no action)`.
 - injected input NEVER sets LocalActivity and never postpones sleep; keep the USB rule
   from docs/product.md intact.
 - injected input never bypasses admission, read_only, or policy: it is exactly a finger.
-  Autonomous tests therefore run with the default read-only profile unless the owner
-  says otherwise.
+  The committed default profile has read_only=false, so injected taps on transport,
+  volume, seek, and queue controls mutate the configured room for real; AGENTS.md
+  permits that on configured rooms, and the owner mutes the amplifier during loops.
+  Use a read_only=true profile deliberately when a test would otherwise be disruptive.
 - log every injection loudly: `[ui] inject touch x=.. y=.. fingers=..` and the resulting
   hit, mirroring the existing `[touch] raw=.. mapped=..` line.
 - `held` (release required after boot/recovery) applies to injected samples too; the
@@ -138,9 +140,12 @@ main-loop stack limit for large initializers).
 ==================================================
 
 `node --run monitor -- TARGET --port PORT --seconds N` exists. Add `--until "TOKEN"` so a
-capture ends early when a line contains TOKEN (still bounded by --seconds), and make the
-non-TTY path usable: when stdin is not a TTY, monitor reads no commands and exits at the
-bound instead of waiting.
+capture ends early when a line contains TOKEN (still bounded by --seconds); add `--stats`
+so the capture ends with one summary line (heartbeat count, `busy=1` ratio, worker
+Idle/Running transition count, median and maximum job duration from those transitions,
+and the maximum `[button] max-poll-gap-ms`); and make the non-TTY path usable: when
+stdin is not a TTY, monitor reads no commands and exits at the bound instead of
+waiting. todo/2-user-input-priority.md measures its before/after with `--stats`.
 
 ==================================================
 7. TESTS
@@ -152,7 +157,7 @@ Host (node --test, injected fakes only):
   errors
 - ports --identify: answering and non-answering fake ports, non-Espressif ports skipped
 - ui: drag step generation and ordering; release-first when held
-- monitor --until
+- monitor --until and --stats (summary computed from a fixture log)
 
 Portable C++ (sanitized):
 
@@ -197,11 +202,16 @@ With both boards attached (they are today: two Espressif ports):
 3. `node --run usb -- --port WS --command lifecycle-status` returns the JSON line.
 4. `node --run ui -- --port WS screen queue`, then `state`, shows the Queue screen.
 5. `node --run ui -- --port WS tap 184 286` on Now Playing logs the Play/Pause release
-   action and, with read_only true, the READ ONLY toast; no Sonos write occurs.
+   action, one transport intent, and the resulting job; the configured room pauses or
+   plays. Tap again to restore it.
 6. `node --run ui -- --port WS drag 52 351 316 351 --steps 20` logs a volume preview
-   following the drag and one volume intent on release (blocked by read_only).
+   following the drag and one absolute volume intent on release; read the prior volume
+   from `ui-state` first and restore it afterward with a second drag or a USB intent.
 7. `node --run monitor -- ws-1.8 --port WS --seconds 30 --until heartbeat` exits early.
-8. Confirm from the heartbeat that inactivity was not reset by any of the above (use a
+8. `node --run monitor -- stick-s3 --port STICK --seconds 120 --stats` ends with the
+   summary line (heartbeat count, busy ratio, job transitions and durations, poll gap);
+   its numbers are the baseline todo/2-user-input-priority.md compares against.
+9. Confirm from the heartbeat that inactivity was not reset by any of the above (use a
    short sleep timeout in a throwaway profile, then restore).
 
 ==================================================
