@@ -546,6 +546,10 @@ Stop when:
 12. local rejections create no pending state
 13. all tests/builds pass
 
+Then commit the finished work (also when stopping after Phase A): todo/README.md "How to run" rules, a `todo 5:`
+subject, the README status cell set to `implemented (<hash>)`, only on a green
+baseline, never a push. The prompt is not complete with uncommitted work.
+
 Then report:
 
 - final state ownership model and where each layer lives

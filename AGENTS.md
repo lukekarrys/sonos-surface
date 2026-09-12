@@ -32,7 +32,7 @@ Portable assertion tests run with address/undefined behavior sanitizers; no cove
 
 ## Commit & Pull Request Guidelines
 
-Use focused commits with imperative subjects. No broader commit convention has been established.
+Use focused commits with imperative subjects. Agents working a `todo/` prompt commit their finished work themselves when the prompt's completion list is met, following the commit rules in `todo/README.md` (`todo N:` subjects, green baseline first, never push); do not end such a session with uncommitted work. No broader commit convention has been established.
 
 PRs should explain behavior, validation, and unresolved risks; link issues when available and include screenshots for UI changes. Update affected specifications together. Commit environment profiles with environment placeholders; keep household credentials out of Git.
 

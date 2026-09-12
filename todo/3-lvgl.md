@@ -845,6 +845,10 @@ Stop when:
 13. the durable CO5300/LVGL rendering finding is recorded in docs/hardware.md
 14. all checks/builds pass
 
+Then commit the finished work: todo/README.md "How to run" rules, a `todo 3:`
+subject, the README status cell set to `implemented (<hash>)`, only on a green
+baseline, never a push. The prompt is not complete with uncommitted work.
+
 Then report only:
 
 - LVGL version/integration mechanism

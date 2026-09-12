@@ -332,6 +332,10 @@ Stop when:
 11. docs state the new contract
 12. all checks/builds pass
 
+Then commit the finished work: todo/README.md "How to run" rules, a `todo 2:`
+subject, the README status cell set to `implemented (<hash>)`, only on a green
+baseline, never a push. The prompt is not complete with uncommitted work.
+
 Then report only:
 
 - the admission rule and the preemption bound as measured

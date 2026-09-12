@@ -231,6 +231,10 @@ Stop when:
 8. README and frontend docs describe the commands
 9. all checks/builds pass and section 10 was run and logged
 
+Then commit the finished work: todo/README.md "How to run" rules, a `todo 1:`
+subject, the README status cell set to `implemented (<hash>)`, only on a green
+baseline, never a push. The prompt is not complete with uncommitted work.
+
 Then report only:
 
 - the exact commands added and their exit-code contract

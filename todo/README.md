@@ -6,7 +6,7 @@ Each file in this folder is a self-contained prompt for one autonomous agent. `A
 
 | Prompt                                   | Status | Depends on                                       | May run in parallel with     |
 | ---------------------------------------- | ------ | ------------------------------------------------ | ---------------------------- |
-| `1-device-tooling`                       | next   |                                                  |                              |
+| `1-device-tooling`                       | in progress |                                                  |                              |
 | `2-user-input-priority`                  |        | `1`                                              |                              |
 | `3-lvgl`                                 |        | `1`, `2`                                         | `5` Phase A, `6` Phase A     |
 | `5-new-view-model` Phase A               |        | `2`                                              | `3`, `6` Phase A             |
@@ -28,7 +28,7 @@ Implementation session:
 
 1. **Read first.** `AGENTS.md`, this file, and the prompt. Confirm every dependency in the table is `done`; if one is not, stop and say so. Work only that prompt: do not start the next one, and do not edit other prompts except where the prompt says so (`3-lvgl` rewrites `4-ws-1.8-multiscreen`).
 2. **Status.** Set the prompt's Status cell to `in progress` when you start and `implemented (<hash>)` in the same commit as the finished work; `done` belongs to the review session.
-3. **Commits are authorized** by these rules. Use focused imperative subjects prefixed by the prompt number, for example `todo 2: preempt automatic reads for user input`. Commit once the host baseline is green (`node --run check`, `node --run check:full`, and `node --run stress` where the prompt lists it) and before any flashing, then again after device verification. Never commit a red baseline. Never push.
+3. **Commits are authorized** by these rules. Use focused imperative subjects prefixed by the prompt number, for example `todo 2: preempt automatic reads for user input`. Commit once the host baseline is green (`node --run check`, `node --run check:full`, and `node --run stress` where the prompt lists it) and before any flashing, then again after device verification. Never commit a red baseline. Never push. **Commit when done:** a prompt is not finished until its work, its status cell, and its doc changes are committed; do not end the session with uncommitted work.
 4. **Devices.** Both boards may be attached. Identify ports before flashing (`node --run ports -- --identify` once `1-device-tooling` exists; before that, `node --run monitor` and read the boot banner). Disable sleep for the session with a throwaway profile through `node --run configure` and restore `config/default.json` before finishing. Real Sonos mutations on the configured rooms are allowed; the owner mutes the amplifier. Put long captures in background commands. You may work for hours.
 5. **Stop and report instead of guessing** when a product decision is genuinely ambiguous, an `OWNER DECISION` is unfilled, the baseline cannot be made green within the prompt's scope, or the prompt's own stop rule fires (physical acceptance, both tracks present, a missing dependency).
 6. **Report.** Write the prompt's final report to `.local/reports/<prompt>-implementation.md` (ignored by git) and repeat it in your final message. Durable findings go to `docs/` under the durability rule; nothing else does.
@@ -42,11 +42,11 @@ Review session (a second agent, usually a stronger model):
 
 Kickoff messages (replace the number and name):
 
-    Implement todo/2-user-input-priority.md following "How to run" in todo/README.md.
+    Implement todo/2-user-input-priority.md following "How to run" in todo/README.md; commit when done.
 
-    Review todo/2-user-input-priority.md following "How to run" in todo/README.md.
+    Review todo/2-user-input-priority.md following "How to run" in todo/README.md; commit when done.
 
-    Apply .local/reports/2-user-input-priority-review.md, then finish per "How to run" in todo/README.md.
+    Apply .local/reports/2-user-input-priority-review.md, then finish per "How to run" in todo/README.md; commit when done.
 
 ## Conventions
 
