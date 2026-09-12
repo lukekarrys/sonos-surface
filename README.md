@@ -36,13 +36,14 @@ node --run cpp:configure
 node --run check
 ```
 
-npm installs TypeScript, Node type definitions, Prettier, and serialport. Setup installs Arduino-ESP32 3.3.11 and the exact library versions in `scripts/common.ts`, plus nlohmann/json 3.12.0 and tinyxml2 11.0.0. The host partition hook emits the current boards’ ESP-IDF partition tables with MD5 checksums; uploads use the toolchain’s self-contained esptool executable directly. No separate interpreter is required. Dependencies/builds live in ignored `.deps`/`.build`; Arduino uses its board package cache. For portable tests only, use `node --run setup -- --host-only`.
+npm installs TypeScript, Node type definitions, Prettier, and serialport. Setup installs Arduino-ESP32 3.3.11 and the exact library versions in `scripts/common.ts`, plus nlohmann/json 3.12.0, tinyxml2 11.0.0, and [Boost.Ext SML 1.2.0](https://github.com/boost-ext/sml/releases/tag/v1.2.0). SML is installed as the single upstream header named `surface_sml.hpp` and its license in `SurfaceSml`; the flat header name supports Arduino library discovery, and no Boost distribution is required. The host partition hook emits the current boards’ ESP-IDF partition tables with MD5 checksums; uploads use the toolchain’s self-contained esptool executable directly. No separate interpreter is required. Dependencies/builds live in ignored `.deps`/`.build`; Arduino uses its board package cache. For portable tests only, use `node --run setup -- --host-only`.
 
 | Task | Purpose |
 | --- | --- |
 | `node --run check` | Typecheck, Prettier check, clang-format check, host fixtures and C++ tests under address/undefined-behavior sanitizers; host warnings are errors |
 | `node --run check:full` | Everything in check, then `stick-s3` and `ws-1.8` firmware builds with Arduino `--warnings more` |
 | `node --run test` | Host TypeScript fixtures and sanitizer-backed portable C++ tests; no Sonos or physical devices |
+| `node --run stress -- --seed 1592594996` | Reproducible lifecycle fault testing; optional `--steps`, three default seeds when omitted; see [runtime lifecycles](docs/runtime-lifecycles.md) |
 | `node --run typecheck` | Static TypeScript checking with no emit |
 | `node --run format`, `node --run format:check` | Write/check Prettier formatting for supported text formats |
 | `node --run format:cpp`, `node --run format:cpp:check` | Write/check clang-format for owned C++, headers, and sketch |

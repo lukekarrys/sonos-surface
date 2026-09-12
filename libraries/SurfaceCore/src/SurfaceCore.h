@@ -179,6 +179,8 @@ class SonosTransport {
 public:
   virtual ~SonosTransport() = default;
   virtual Result refresh(PlaybackState& state) = 0;
+  // Retire prior prepared work and read authoritative state without replaying it.
+  virtual Result reconcile(PlaybackState& state) { return refresh(state); }
   virtual Result queue(uint32_t, uint32_t, QueuePage&) {
     return Result::fail("Queue reading unsupported");
   }
@@ -196,6 +198,14 @@ public:
   // explicit Play/Pause intent. Toggle is never part of the card wire format.
   Result submitToggle(const PolicyContext& bound);
   Result refresh();
+  // Called by recovery after the old execution returns. A fresh same-room read
+  // admits future requests while retaining the previous command's outcome.
+  Result reconcile();
+  // Worker-only cleanup after a cancelled job's synchronous calls return.
+  // Restore the pre-job snapshot, discarding late observations/results without
+  // publishing under the expired identity. Cancelled mutations require a fresh
+  // reconciliation and retain their consumed request identity and provenance.
+  void discardCancelledResult(const AppState& retained, bool mutation);
   Result queue(uint32_t start, uint32_t count);
   // Drop observations on selection/reconnect, preserving command uncertainty.
   void invalidateObservation();
@@ -203,6 +213,7 @@ public:
 
 private:
   void publish();
+  Result readObservation(bool reconcile);
   SonosTransport& transport_;
   PolicyContext context_;
   Changed changed_;

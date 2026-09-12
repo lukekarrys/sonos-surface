@@ -10,6 +10,7 @@ export const CONFIG = join(DEPS, "arduino-cli.yaml");
 export const CORE_VERSION = "3.3.11";
 export const CLI_VERSION = "1.1.1";
 export const M5_VERSION = "0.2.21";
+export const SML_VERSION = "1.2.0";
 export const libraries = [
   "M5GFX@0.2.28",
   `M5Unified@${M5_VERSION}`,

@@ -483,6 +483,21 @@ Result DirectSonos::ungrouped() {
       return room.eligible ? Result{} : Result::fail("Grouped/bonded target is unsupported");
   return Result::fail("Target missing from group topology");
 }
+Result DirectSonos::reconcile(PlaybackState& state) {
+  // Only prepare() may authorize a new request. Retire the old plan even if
+  // this reconciliation fails, so recovery can never resume its operations.
+  prepared_ = false;
+  intent_ = {};
+  item_ = {};
+  positionBaseline_ = {};
+  selectionBaseline_ = {};
+  PlaybackState next;
+  auto result = refresh(next);
+  if (!result.ok || !(result = ungrouped()).ok)
+    return result;
+  state = std::move(next);
+  return {};
+}
 Result DirectSonos::refresh(PlaybackState& state) {
   auto r = identity();
   if (!r.ok)

@@ -28,6 +28,7 @@ Sonos observations + separate request outcomes
 - [Intent](intent.md) owns portable commands, normalized source validity, card encoding, and the writer contract.
 - [Policy](policy.md) owns room configuration/identity/selection, source defaults, overrides, per-field precedence/provenance, and revision.
 - [Execution](planner-executor.md) owns admission, dependencies, preservation, failures, dispatch safeguards, and reconciliation.
+- [Runtime lifecycles](runtime-lifecycles.md) owns bounded jobs, automatic network/session recovery, subscriptions, and deterministic fault injection.
 - [Sonos capabilities](sonos-capabilities.md) owns normalized observations, bounded queue pages, seek/selection, and their protocol limits.
 - [Waveshare frontend](waveshare-frontend.md) owns current touch/artwork behavior.
 - [Hardware](hardware.md) owns board facts, calibration, measured limitations, and unresolved physical issues. [README](../README.md) owns operational commands.

@@ -243,6 +243,28 @@ unsigned capabilityTests() {
     auto result = app.submit(payload);
     assert(result.uncertain && app.state().recoveryRequired && http.writes.size() == 1);
     assert(app.refresh().ok && !app.submit(payload).ok && http.writes.size() == 1);
+    const auto outcome = app.state();
+    const auto target = http.id;
+    for (unsigned fault = 0; fault < 4; ++fault) {
+      http.failRead = fault == 0;
+      http.grouped = fault == 1;
+      http.malformedTopology = fault == 2;
+      http.id = fault == 3 ? "RINCON_DIFFERENT" : target;
+      assert(!app.reconcile().ok && app.state().recoveryRequired && app.state().observed.stale &&
+             app.state().observed.title == outcome.observed.title &&
+             app.state().observed.targetId == target && app.state().status == outcome.status &&
+             app.state().requestId == outcome.requestId && http.writes.size() == 1);
+      assert(!app.submit(payload).ok && http.writes.size() == 1);
+      ++cases;
+    }
+    http.id = target;
+    http.failAction.clear();
+    assert(app.reconcile().ok && !app.state().recoveryRequired &&
+           app.state().status == "uncertain" && app.state().detail == outcome.detail &&
+           http.writes.size() == 1);
+    assert(!sonos.execute(Operation::Seek).ok && http.writes.size() == 1);
+    assert(app.submit(payload).ok && app.state().requestId == outcome.requestId + 1 &&
+           http.writes.size() == 2);
     ++cases;
   }
   for (bool queue : {false, true}) {
@@ -338,9 +360,15 @@ unsigned capabilityTests() {
          app.state().queue->items.back().index == 50019);
   ++cases;
   http.badQueue = true;
+  const auto beforeQueueFailure = app.state().observed;
   assert(!app.queue(0, 2).ok && !app.state().queue);
+  assert(app.state().observed.title == beforeQueueFailure.title &&
+         app.state().observed.positionMs == beforeQueueFailure.positionMs &&
+         app.state().observed.queueRevision == beforeQueueFailure.queueRevision &&
+         !app.state().queueError.empty());
   assert(app.refresh().ok && !app.state().observed.queueError.empty() &&
-         !app.state().observed.queueRevision);
+         !app.state().observed.queueRevision && !app.state().observed.stale &&
+         app.state().observed.title == beforeQueueFailure.title);
   ++cases;
   http.badQueue = false;
   assert(app.queue(0, 2).ok);

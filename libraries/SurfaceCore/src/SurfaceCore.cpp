@@ -691,18 +691,39 @@ void Application::publish() {
   if (changed_)
     changed_(state_);
 }
-Result Application::refresh() {
+Result Application::refresh() { return readObservation(false); }
+Result Application::reconcile() { return readObservation(true); }
+void Application::discardCancelledResult(const AppState& retained, bool mutation) {
+  const auto requestId = state_.requestId;
+  auto provenance = state_.provenance;
+  state_ = retained;
+  state_.observed.stale = true;
+  state_.queue.reset();
+  state_.queueError.clear();
+  if (mutation) {
+    state_.requestId = requestId;
+    state_.provenance = std::move(provenance);
+    state_.status = "uncertain";
+    state_.detail = "Job cancelled; awaiting authoritative reconciliation";
+    state_.recoveryRequired = true;
+  }
+}
+Result Application::readObservation(bool reconcile) {
   if (busy_)
     return Result::fail("Busy");
   auto next = state_.observed;
-  auto result = transport_.refresh(next);
+  auto result = reconcile ? transport_.reconcile(next) : transport_.refresh(next);
   if (result.ok && next.targetId != context_.targetId)
     result = Result::fail("Observation target mismatch");
+  if (result.ok && reconcile && (!next.known || next.stale))
+    result = Result::fail("Reconciliation requires fresh known state");
   // Reconciliation invalidates pages even if the queue appears unchanged.
   state_.queue.reset();
   if (result.ok) {
     state_.observed = std::move(next);
     state_.refreshError.clear();
+    if (reconcile)
+      state_.recoveryRequired = false;
   } else {
     state_.observed.stale = true;
     state_.refreshError = result.error;
@@ -744,7 +765,7 @@ Result Application::submitToggle(const PolicyContext& bound) {
   if (busy_)
     return Result::fail("Busy");
   if (state_.recoveryRequired)
-    return Result::fail("Uncertain previous effect; inspect speaker before toggling");
+    return Result::fail("Uncertain previous effect; awaiting authoritative reconciliation");
   auto reject = [&](const std::string& error) {
     state_.status = "failed";
     state_.detail = error;
@@ -778,8 +799,7 @@ Result Application::submit(const std::string& payload) {
   if (busy_)
     return Result::fail("Busy");
   if (state_.recoveryRequired)
-    return Result::fail(
-        "Uncertain previous effect; inspect speaker and reboot before a deliberate retry");
+    return Result::fail("Uncertain previous effect; awaiting authoritative reconciliation");
   MusicIntent intent;
   auto result = parseIntent(payload, intent);
   if (!result.ok) {
@@ -794,8 +814,7 @@ Result Application::submit(const ResolvedIntent& accepted) {
   if (busy_)
     return Result::fail("Busy");
   if (state_.recoveryRequired)
-    return Result::fail(
-        "Uncertain previous effect; inspect speaker and reboot before a deliberate retry");
+    return Result::fail("Uncertain previous effect; awaiting authoritative reconciliation");
   if (accepted.targetId != context_.targetId)
     return Result::fail("Accepted target differs from executor target");
   ++state_.requestId;

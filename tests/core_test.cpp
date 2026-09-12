@@ -65,6 +65,99 @@ struct FakeSonos : SonosTransport {
   }
   Result verify(const ResolvedIntent&, PlaybackState& state) override { return refresh(state); }
 };
+unsigned cancellationChecks() {
+  struct ChangingSonos : FakeSonos {
+    std::string title = "Retained observation";
+    Result refresh(PlaybackState& state) override {
+      auto result = FakeSonos::refresh(state);
+      if (result.ok)
+        state.title = title;
+      return result;
+    }
+    Result queue(uint32_t, uint32_t, QueuePage& page) override {
+      page.targetId = "room";
+      page.revision = 7;
+      return {};
+    }
+  } transport;
+  unsigned publications = 0;
+  Application app(transport, {"room", playlistPolicies({{"room", true}}), 1},
+                  [&](const AppState&) { ++publications; });
+  assert(app.submit(album).ok && app.queue(0, 1).ok);
+  const auto retained = app.state();
+  assert(retained.queue && retained.observed.title == "Retained observation");
+
+  // The worker identity can expire while the synchronous application is still
+  // returning success. Cleanup cannot publish that result under a newer job.
+  transport.title = "Late command observation";
+  assert(app.submit(playlist).ok && app.state().status == "succeeded");
+  const auto cancelledId = app.state().requestId;
+  const auto cancelledOrigin = describeOrigin(app.state().provenance.at(PolicyField::Shuffle));
+  const auto callsAfterCancelled = transport.calls.size();
+  const auto publicationsBeforeCleanup = publications;
+  app.discardCancelledResult(retained, true);
+  const std::string cancelledDetail = "Job cancelled; awaiting authoritative reconciliation";
+  assert(publications == publicationsBeforeCleanup && app.state().status == "uncertain" &&
+         app.state().detail == cancelledDetail && app.state().recoveryRequired &&
+         app.state().requestId == cancelledId && cancelledId == retained.requestId + 1 &&
+         describeOrigin(app.state().provenance.at(PolicyField::Shuffle)) == cancelledOrigin &&
+         app.state().observed.title == retained.observed.title && app.state().observed.stale &&
+         !app.state().queue);
+  assert(!app.submit(album).ok && transport.calls.size() == callsAfterCancelled);
+
+  // A cancelled recovery read must not clear the uncertainty block or retain
+  // its late fresh observation, even though reconcile itself returned success.
+  const auto beforeCancelledRead = app.state();
+  transport.title = "Late recovery observation";
+  assert(app.reconcile().ok && !app.state().recoveryRequired);
+  const auto publicationsBeforeReadCleanup = publications;
+  app.discardCancelledResult(beforeCancelledRead, false);
+  assert(publications == publicationsBeforeReadCleanup && app.state().status == "uncertain" &&
+         app.state().detail == cancelledDetail && app.state().recoveryRequired &&
+         app.state().requestId == cancelledId &&
+         app.state().observed.title == retained.observed.title && app.state().observed.stale &&
+         !app.state().queue);
+
+  transport.failRefresh = true;
+  assert(!app.reconcile().ok && app.state().observed.title == retained.observed.title &&
+         app.state().refreshError == "speaker unavailable" && app.state().recoveryRequired &&
+         app.state().status == "uncertain" && app.state().detail == cancelledDetail &&
+         transport.calls.size() == callsAfterCancelled);
+  transport.failRefresh = false;
+  transport.title = "Authoritative recovery";
+  assert(app.reconcile().ok && !app.state().recoveryRequired &&
+         app.state().observed.title == "Authoritative recovery" && !app.state().observed.stale &&
+         app.state().refreshError.empty() && app.state().status == "uncertain" &&
+         app.state().detail == cancelledDetail && app.state().requestId == cancelledId &&
+         transport.calls.size() == callsAfterCancelled);
+  assert(app.submit(album).ok && app.state().requestId == cancelledId + 1 &&
+         app.state().status == "succeeded" && transport.calls.size() > callsAfterCancelled);
+
+  // Cancelled ordinary reads preserve the previous command outcome and read
+  // error, but always drop the queue page and reject the late observation.
+  assert(app.queue(0, 1).ok);
+  const auto beforeRead = app.state();
+  transport.title = "Late ordinary observation";
+  assert(app.refresh().ok);
+  app.discardCancelledResult(beforeRead, false);
+  assert(app.state().status == beforeRead.status && app.state().detail == beforeRead.detail &&
+         app.state().requestId == beforeRead.requestId &&
+         app.state().provenance.size() == beforeRead.provenance.size() &&
+         app.state().observed.title == beforeRead.observed.title && app.state().observed.stale &&
+         app.state().refreshError == beforeRead.refreshError && !app.state().recoveryRequired &&
+         !app.state().queue);
+  transport.failRefresh = true;
+  assert(!app.refresh().ok);
+  const auto beforeFailedRead = app.state();
+  transport.failRefresh = false;
+  assert(app.refresh().ok && app.state().refreshError.empty());
+  app.discardCancelledResult(beforeFailedRead, false);
+  assert(app.state().refreshError == "speaker unavailable" &&
+         app.state().observed.title == beforeFailedRead.observed.title &&
+         app.state().requestId == beforeFailedRead.requestId &&
+         app.state().status == beforeFailedRead.status);
+  return 7;
+}
 
 std::string deviceDescription(const std::string& id, const std::string& room) {
   return "<root xmlns=\"urn:schemas-upnp-org:device-1-0\"><device>"
@@ -482,7 +575,47 @@ int main() {
   ++cases;
   assert(!failed.submit(album).ok && failure.calls.size() == 3);
   ++cases;
+  const auto blockedRequestId = failed.state().requestId;
+  failure.failRefresh = true;
+  assert(!failed.reconcile().ok && failed.state().recoveryRequired &&
+         failed.state().observed.stale && failed.state().observed.title == "Already playing" &&
+         failed.state().detail == uncertainDetail && failure.calls.size() == 3);
+  failure.failRefresh = false;
+  assert(failed.reconcile().ok && !failed.state().recoveryRequired &&
+         !failed.state().observed.stale && failed.state().refreshError.empty() &&
+         failed.state().status == "uncertain" && failed.state().detail == uncertainDetail &&
+         failed.state().requestId == blockedRequestId && failure.calls.size() == 3);
+  failure.failAt.reset();
+  assert(failed.submit(album).ok && failed.state().requestId == blockedRequestId + 1 &&
+         failed.state().status == "succeeded");
+  ++cases;
+  for (unsigned invalid = 0; invalid < 3; ++invalid) {
+    struct InvalidReconciliation : FakeSonos {
+      unsigned invalid = 0;
+      Result reconcile(PlaybackState& state) override {
+        auto result = refresh(state);
+        if (invalid == 0)
+          state.targetId = "another-room";
+        else if (invalid == 1)
+          state.known = false;
+        else
+          state.stale = true;
+        return result;
+      }
+    } transport;
+    transport.invalid = invalid;
+    transport.failAt = Operation::Next;
+    Application app(transport, {"room", {}, 1});
+    assert(app.submit(card({{"transport", "next"}})).uncertain);
+    const auto requestId = app.state().requestId;
+    assert(!app.reconcile().ok && app.state().recoveryRequired &&
+           app.state().observed.targetId == "room" && app.state().observed.known &&
+           app.state().observed.stale && app.state().requestId == requestId &&
+           transport.calls.size() == 1);
+    ++cases;
+  }
   std::string mode;
+  cases += cancellationChecks();
   assert(modeWithShuffle("REPEAT_ALL", true, mode).ok && mode == "SHUFFLE");
   ++cases;
   assert(modeWithShuffle("SHUFFLE_REPEAT_ONE", false, mode).ok && mode == "REPEAT_ONE");

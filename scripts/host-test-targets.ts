@@ -16,6 +16,32 @@ export function hostTestTargets(): HostTarget[] {
     ? join(LIBS, "M5Unified/src")
     : join(DEPS, "host/M5Buttons/src");
   return [
+    {
+      name: "subscription_lifecycle_test",
+      sources: [],
+      includes: [deviceInclude, ...includes],
+    },
+    {
+      name: "runtime_fault_test",
+      sources: sharedSources(),
+      includes: [deviceInclude, ...includes],
+    },
+    {
+      name: "sonos_lifecycle_test",
+      sources: [],
+      includes: [deviceInclude, ...includes],
+    },
+    { name: "deadline_client_test", sources: [], includes: [deviceInclude] },
+    {
+      name: "worker_lifecycle_test",
+      sources: [],
+      includes: [deviceInclude, ...includes],
+    },
+    {
+      name: "wifi_lifecycle_test",
+      sources: [],
+      includes: [deviceInclude, ...includes],
+    },
     { name: "core_test", sources: sharedSources(), includes },
     {
       name: "writer_test",

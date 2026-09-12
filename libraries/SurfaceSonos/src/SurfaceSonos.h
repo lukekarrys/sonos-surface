@@ -60,6 +60,7 @@ public:
   DirectSonos(LocalHttp& http, SonosConfig config, Log log = {});
   Result discover(std::vector<Room>& rooms);
   Result refresh(PlaybackState& state) override;
+  Result reconcile(PlaybackState& state) override;
   Result queue(uint32_t start, uint32_t count, QueuePage& page) override;
   Result prepare(const ResolvedIntent& intent) override;
   Result execute(Operation operation) override;

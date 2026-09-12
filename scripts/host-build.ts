@@ -6,6 +6,7 @@ export const includes = [
   join(ROOT, "libraries/SurfaceSonos/src"),
   join(LIBS, "SurfaceJson/src"),
   join(LIBS, "SurfaceXml/src"),
+  join(LIBS, "SurfaceSml/src"),
 ];
 export const deviceInclude = join(ROOT, "libraries/SurfaceDevice/src");
 export const coreSources = () => sourceFiles(includes[0], /\.cpp$/);

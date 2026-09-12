@@ -13,6 +13,7 @@ import {
   DEPS,
   LIBS,
   M5_VERSION,
+  SML_VERSION,
   libraries,
   cli,
   main,
@@ -47,6 +48,7 @@ export async function setup(hostOnly = false) {
   for (const [name, version] of [
     ["SurfaceJson", "3.12.0"],
     ["SurfaceXml", "11.0.0"],
+    ["SurfaceSml", SML_VERSION],
   ]) {
     const lib = join(LIBS, name);
     mkdirSync(lib, { recursive: true });
@@ -67,6 +69,14 @@ export async function setup(hostOnly = false) {
     await download(
       `https://raw.githubusercontent.com/leethomason/tinyxml2/11.0.0/${file}`,
       join(LIBS, "SurfaceXml", file === "LICENSE.txt" ? file : `src/${file}`),
+    );
+  for (const [upstream, local] of [
+    ["include/boost/sml.hpp", "src/surface_sml.hpp"],
+    ["LICENSE.md", "LICENSE.md"],
+  ])
+    await download(
+      `https://raw.githubusercontent.com/boost-ext/sml/v${SML_VERSION}/${upstream}`,
+      join(LIBS, "SurfaceSml", local),
     );
   if (hostOnly) {
     for (const file of [

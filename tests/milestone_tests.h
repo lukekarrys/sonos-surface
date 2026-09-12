@@ -356,6 +356,15 @@ unsigned milestoneTests() {
     auto request = card({{"transport", advance}});
     assert(!app.submit(request).ok && app.state().recoveryRequired && http.writes.size() == 1);
     assert(!app.submit(request).ok && http.writes.size() == 1);
+    const auto requestId = app.state().requestId;
+    assert(app.reconcile().ok && !app.state().recoveryRequired &&
+           app.state().status == "uncertain" && app.state().requestId == requestId &&
+           http.writes.size() == 1);
+    const auto operation = std::string(advance) == "next" ? Operation::Next : Operation::Previous;
+    assert(!sonos.execute(operation).ok && http.writes.size() == 1);
+    http.failAction.clear();
+    assert(app.submit(request).ok && app.state().requestId == requestId + 1 &&
+           http.writes.size() == 2);
     ++cases;
   }
   ControlHttp grouping;
@@ -635,6 +644,14 @@ unsigned milestoneTests() {
     Application app(sonos, {a.id, {}, 1});
     assert(!app.submitToggle({a.id, {}, 1}).ok && app.state().recoveryRequired);
     assert(!app.submitToggle({a.id, {}, 1}).ok && gate.downstream.writes.size() == 1);
+    assert(app.reconcile().ok && !app.state().recoveryRequired &&
+           gate.downstream.writes.size() == 1);
+    gate.downstream.failAction.clear();
+    gate.readOnly = true;
+    assert(!app.submitToggle({a.id, {}, 1}).ok && gate.downstream.writes.size() == 1 &&
+           app.state().detail.find("READ_ONLY_BLOCKED") != std::string::npos);
+    gate.readOnly = false;
+    assert(app.submitToggle({a.id, {}, 1}).ok && gate.downstream.writes.size() == 2);
     ++cases;
   }
   return cases;
