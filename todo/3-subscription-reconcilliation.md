@@ -1,3 +1,185 @@
+Add EVENT-DRIVEN SONOS STATE SYNCHRONIZATION with periodic polling as reconciliation
+and fallback.
+
+The current ObservedState / PendingState / InteractionState / ViewModel architecture is
+authoritative.
+
+This milestone changes HOW authoritative Sonos observations arrive.
+
+It must NOT change UI authority semantics.
+
+Do NOT implement grouping mutations yet.
+Do NOT make polling the UI clock.
+Do NOT add historical checkpoint documentation.
+
+==================================================
+1. GOAL
+==================================================
+
+Healthy external Sonos changes should normally appear promptly without waiting for a
+multi-second poll.
+
+Use Sonos UPnP/GENA event subscriptions where appropriate, especially:
+
+- AVTransport
+- RenderingControl
+
+and any other CURRENT service required to keep the existing observed state accurate.
+
+Polling remains a reconciliation/fallback mechanism.
+
+==================================================
+2. CALLBACK SERVER
+==================================================
+
+Implement the minimum HTTP callback surface required for Sonos NOTIFY events.
+
+Keep it separate conceptually from the NFC writer API even if they share an underlying
+HTTP listener.
+
+Strictly validate:
+
+- method
+- callback path/token
+- bounded body size
+- relevant headers
+- known subscription identity
+
+Do not expose a general unauthenticated mutation API.
+
+==================================================
+3. SUBSCRIPTION LIFECYCLE
+==================================================
+
+Explicitly model:
+
+- subscribe
+- subscription ID/SID
+- timeout
+- renewal
+- expiration
+- resubscription
+- invalidation after Wi-Fi loss
+- invalidation after topology/device identity change
+
+Renew before expiry.
+
+After network reconnect:
+
+  discard stale subscription assumptions
+  fetch authoritative state
+  resubscribe
+
+==================================================
+4. EVENT PARSING
+==================================================
+
+Normalize incoming event state into the same ObservedState update path used by polling.
+
+Do not create event-specific UI state.
+
+Events may update:
+
+- transport
+- metadata
+- playback mode
+- volume
+- mute if supported
+- relevant source identity/state
+
+Preserve unknown values rather than inventing defaults.
+
+==================================================
+5. POSITION
+==================================================
+
+Do not expect events to provide a UI animation clock.
+
+Continue using the local monotonic playback projection.
+
+Position reconciliation should periodically replace the authoritative position anchor.
+
+Do not poll once per second.
+
+==================================================
+6. RECONCILIATION CADENCE
+==================================================
+
+Start with an intentionally moderate cadence.
+
+Initial target:
+
+PLAYING:
+  authoritative position/state reconciliation approximately every 5 seconds
+
+PAUSED/STOPPED:
+  approximately every 15-30 seconds
+
+Use measured behavior to tune.
+
+Do not treat these exact numbers as product constants if an adaptive/simple approach is
+cleaner.
+
+The key invariant:
+
+  polling repairs state
+  polling does not animate UI
+
+==================================================
+7. HEALTH / FALLBACK
+==================================================
+
+Track whether subscriptions are healthy.
+
+If events stop, subscription expires, renewal fails, or callback service is unhealthy:
+
+- continue functioning through polling
+- retry/resubscribe with bounded backoff
+- do not make UI unusable
+
+When subscription health returns, avoid duplicate/conflicting observation paths.
+
+Both event and poll results ultimately update the same authoritative state.
+
+==================================================
+8. OPTIMISTIC RECONCILIATION
+==================================================
+
+Incoming event confirmation should clear matching PendingState promptly.
+
+Example:
+
+  local Pause
+      -> pending paused
+      -> SOAP request
+      -> AVTransport event paused
+      -> ObservedState paused
+      -> pending clears
+
+Do not require the next reconciliation poll to clear a mutation already authoritatively
+observed.
+
+Contradictory authoritative events must participate in existing bounded conflict
+semantics.
+
+==================================================
+9. EXTERNAL CONTROLLER TESTS
+==================================================
+
+The important product behavior is external control.
+
+While the device is idle/awake, changes made through another Sonos controller should
+appear without touching this device:
+
+- play
+- pause
+- next
+- previous
+- seek
+- volume
+- source/track change
+- shuffle/repeat where events support them
+
 Healthy event-driven updates should normally be visible within roughly one second.
 
 Do not turn this into a hard timing guarantee.
