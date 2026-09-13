@@ -7,7 +7,7 @@ Each file in this folder is a self-contained prompt for one autonomous agent. `A
 | Prompt                                   | Status | Depends on                                       | May run in parallel with     |
 | ---------------------------------------- | ------ | ------------------------------------------------ | ---------------------------- |
 | `1-device-tooling`                       | done (06f70b8) |                                                  |                              |
-| `2-user-input-priority`                  |        | `1`                                              |                              |
+| `2-user-input-priority`                  | in progress | `1`                                              |                              |
 | `3-lvgl`                                 |        | `1`, `2`                                         | `5` Phase A, `6` Phase A     |
 | `5-new-view-model` Phase A               |        | `2`                                              | `3`, `6` Phase A             |
 | `6-subscription-reconciliation` Phase A  |        | `2`                                              | `3`, `5` Phase A             |

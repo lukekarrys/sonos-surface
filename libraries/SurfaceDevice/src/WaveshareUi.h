@@ -80,6 +80,7 @@ class WaveshareUi {
     return (uint64_t(clamped) * maximum + (sliderRight - sliderLeft) / 2) /
            (sliderRight - sliderLeft);
   }
+  // Busy is another user job; an automatic read in progress never rejects input.
   BoardEvent mutation(MusicIntent intent, const std::string& label, uint32_t now) {
     if (context.busy) {
       notify("Busy - try again", now);
@@ -167,7 +168,8 @@ public:
             roomsChanged || next.refreshError != state.refreshError ||
             next.queueError != state.queueError ||
             next.recoveryRequired != state.recoveryRequired || c.busy != context.busy ||
-            c.readOnly != context.readOnly || c.online != context.online;
+            c.backgroundActive != context.backgroundActive || c.readOnly != context.readOnly ||
+            c.online != context.online;
     if (touching && ((screen == WaveshareScreen::Rooms && roomsChanged) ||
                      (screen == WaveshareScreen::Queue && pageChanged)))
       cancelTouch();

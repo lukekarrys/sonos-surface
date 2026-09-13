@@ -337,8 +337,9 @@ test("bounded captures stop at a token and summarize worker, busy and poll gaps"
   );
   assert.deepEqual(lines, [
     "capture start: discarded 1 buffered lines",
-    "capture span-ms=0 heartbeats=0 busy-ratio=0.000 worker-transitions=0 jobs=0 " +
-      "job-ms-median=0 job-ms-max=0 button-poll-gap-ms-max=0 ui-poll-gap-ms-max=0",
+    "capture span-ms=0 heartbeats=0 busy-ratio=0.000 background-ratio=0.000 " +
+      "worker-transitions=0 jobs=0 job-ms-median=0 job-ms-max=0 worker-running-ratio=0.000 " +
+      "preempted=0 button-poll-gap-ms-max=0 ui-poll-gap-ms-max=0",
   ]);
   t.diagnostic(lines.at(-1)!);
   // Durations come from the device timestamps, so a buffered backlog arriving
@@ -346,11 +347,14 @@ test("bounded captures stop at a token and summarize worker, busy and poll gaps"
   const fixture: CapturedLine[] = [
     { at: 0, line: "[1000] heartbeat wifi=3 busy=0 heap=1 inactivity=1" },
     { at: 0, line: "[1010] worker Idle -> Running id=1 deadline=5" },
-    { at: 0, line: "[1020] heartbeat wifi=3 busy=1 heap=1 inactivity=1" },
+    {
+      at: 0,
+      line: "[1020] heartbeat wifi=3 busy=0 background=1 heap=1 inactivity=1",
+    },
     { at: 0, line: "[1110] worker Running -> Idle id=1 outcome=Success" },
     { at: 0, line: "[1120] worker Idle -> Running id=2 deadline=5" },
     { at: 0, line: "[1130] worker stale-result id=1" },
-    { at: 0, line: "[1320] worker Running -> Idle id=2 outcome=Timeout" },
+    { at: 0, line: "[1320] worker Running -> Idle id=2 outcome=preempted" },
     { at: 0, line: "[1330] worker Idle -> Running id=3 deadline=5" },
     { at: 0, line: "[1630] worker Running -> Idle id=3 outcome=Success" },
     { at: 0, line: "[1700] heartbeat wifi=3 busy=1 heap=1 inactivity=1" },
@@ -361,8 +365,9 @@ test("bounded captures stop at a token and summarize worker, busy and poll gaps"
   ];
   assert.equal(
     captureSummary(fixture),
-    "capture span-ms=999 heartbeats=3 busy-ratio=0.667 worker-transitions=7 jobs=3 " +
-      "job-ms-median=200 job-ms-max=300 button-poll-gap-ms-max=31 ui-poll-gap-ms-max=44",
+    "capture span-ms=999 heartbeats=3 busy-ratio=0.333 background-ratio=0.333 " +
+      "worker-transitions=7 jobs=3 job-ms-median=200 job-ms-max=300 " +
+      "worker-running-ratio=0.601 preempted=1 button-poll-gap-ms-max=31 ui-poll-gap-ms-max=44",
   );
   // Without a device timestamp, host arrival time still bounds the job.
   assert.match(
@@ -374,7 +379,8 @@ test("bounded captures stop at a token and summarize worker, busy and poll gaps"
   );
   assert.equal(
     captureSummary([]),
-    "capture span-ms=0 heartbeats=0 busy-ratio=0.000 worker-transitions=0 jobs=0 " +
-      "job-ms-median=0 job-ms-max=0 button-poll-gap-ms-max=0 ui-poll-gap-ms-max=0",
+    "capture span-ms=0 heartbeats=0 busy-ratio=0.000 background-ratio=0.000 " +
+      "worker-transitions=0 jobs=0 job-ms-median=0 job-ms-max=0 worker-running-ratio=0.000 " +
+      "preempted=0 button-poll-gap-ms-max=0 ui-poll-gap-ms-max=0",
   );
 });

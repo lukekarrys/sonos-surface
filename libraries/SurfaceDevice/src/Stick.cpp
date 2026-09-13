@@ -478,7 +478,9 @@ void boardRender(const AppState& state, const std::string& notice) {
   const auto modes = "Mode: " + (observed.mode.empty() ? "unknown" : observed.mode);
   const auto device = std::string(context.online ? "WiFi OK" : "WiFi offline") + " | " +
                       (context.readOnly ? "READ ONLY" : "CONTROL") + " | " +
-                      (context.busy ? "Busy" : "Idle");
+                      (context.busy               ? "Busy"
+                       : context.backgroundActive ? "Updating"
+                                                  : "Idle");
   const auto screen = observed.room + "\n" + observed.title + "\n" + observed.artist + "\n" +
                       observed.album + "\n" + playback + "\n" + modes + "\n" + device + "\n" +
                       notice + "\n" + state.status + "\n" + detail + "\n" + writerServer.address();

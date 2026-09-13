@@ -208,6 +208,9 @@ public:
   // publishing under the expired identity. Cancelled mutations require a fresh
   // reconciliation and retain their consumed request identity and provenance.
   void discardCancelledResult(const AppState& retained, bool mutation);
+  // Worker-only cleanup after a preempted automatic read returns. Nothing
+  // failed, so the pre-job snapshot is restored exactly, including freshness.
+  void discardPreemptedResult(const AppState& retained);
   Result queue(uint32_t start, uint32_t count);
   // Drop observations on selection/reconnect, preserving command uncertainty.
   void invalidateObservation();

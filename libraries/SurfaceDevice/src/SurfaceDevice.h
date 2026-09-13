@@ -4,7 +4,7 @@
 
 namespace surface::device {
 struct RuntimeStatus {
-  bool workerBusy;
+  bool workerBusy; // A user job is running.
   uint32_t completedJobs, uptimeMs;
 };
 RuntimeStatus runtimeStatus();
@@ -37,7 +37,9 @@ struct BoardEvent {
 };
 struct BoardContext {
   std::vector<Room> rooms;
-  bool readOnly = true, online = false, busy = false;
+  // busy: a user job is running and further user input rejects. backgroundActive:
+  // an automatic read is running; it never blocks input.
+  bool readOnly = true, online = false, busy = false, backgroundActive = false;
   std::string feedback;
 };
 void boardContext(const BoardContext& context);

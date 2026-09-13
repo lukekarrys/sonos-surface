@@ -86,6 +86,7 @@ inline nlohmann::json waveshareStateJson(const WaveshareUi& ui, const WaveshareF
   preview["seek"] = optionalJson(ui.seekPreview);
   state["toast"] = ui.toast;
   state["busy"] = ui.context.busy;
+  state["backgroundActive"] = ui.context.backgroundActive;
   state["online"] = ui.context.online;
   state["readOnly"] = ui.context.readOnly;
   auto& playback = state["observed"];

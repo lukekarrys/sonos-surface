@@ -90,6 +90,10 @@ struct RuntimeFixture {
   std::string selectedId = "RINCON_A", learnedAddress, nextAddress = "192.168.1.2";
   std::string currentSid;
   std::set<uint64_t> attempted;
+  // Per accepted job: origin, and the pre-session snapshot the worker retains.
+  std::map<uint64_t, JobOrigin> origins;
+  std::map<uint64_t, bool> mutations;
+  std::map<uint64_t, AppState> retained;
   std::deque<SubscriptionRequest> subscriptionRequests;
   AppState display;
   RuntimeCoordinator coordinator{display};
@@ -165,16 +169,22 @@ struct RuntimeFixture {
     coordinator.shutdown(now);
     consumePlatform();
   }
-  uint64_t queueJob(bool refresh = true) {
-    const auto id = coordinator.enqueueJob(now, refresh, [](uint64_t) { return true; }, stopping);
+  uint64_t queueJob(bool refresh = true, JobOrigin origin = JobOrigin::User) {
+    const auto id =
+        coordinator.enqueueJob(now, refresh, origin, [](uint64_t) { return true; }, stopping);
     if (id) {
       ++accepted;
       check(id == accepted, "monotonic accepted job identity");
+      origins[id] = origin;
+      mutations[id] = !refresh;
     }
     consumePlatform();
     return id;
   }
   void pickup(uint64_t id) {
+    // One worker task: picking up a job means every older job has returned.
+    retained.clear();
+    retained[id] = app.state();
     const auto binding = coordinator.bindDiscovery(now, id);
     http.jobId = id;
     http.transportFailed = false;
@@ -185,9 +195,9 @@ struct RuntimeFixture {
     }
     consumePlatform();
   }
-  uint64_t beginJob(bool refresh = true) {
+  uint64_t beginJob(bool refresh = true, JobOrigin origin = JobOrigin::User) {
     tick();
-    const auto id = queueJob(refresh);
+    const auto id = queueJob(refresh, origin);
     if (id)
       pickup(id);
     return id;
@@ -205,15 +215,23 @@ struct RuntimeFixture {
     }
     consumePlatform();
   }
-  void finish(uint64_t id, bool success) {
-    coordinator.finishJob(now, id, {true, success, false, false, http.transportFailed});
+  JobFinish finish(uint64_t id, bool success) {
+    const auto result =
+        coordinator.finishJob(now, id, {true, success, false, false, http.transportFailed});
+    const auto snapshot = retained.find(id);
+    if (snapshot != retained.end()) {
+      discardJobResult(result, app, snapshot->second, mutations[id]);
+      retained.erase(snapshot);
+    }
     consumePlatform();
+    return result;
   }
   bool publish(uint64_t id, const AppState& state) {
     return coordinator.publish(now, id, state, selectedId, "", stopping);
   }
   Result command() {
     check(attempted.insert(http.jobId).second, "one deliberate command per worker job");
+    mutations[http.jobId] = true;
     MusicIntent intent;
     intent.transport = TransportCommand::Next;
     return app.submit(resolvePolicy(intent, {"RINCON_A", {}, 1}));
@@ -227,7 +245,7 @@ struct RuntimeFixture {
   void ready() {
     configure();
     connect();
-    const auto id = beginJob();
+    const auto id = beginJob(true, JobOrigin::Automatic);
     check(id != 0, "startup job accepted");
     discovery(true);
     check(reconcile().ok, "startup authoritative read");
@@ -275,7 +293,7 @@ struct RuntimeFixture {
       // emitted by the production automatic predicate receive successful fake
       // discovery/HTTP completions; no prior mutation is replayed.
       if (automaticDue()) {
-        const auto id = beginJob();
+        const auto id = beginJob(true, JobOrigin::Automatic);
         check(id && id != oldJob, "automatic scheduler queues fresh work");
         discovery(true);
         const auto result = reconcile();
@@ -307,6 +325,10 @@ struct RuntimeFixture {
     check(jobs().accepted == accepted, "only queued work allocates monotonic IDs");
     check(display.observed.targetId == selectedId, "only selected UUID is published");
     check(http.writes.size() == http.mutations, "at most one Next dispatch per accepted job");
+    const auto worker = jobs();
+    check(worker.lastOutcome != JobOutcome::Preempted ||
+              origins.at(worker.lastJobId) == JobOrigin::Automatic,
+          "every Preempted outcome belongs to an Automatic job");
   }
 };
 uint64_t FaultHttp::nowMs() { return runtime.now; }
@@ -426,7 +448,8 @@ void scenarios() {
       f.check(f.health().state == SonosState::Ready && f.health().retryAt == 0 &&
                   !f.coordinator.snapshots().discardHost && f.hostDiscards == discards &&
                   f.events().state == SubscriptionState::Healthy &&
-                  f.events().leaseUntil == lease && f.coordinator.admission(f.now, false).allowed,
+                  f.events().leaseUntil == lease &&
+                  f.coordinator.admission(f.now, false, JobOrigin::User).allowed,
               "answered fault preserves Ready, host, lease, and immediate job admission");
     const auto failedId = id;
     const auto requestId = f.app.state().requestId;
@@ -684,7 +707,7 @@ void unavailableTargetsKeepNormalPolling() {
           f.check(f.now - previousPoll == RuntimeCoordinator::PollIntervalMs,
                   "unavailable room uses exactly the ordinary ten-second poll cadence");
         previousPoll = f.now;
-        id = f.beginJob();
+        id = f.beginJob(true, JobOrigin::Automatic);
         ++f.automaticReads;
       }
       f.check(id != 0, "unavailable room job is admitted against healthy household");
@@ -725,18 +748,161 @@ void unavailableTargetsKeepNormalPolling() {
   }
 }
 
-void busyWinsOverDiscoveryRecovery() {
-  RuntimeFixture f(110);
-  f.ready();
-  const auto id = f.beginJob();
-  f.check(f.health().state == SonosState::Discovering, "routine poll discovers current topology");
-  for (bool refresh : {false, true}) {
-    const auto rejected = f.coordinator.admission(f.now, refresh);
-    f.check(!rejected.allowed && rejected.notice == "Busy; input ignored" &&
-                rejected.reason == "worker busy",
-            "busy wins over Sonos discovery for toggle, intent, and refresh admission");
+bool sameObservation(const AppState& a, const AppState& b) {
+  return a.observed.targetId == b.observed.targetId && a.observed.title == b.observed.title &&
+         a.observed.known == b.observed.known && a.observed.stale == b.observed.stale &&
+         a.observed.observedAtMs == b.observed.observedAtMs && a.refreshError == b.refreshError &&
+         a.status == b.status && a.recoveryRequired == b.recoveryRequired;
+}
+
+// The preempted automatic job's worker returns after its blocked request and
+// finishes; the user job waits for that pickup. Returns the preempted cleanup.
+void unwindPreempted(RuntimeFixture& f, uint64_t preempted, const AppState& display,
+                     const RuntimeCoordinator::Snapshots& before) {
+  const auto writes = f.http.writes;
+  const auto pickedUp = f.http.jobId == preempted;
+  if (pickedUp) {
+    const auto retained = f.retained.at(preempted);
+    f.check(!f.reconcile().ok, "preempted read's in-flight request is blocked at dispatch");
+    f.check(f.http.request("/control", "urn:AVTransport#Next", "").notSent &&
+                f.http.writes == writes,
+            "a preempted job never mutates");
+    f.check(!f.publish(preempted, f.app.state()) && sameObservation(f.display, display),
+            "a preempted job never publishes");
+    f.check(f.finish(preempted, false) == JobFinish::Preempted &&
+                sameObservation(f.app.state(), retained),
+            "preempted cleanup restores the retained observation exactly");
+  } else
+    f.check(f.finish(preempted, false) == JobFinish::Preempted,
+            "a preempted queued job finishes as preempted");
+  const auto after = f.coordinator.snapshots();
+  f.check(sameObservation(f.display, display) &&
+              !f.display.observed.stale == !display.observed.stale,
+          "preemption neither stales nor rewrites the display");
+  f.check(after.reconciliationPending == before.reconciliationPending &&
+              after.sonos.state == before.sonos.state &&
+              after.sonos.discoveryId == before.sonos.discoveryId &&
+              after.sonos.lastError == before.sonos.lastError &&
+              after.sonos.retryAt == before.sonos.retryAt &&
+              after.sonos.consecutiveSessionFailures == before.sonos.consecutiveSessionFailures &&
+              after.subscription.state == before.subscription.state &&
+              after.subscription.requestId == before.subscription.requestId,
+          "preemption raises no session failure, discovery failure, or reconciliation");
+}
+
+void userInputPreemptsAutomaticRead() {
+  unsigned seed = 110;
+  for (bool duringTopology : {true, false}) {
+    for (const auto* action : {"toggle", "intent", "refresh", "room-select", "queue-page"}) {
+      const bool refresh = std::string(action) != "toggle" && std::string(action) != "intent";
+      RuntimeFixture f(seed++);
+      f.ready();
+      f.subscriptionResult(true, "sid-preempt", 300000);
+      f.trace.record(std::string(action) + (duringTopology ? " during topology" : " during read"));
+      f.tick(RuntimeCoordinator::PollIntervalMs);
+      f.check(f.automaticDue(), "routine automatic poll becomes due");
+      const auto automatic = f.beginJob(true, JobOrigin::Automatic);
+      f.check(f.health().state == SonosState::Discovering && !f.health().recovering,
+              "routine poll opens its topology generation at pickup");
+      if (!duringTopology) {
+        f.discovery(true);
+        f.check(f.health().state == SonosState::Ready, "pickup topology completed");
+      }
+      const auto display = f.display;
+      const auto before = f.coordinator.snapshots();
+      const auto accepted = f.coordinator.admission(f.now, refresh, JobOrigin::User);
+      f.check(accepted.allowed, "user input during an automatic read is admitted");
+      const auto user = f.queueJob(refresh, JobOrigin::User);
+      const auto worker = f.jobs();
+      f.check(user == automatic + 1 && worker.running && worker.jobId == user &&
+                  worker.origin == JobOrigin::User && worker.startedAt == f.now &&
+                  worker.lastJobId == automatic && worker.lastOutcome == JobOutcome::Preempted &&
+                  worker.lastOrigin == JobOrigin::Automatic && worker.preempted == 1,
+              "the automatic job ends Preempted and the user job is Running at once");
+      f.check(
+          !f.coordinator.jobActive(automatic, f.now) &&
+              !f.coordinator.dispatchAllowed(automatic, f.http.discoveryId, f.now, false, false),
+          "preemption revokes the automatic job's dispatch authority");
+      f.check(!f.coordinator.discoveryResult(f.now, automatic, f.http.discoveryId, true, "late"),
+              "a preempted read grants no topology authority");
+      unwindPreempted(f, automatic, display, before);
+      f.pickup(user);
+      if (duringTopology)
+        f.check(f.http.discoveryId == before.sonos.discoveryId &&
+                    f.health().state == SonosState::Discovering,
+                "the user job binds the still-open discovery generation");
+      f.discovery(true);
+      f.check(f.health().state == SonosState::Ready && f.usable(f.http.discoveryId),
+              "the user job's own topology read completes the generation");
+      f.check(refresh ? f.reconcile().ok : f.command().ok, "admitted user job runs normally");
+      f.check(f.finish(user, true) == JobFinish::Accepted &&
+                  f.jobs().lastOutcome == JobOutcome::Success,
+              "user job completes after preemption");
+      f.invariants();
+    }
   }
+}
+
+void userInputDuringUserJobRejectsBusy() {
+  for (bool refreshJob : {false, true}) {
+    RuntimeFixture f(125 + refreshJob);
+    f.ready();
+    const auto id = f.beginJob(refreshJob, JobOrigin::User);
+    const auto worker = f.jobs();
+    for (bool refresh : {false, true}) {
+      const auto rejected = f.coordinator.admission(f.now, refresh, JobOrigin::User);
+      f.check(!rejected.allowed && rejected.notice == "Busy; input ignored" &&
+                  rejected.reason == "worker busy",
+              "a user action during a user job is rejected visibly");
+      f.check(f.queueJob(refresh, JobOrigin::User) == 0 &&
+                  f.queueJob(refresh, JobOrigin::Automatic) == 0,
+              "neither user input nor automatic work queues behind a user job");
+    }
+    f.check(!f.coordinator.preemptAutomatic(f.now) && f.jobs().running && f.jobs().jobId == id &&
+                f.jobs().ignoredPreempts == worker.ignoredPreempts + 1 && f.jobs().preempted == 0,
+            "a preempt against a user job is ignored and counted");
+    f.discovery(true);
+    f.finish(id, true);
+    f.check(!f.coordinator.preemptAutomatic(f.now) &&
+                f.jobs().ignoredPreempts == worker.ignoredPreempts + 2,
+            "a preempt while Idle is ignored and counted");
+    f.invariants();
+  }
+}
+
+void recoveryStillRejectsMutationsDuringAutomaticRead() {
+  RuntimeFixture f(128);
+  f.ready();
+  auto id = f.beginJob(true, JobOrigin::Automatic);
+  f.discovery(false);
   f.finish(id, false);
+  f.check(f.health().state == SonosState::Backoff, "failed discovery enters backoff");
+  const auto backoff = f.coordinator.admission(f.now, false, JobOrigin::User);
+  f.check(!backoff.allowed && backoff.notice.find("Sonos recovering;") == 0,
+          "Sonos Backoff still rejects mutations with the recovery notice");
+  f.tickUntil(f.health().retryAt);
+  f.check(f.automaticDue(), "recovery discovery is automatic work");
+  id = f.beginJob(true, JobOrigin::Automatic);
+  f.check(f.health().state == SonosState::Discovering && f.health().recovering,
+          "recovery discovery is bound to the automatic job");
+  const auto mutation = f.coordinator.admission(f.now, false, JobOrigin::User);
+  f.check(!mutation.allowed && mutation.notice == "Sonos unavailable; recovering",
+          "a recovery discovery rejects mutations for authority, never as busy");
+  f.check(f.queueJob(false, JobOrigin::User) == 0 && f.jobs().jobId == id,
+          "a rejected mutation does not preempt recovery");
+  const auto display = f.display;
+  const auto before = f.coordinator.snapshots();
+  const auto user = f.queueJob(true, JobOrigin::User);
+  f.check(user && f.jobs().lastOutcome == JobOutcome::Preempted &&
+              f.health().state == SonosState::Discovering &&
+              !f.coordinator.dispatchAllowed(user, before.sonos.discoveryId, f.now, false, true),
+          "a user refresh preempts recovery, which still grants no mutation authority");
+  unwindPreempted(f, id, display, before);
+  f.pickup(user);
+  f.check(f.http.discoveryId == before.sonos.discoveryId, "user refresh binds recovery discovery");
+  f.discovery(true);
+  f.check(f.reconcile().ok, "user refresh completes recovery");
+  f.finish(user, true);
   f.invariants();
 }
 
@@ -759,13 +925,13 @@ void recoveryRejectsWithoutClearingRoom() {
     unsigned queueCalls = 0;
     for (const auto* action : {"refresh", "room-next", "room-select", "queue-page"}) {
       f.trace.record(action);
-      const auto rejected = f.coordinator.admission(f.now, true);
+      const auto rejected = f.coordinator.admission(f.now, true, JobOrigin::User);
       f.check(!rejected.allowed && rejected.retryAt > f.now &&
                   rejected.notice.find("Sonos recovering; retrying in ") == 0 &&
                   rejected.reason.find("retryAt=" + std::to_string(rejected.retryAt)) !=
                       std::string::npos,
               "recovery rejection exposes its reason and pending retry time");
-      f.check(f.coordinator.enqueueJob(f.now, true,
+      f.check(f.coordinator.enqueueJob(f.now, true, JobOrigin::User,
                                        [&](uint64_t) {
                                          ++queueCalls;
                                          return true;
@@ -842,7 +1008,7 @@ void localRejectionsCreateNoWork() {
   const auto connectCalls = f.connectCalls;
   unsigned queueCalls = 0;
   const auto enqueue = [&] {
-    return f.coordinator.enqueueJob(f.now, false, [&](uint64_t) {
+    return f.coordinator.enqueueJob(f.now, false, JobOrigin::User, [&](uint64_t) {
       ++queueCalls;
       return true;
     });
@@ -888,7 +1054,8 @@ void localRejectionsCreateNoWork() {
               after.sonos.totalDiscoveries == before.sonos.totalDiscoveries &&
               after.subscription.totalRequests == before.subscription.totalRequests,
           "pure local rejections consume no job ID, completion, reconciliation, or network work");
-  f.check(f.coordinator.enqueueJob(f.now, false, [](uint64_t) { return false; }) == 0 &&
+  f.check(f.coordinator.enqueueJob(f.now, false, JobOrigin::User, [](uint64_t) { return false; }) ==
+                  0 &&
               f.jobs().accepted == before.worker.accepted &&
               f.jobs().completed == before.worker.completed &&
               !f.coordinator.snapshots().reconciliationPending,
@@ -905,7 +1072,7 @@ void optionalQueueFailureIsLifecycleSuccess() {
   f.ready();
   f.tick(RuntimeCoordinator::PollIntervalMs);
   f.check(f.automaticDue(), "ordinary automatic queue/read job becomes due");
-  const auto id = f.beginJob();
+  const auto id = f.beginJob(true, JobOrigin::Automatic);
   f.discovery(true);
   f.check(f.reconcile().ok, "basic authoritative read succeeds before optional queue failure");
   f.http.failQueue = true;
@@ -927,13 +1094,13 @@ void publicDecisionsHonorDeadlinesBeforeTimerService() {
     f.configure();
     f.connect();
     f.now = f.health().deadline;
-    const auto rejected = f.coordinator.admission(f.now, true);
+    const auto rejected = f.coordinator.admission(f.now, true, JobOrigin::User);
     f.check(!rejected.allowed && f.health().state == SonosState::Backoff &&
                 rejected.retryAt > f.now && !f.jobs().running,
             "admission observes an expired discovery before the main timer callback");
     f.now = rejected.retryAt;
     f.check(f.automaticDue(), "automatic predicate services due discovery retry itself");
-    const auto id = f.beginJob();
+    const auto id = f.beginJob(true, JobOrigin::Automatic);
     f.discovery(true);
     f.finish(id, true);
     f.invariants();
@@ -964,7 +1131,7 @@ void publicDecisionsHonorDeadlinesBeforeTimerService() {
             "automatic predicate expires worker before deciding whether work is due");
     f.now = f.health().retryAt;
     f.check(f.automaticDue(), "timed-out worker recovers automatically at the existing backoff");
-    const auto next = f.beginJob();
+    const auto next = f.beginJob(true, JobOrigin::Automatic);
     f.discovery(true);
     f.check(f.reconcile().ok, "automatic recovery reads fresh state after unsignaled deadline");
     f.finish(next, true);
@@ -1063,7 +1230,10 @@ void routineDiscoveryLogging() {
 struct RuntimeChaosCoverage {
   uint64_t queued = 0, pickups = 0, queuedTimeouts = 0, queuedRejections = 0;
   uint64_t validNotifies = 0, notifyJobs = 0, automaticSamples = 0, automaticJobs = 0;
-  uint64_t missingTargets = 0, answeredFaults = 0;
+  uint64_t missingTargets = 0, answeredFaults = 0, preemptions = 0, preemptedUnwinds = 0;
+  // Simulated time with an automatic job Running, and the part of it in which
+  // a user submit would have been rejected because of that automatic work.
+  uint64_t automaticRunningMs = 0, automaticBlockedMs = 0;
 };
 
 bool queuedJobWaiting(const RuntimeFixture& f) {
@@ -1119,7 +1289,7 @@ void sampleChaosAutomaticJob(RuntimeFixture& f, RuntimeChaosCoverage& coverage) 
   f.check(due == expected, "ordinary chaos samples automatic scheduling against current authority");
   if (!due)
     return;
-  const auto id = f.queueJob();
+  const auto id = f.queueJob(true, JobOrigin::Automatic);
   f.check(id && queuedJobWaiting(f) && !f.coordinator.snapshots().reconciliationPending,
           "ordinary chaos automatic scheduling admits a fresh job awaiting separate pickup");
   ++coverage.automaticJobs;
@@ -1148,7 +1318,7 @@ void currentNotifySchedulesChaosRead(RuntimeFixture& f, RuntimeChaosCoverage& co
   }
   f.check(due && f.now <= notifiedAt + RuntimeCoordinator::AutomaticRateLimitMs,
           "Ready idle NOTIFY causes automatic work within the rate limit");
-  const auto id = f.queueJob();
+  const auto id = f.queueJob(true, JobOrigin::Automatic);
   f.check(id && queuedJobWaiting(f) && !f.coordinator.snapshots().reconciliationPending,
           "NOTIFY reconciliation admits an automatic read without user input");
   ++coverage.notifyJobs;
@@ -1161,7 +1331,8 @@ void finishMissingTargetInChaos(RuntimeFixture& f, RuntimeChaosCoverage& coverag
     return;
   const auto before = f.coordinator.snapshots();
   const auto discards = f.hostDiscards;
-  f.check(f.coordinator.finishJob(f.now, job.jobId, {false, false, false, false, false}),
+  f.check(f.coordinator.finishJob(f.now, job.jobId, {false, false, false, false, false}) ==
+              JobFinish::Accepted,
           "missing target completion belongs to the active job");
   const auto after = f.coordinator.snapshots();
   f.check(
@@ -1174,14 +1345,84 @@ void finishMissingTargetInChaos(RuntimeFixture& f, RuntimeChaosCoverage& coverag
   ++coverage.missingTargets;
 }
 
+// Sonos is usable for any user action: Ready, or a routine refresh in progress.
+bool sonosUsableForUser(const RuntimeCoordinator::Snapshots& s, bool stopping) {
+  return !stopping && s.wifi.networkReady &&
+         (s.sonos.state == SonosState::Ready ||
+          (s.sonos.state == SonosState::Discovering && !s.sonos.recovering));
+}
+
+void sampleChaosResponsiveness(RuntimeFixture& f, RuntimeChaosCoverage& coverage,
+                               uint64_t elapsed) {
+  const auto worker = f.jobs();
+  if (!worker.running || worker.origin != JobOrigin::Automatic || f.stopping)
+    return;
+  coverage.automaticRunningMs += elapsed;
+  for (bool refresh : {false, true}) {
+    const auto admission = f.coordinator.admission(f.now, refresh, JobOrigin::User, f.stopping);
+    if (!admission.allowed && admission.notice == "Busy; input ignored") {
+      coverage.automaticBlockedMs += elapsed;
+      break;
+    }
+  }
+  f.consumePlatform();
+}
+
+void userPreemptsChaosAutomatic(RuntimeFixture& f, RuntimeChaosCoverage& coverage) {
+  const auto before = f.coordinator.snapshots();
+  if (!before.worker.running || before.worker.origin != JobOrigin::Automatic)
+    return;
+  const bool refresh = f.trace.random() % 2;
+  const auto preempted = before.worker.jobId;
+  const auto display = f.display;
+  const auto writes = f.http.writes;
+  const auto id = f.queueJob(refresh, JobOrigin::User);
+  const auto after = f.coordinator.snapshots();
+  if (sonosUsableForUser(before, f.stopping))
+    f.check(id != 0, "with Sonos usable and only automatic work running, user input is admitted");
+  if (!id) {
+    f.check(after.worker.running && after.worker.jobId == preempted,
+            "a user action rejected for authority leaves the automatic read running");
+    return;
+  }
+  ++coverage.preemptions;
+  f.check(after.worker.running && after.worker.jobId == id &&
+              after.worker.origin == JobOrigin::User && after.worker.startedAt == f.now &&
+              after.worker.lastJobId == preempted &&
+              after.worker.lastOutcome == JobOutcome::Preempted,
+          "user job reaches Running at admission; the automatic job ends Preempted");
+  f.check(
+      !f.publish(preempted, f.app.state()) &&
+          !f.coordinator.dispatchAllowed(preempted, f.http.discoveryId, f.now, f.stopping, true) &&
+          f.http.writes == writes && sameObservation(f.display, display),
+      "a Preempted job never publishes or mutates");
+  f.check(after.reconciliationPending == before.reconciliationPending &&
+              after.sonos.state == before.sonos.state &&
+              after.sonos.discoveryId == before.sonos.discoveryId &&
+              after.sonos.retryAt == before.sonos.retryAt &&
+              after.sonos.lastError == before.sonos.lastError,
+          "a Preempted job never schedules reconciliation or changes Sonos health");
+  if (f.http.jobId == preempted) {
+    const auto retained = f.retained.at(preempted);
+    f.reconcile();
+    f.check(f.finish(preempted, false) == JobFinish::Preempted &&
+                sameObservation(f.app.state(), retained) && sameObservation(f.display, display) &&
+                f.coordinator.snapshots().reconciliationPending == before.reconciliationPending,
+            "preempted worker unwinds without publishing, staling, or scheduling");
+    ++coverage.preemptedUnwinds;
+  }
+}
+
 void chaos(uint64_t seed, uint64_t steps) {
   RuntimeFixture f(seed);
   RuntimeChaosCoverage coverage;
   bool pickUpExpiredDiscovery = false;
   f.ready();
   for (uint64_t step = 0; step < steps; ++step) {
-    f.tick(f.trace.random() % 250);
-    auto event = f.trace.random() % 24;
+    const auto elapsed = f.trace.random() % 250;
+    f.tick(elapsed);
+    sampleChaosResponsiveness(f, coverage, elapsed);
+    auto event = f.trace.random() % 25;
     // The deadline and pickup remain separate steps. Resolve a queued timeout
     // before its one-second retry can hide the rejection under test.
     if (pickUpExpiredDiscovery) {
@@ -1203,7 +1444,7 @@ void chaos(uint64_t seed, uint64_t steps) {
       f.drop();
       break;
     case 3: {
-      const auto id = f.queueJob(f.trace.random() % 2);
+      const auto id = f.queueJob(f.trace.random() % 2, JobOrigin::User);
       if (id) {
         f.check(queuedJobWaiting(f), "chaos enqueue leaves the accepted job awaiting pickup");
         ++coverage.queued;
@@ -1303,6 +1544,9 @@ void chaos(uint64_t seed, uint64_t steps) {
     case 23:
       finishMissingTargetInChaos(f, coverage);
       break;
+    case 24:
+      userPreemptsChaosAutomatic(f, coverage);
+      break;
     }
     f.consumePlatform();
     const auto j = f.jobs();
@@ -1321,11 +1565,14 @@ void chaos(uint64_t seed, uint64_t steps) {
   }
   f.tick(sonos::DiscoveryBudgetMs + wifi::ConnectBudgetMs);
   f.check(!f.jobs().running, "final running work always reaches deadline");
+  f.check(coverage.automaticBlockedMs == 0,
+          "responsiveness: no simulated time rejects user input because of automatic work");
   if (steps >= 100000)
     f.check(coverage.queued && coverage.pickups && coverage.queuedTimeouts &&
                 coverage.queuedRejections && coverage.validNotifies && coverage.notifyJobs &&
                 coverage.automaticSamples && coverage.automaticJobs && coverage.missingTargets &&
-                coverage.answeredFaults,
+                coverage.answeredFaults && coverage.preemptions && coverage.preemptedUnwinds &&
+                coverage.automaticRunningMs,
             "ordinary and stress chaos runs exercise every composed fault event");
   std::cout << "runtime faults: composed scenarios + " << steps << " events seed=" << seed
             << " mutations=" << f.http.mutations << " reads=" << f.http.reads
@@ -1338,14 +1585,24 @@ void chaos(uint64_t seed, uint64_t steps) {
             << " automatic-samples=" << coverage.automaticSamples
             << " automatic-jobs=" << coverage.automaticJobs
             << " missing-targets=" << coverage.missingTargets
-            << " answered-faults=" << coverage.answeredFaults << '\n';
+            << " answered-faults=" << coverage.answeredFaults
+            << " preemptions=" << coverage.preemptions
+            << " preempted-unwinds=" << coverage.preemptedUnwinds
+            << " automatic-running-ms=" << coverage.automaticRunningMs
+            << " automatic-blocked-ratio="
+            << (coverage.automaticRunningMs
+                    ? double(coverage.automaticBlockedMs) / double(coverage.automaticRunningMs)
+                    : 0.0)
+            << '\n';
 }
 int main(int argc, char** argv) {
   scenarios();
   targetTransportFailureRetainsTopologyAuthority();
   dispatchFailuresDecideSessionHealth();
   unavailableTargetsKeepNormalPolling();
-  busyWinsOverDiscoveryRecovery();
+  userInputPreemptsAutomaticRead();
+  userInputDuringUserJobRejectsBusy();
+  recoveryStillRejectsMutationsDuringAutomaticRead();
   recoveryRejectsWithoutClearingRoom();
   boundDiscoveryFailureIsImmediate();
   queuedDiscoveryRejectionReportsRecovery();

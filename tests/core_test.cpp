@@ -229,9 +229,10 @@ struct StationHttp : LocalHttp {
 #include <cstdio>
 #include "capability_tests.h"
 #include "policy_tests.h"
+#include "poll_cost_tests.h"
 
 int main() {
-  unsigned cases = milestoneTests() + capabilityTests() + policyTests();
+  unsigned cases = milestoneTests() + capabilityTests() + policyTests() + pollCostTests();
   auto stationIntent = parsed(station + "?ls=1");
   assert(station.size() == 92 && stationIntent.source->kind == SourceKind::Station &&
          stationIntent.source->url == station && stationIntent.transport == TransportCommand::Play);

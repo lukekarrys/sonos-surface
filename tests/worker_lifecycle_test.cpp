@@ -10,7 +10,7 @@ struct Effects final : WorkerEffects {
   std::set<uint64_t> terminals;
   uint64_t stale = 0;
   bool valid = true;
-  void started(uint64_t id, uint64_t deadline) override {
+  void started(uint64_t id, uint64_t deadline, JobOrigin) override {
     valid = valid && id != 0 && deadline != 0 && (starts.empty() || id > starts.back());
     starts.push_back(id);
   }
@@ -66,6 +66,29 @@ void examples() {
     worker.process(Success{next});
     assert(workerInvariant(worker.snapshot()));
   }
+  {
+    const auto automatic = worker.submit(150, 20, JobOrigin::Automatic);
+    assert(worker.snapshot().origin == JobOrigin::Automatic);
+    assert(worker.process(Preempt{}));
+    auto s = worker.snapshot();
+    assert(!s.running && s.lastJobId == automatic && s.lastOutcome == JobOutcome::Preempted &&
+           s.lastOrigin == JobOrigin::Automatic && s.preempted == 1 && workerInvariant(s));
+    worker.process(Success{automatic});
+    assert(worker.snapshot().staleResults == s.staleResults + 1 && !worker.snapshot().running);
+    const auto user = worker.submit(160, 20, JobOrigin::User);
+    worker.process(Preempt{});
+    s = worker.snapshot();
+    assert(s.running && s.jobId == user && s.ignoredPreempts == 1 && s.preempted == 1);
+    worker.process(Success{user});
+    worker.process(Preempt{});
+    s = worker.snapshot();
+    assert(!s.running && s.lastOutcome == JobOutcome::Success && s.ignoredPreempts == 2 &&
+           workerInvariant(s));
+    auto forged = s;
+    forged.lastOutcome = JobOutcome::Preempted;
+    forged.lastOrigin = JobOrigin::User;
+    assert(!workerInvariant(forged));
+  }
   for (uint64_t i = 0; i < 10000; ++i) {
     const auto id = worker.submit(200 + i, 1);
     assert(id);
@@ -86,9 +109,11 @@ void chaos(uint64_t seed, uint64_t steps) {
   Effects effects;
   WorkerLifecycle worker(effects);
   uint64_t now = 0, modelId = 0, modelDeadline = 0, accepted = 0, completed = 0;
+  uint64_t preempted = 0, ignored = 0;
+  auto modelOrigin = JobOrigin::User;
   for (uint64_t i = 0; i < steps; ++i) {
     now += trace.random() % 20;
-    const auto event = trace.random() % 10;
+    const auto event = trace.random() % 12;
     const auto callback = trace.random() % 2 ? modelId : (accepted ? accepted - 1 : 999);
     const char* names[] = {"submit",
                            "submit",
@@ -99,22 +124,35 @@ void chaos(uint64_t seed, uint64_t steps) {
                            "worker-unavailable",
                            "shutdown",
                            "stale-success",
-                           "stale-failure"};
+                           "stale-failure",
+                           "submit-automatic",
+                           "preempt"};
     trace.record(std::string(names[event]) + " now=" + std::to_string(now) +
                  " callback=" + std::to_string(callback));
     bool terminal = false;
     uint64_t submitResult = 0, expectedSubmit = 0;
     switch (event) {
     case 0:
-    case 1: {
-      submitResult = worker.submit(now, 50);
+    case 1:
+    case 10: {
+      const auto origin = event == 10 ? JobOrigin::Automatic : JobOrigin::User;
+      submitResult = worker.submit(now, 50, origin);
       if (!modelId) {
         modelId = ++accepted;
         modelDeadline = now + 50;
+        modelOrigin = origin;
         expectedSubmit = modelId;
       }
       break;
     }
+    case 11:
+      worker.process(Preempt{});
+      terminal = modelId && modelOrigin == JobOrigin::Automatic;
+      if (terminal)
+        ++preempted;
+      else
+        ++ignored;
+      break;
     case 2:
     case 3:
       if (event == 2)
@@ -156,8 +194,12 @@ void chaos(uint64_t seed, uint64_t steps) {
     trace.check(submitResult == expectedSubmit, "submit admission and returned identity", state);
     trace.check(effects.valid, "monotonic starts and unique terminal effects", state);
     trace.check(workerInvariant(s), "worker invariant", state);
-    trace.check(s.jobId == modelId && s.accepted == accepted && s.completed == completed,
+    trace.check(s.jobId == modelId && s.accepted == accepted && s.completed == completed &&
+                    s.preempted == preempted && s.ignoredPreempts == ignored &&
+                    (!s.running || s.origin == modelOrigin),
                 "independent reference model", state);
+    trace.check(event != 11 || !terminal || s.lastOrigin == JobOrigin::Automatic,
+                "Preempted only ever applies to an Automatic job", state);
     trace.check(effects.starts.size() == accepted && effects.terminals.size() == completed,
                 "one terminal effect per accepted job", state);
   }

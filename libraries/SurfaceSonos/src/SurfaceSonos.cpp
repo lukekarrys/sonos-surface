@@ -413,12 +413,41 @@ Result parseTopology(const std::string& xml, std::vector<Room>& rooms) {
 }
 Result DirectSonos::discover(std::vector<Room>& rooms) {
   auto r = identity();
-  if (!r.ok)
-    return r;
+  return r.ok ? topology(rooms) : r;
+}
+Result DirectSonos::topology(std::vector<Room>& rooms) {
   std::string body;
-  if (!(r = soap("ZoneGroupTopology", "GetZoneGroupState", "", body)).ok)
-    return r;
-  return parseTopology(value(body, "ZoneGroupState"), rooms);
+  auto r = soap("ZoneGroupTopology", "GetZoneGroupState", "", body);
+  return r.ok ? parseTopology(value(body, "ZoneGroupState"), rooms) : r;
+}
+TopologyRead
+readHouseholdTopology(const std::string& roomAddress, std::string& learnedHost,
+                      const std::function<Result(const TopologyProbe&, std::vector<Room>&)>& probe,
+                      const std::function<std::vector<std::string>()>& ssdp,
+                      const std::function<bool()>& active, std::vector<Room>& rooms) {
+  TopologyRead read;
+  const auto attempt = [&](const std::string& host, bool verifyIdentity) {
+    read.result = probe({host, verifyIdentity}, rooms);
+    read.host = read.result.ok ? host : "";
+    return read.result.ok;
+  };
+  if (!roomAddress.empty() && attempt(roomAddress, false))
+    return read;
+  if (active() && !learnedHost.empty() && learnedHost != roomAddress && attempt(learnedHost, true))
+    return read;
+  if (!active())
+    return read;
+  for (const auto& host : ssdp()) {
+    if (!active())
+      return read;
+    if (attempt(host, true)) {
+      learnedHost = host;
+      return read;
+    }
+  }
+  if (active())
+    learnedHost.clear();
+  return read;
 }
 
 DirectSonos::DirectSonos(LocalHttp& http, SonosConfig config, Log log)
@@ -457,7 +486,26 @@ Result DirectSonos::soap(const char* service, const char* action, const std::str
     return Result::fail(std::string(action) + ": malformed SOAP response", mutation);
   return {};
 }
+void DirectSonos::confirmTopology(const Room& target) {
+  topologyBase_ = topologyId_ = "";
+  if (!target.eligible || target.id.empty() || target.id != config_.targetId)
+    return;
+  topologyBase_ = http_.baseUrl();
+  topologyId_ = target.id;
+  room_ = target.name;
+}
+bool DirectSonos::topologyConfirmed() const {
+  return !topologyId_.empty() && topologyId_ == config_.targetId &&
+         topologyBase_ == http_.baseUrl();
+}
+Result DirectSonos::readIdentity() {
+  if (topologyConfirmed() && provenBase_ == topologyBase_ && id_ == topologyId_)
+    return {};
+  return identity();
+}
 Result DirectSonos::identity() {
+  // Every identity GET replaces the (address, UUID) proof that reads may reuse.
+  provenBase_.clear();
   auto reply = http_.request("/xml/device_description.xml", "", "");
   if (reply.status != 200)
     return Result::fail("Cannot fetch speaker identity: " + reply.error);
@@ -466,6 +514,7 @@ Result DirectSonos::identity() {
     return parsed;
   if (!config_.targetId.empty() && id_ != config_.targetId)
     return Result::fail("Speaker identity differs from configured target");
+  provenBase_ = http_.baseUrl();
   if (log_)
     log_("target=" + id_ + " room=" + room_);
   return {};
@@ -493,13 +542,14 @@ Result DirectSonos::reconcile(PlaybackState& state) {
   selectionBaseline_ = {};
   PlaybackState next;
   auto result = refresh(next);
-  if (!result.ok || !(result = ungrouped()).ok)
+  // This job's topology already proved the target ungrouped; prepare() keeps its own check.
+  if (!result.ok || (!topologyConfirmed() && !(result = ungrouped()).ok))
     return result;
   state = std::move(next);
   return {};
 }
 Result DirectSonos::refresh(PlaybackState& state) {
-  auto r = identity();
+  auto r = readIdentity();
   if (!r.ok)
     return r;
   std::string transport, position, settings, media, volume, mute;
@@ -724,7 +774,7 @@ Result DirectSonos::validatePositionRequest(const PlaybackState& state) {
 Result DirectSonos::queue(uint32_t start, uint32_t count, QueuePage& page) {
   if (!count || count > maxQueuePageSize)
     return Result::fail("Queue count must be 1..20");
-  auto r = identity();
+  auto r = readIdentity();
   return r.ok ? browse(start, count, page) : r;
 }
 Result DirectSonos::browse(uint32_t start, uint32_t count, QueuePage& page) {

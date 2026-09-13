@@ -105,8 +105,8 @@ class WaveshareDrawing {
     lines(108, 97, o.title.empty() ? sourceTitle : o.title, 19, 2);
     text(108, 145, o.artist.empty() ? "Artist unavailable" : o.artist, 19, 2, muted);
     text(32, 169, o.album, 50, 1, muted);
-    std::string status = !ui.toast.empty()                ? ui.toast
-                         : ui.context.busy                ? "Updating..."
+    std::string status = !ui.toast.empty()                                ? ui.toast
+                         : ui.context.busy || ui.context.backgroundActive ? "Updating..."
                          : ui.state.recoveryRequired      ? "Check room; recovery needed"
                          : !ui.state.refreshError.empty() ? "Room unavailable - retry"
                          : !ui.context.online             ? "Wi-Fi offline"
@@ -158,7 +158,10 @@ class WaveshareDrawing {
     using namespace waveshareLayout;
     navigation(ui, "ROOMS");
     if (ui.context.rooms.empty())
-      text(40, 160, ui.context.busy ? "Finding rooms..." : "No selectable rooms", 24);
+      text(40, 160,
+           ui.context.busy || ui.context.backgroundActive ? "Finding rooms..."
+                                                          : "No selectable rooms",
+           24);
     for (unsigned i = 0; i < 4 && ui.roomStart + i < ui.context.rooms.size(); ++i) {
       const auto& room = ui.context.rooms[ui.roomStart + i];
       button(row(i), room.name, true, room.id == ui.state.observed.targetId);
@@ -225,10 +228,10 @@ public:
     }
     if (ui.screen != WaveshareScreen::NowPlaying)
       text(40, 426,
-           !ui.toast.empty()     ? ui.toast
-           : ui.context.readOnly ? "READ ONLY"
-           : ui.context.busy     ? "Updating..."
-                                 : "SONOS",
+           !ui.toast.empty()                                ? ui.toast
+           : ui.context.readOnly                            ? "READ ONLY"
+           : ui.context.busy || ui.context.backgroundActive ? "Updating..."
+                                                            : "SONOS",
            48, 1, amber);
   }
 };

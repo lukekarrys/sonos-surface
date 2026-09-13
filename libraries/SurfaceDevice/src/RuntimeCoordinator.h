@@ -2,6 +2,7 @@
 #include "RuntimeAdmission.h"
 #include "SubscriptionLifecycle.h"
 #include <SurfaceCore.h>
+#include <algorithm>
 #include <limits>
 #include <optional>
 #include <string>
@@ -14,6 +15,29 @@ struct SubscriptionRequest {
   bool renewal;
   std::string address, sid;
 };
+// One HTTP request that failed without an answer. Phases follow the request:
+// begin, connect, send, headers, body. Cancelled requests are not recorded.
+struct TransportFailure {
+  std::string phase, host, action, error;
+  int code = 0, errorNumber = 0;
+  uint64_t elapsedMs = 0, at = 0;
+};
+// How the worker must clean up after its synchronous job calls return.
+enum class JobFinish {
+  Accepted,  // Terminal outcome belongs to the still-active job.
+  Preempted, // User input ended this automatic read; restore, publish nothing.
+  Cancelled  // Deadline, network, or shutdown ended it; the result is stale.
+};
+
+// Worker cleanup once a job's synchronous session calls return, before any
+// newer job can use the session. Shared by the device worker and fault tests.
+inline void discardJobResult(JobFinish finish, Application& app, const AppState& retained,
+                             bool mutation) {
+  if (finish == JobFinish::Preempted)
+    app.discardPreemptedResult(retained);
+  else if (finish == JobFinish::Cancelled)
+    app.discardCancelledResult(retained, mutation);
+}
 
 // Composition shared by the device adapter and host fault tests. The four
 // lifecycles remain independent peers: effects record facts, then the
@@ -25,6 +49,10 @@ public:
   static constexpr uint64_t MutationBudgetMs = 90000;
   static constexpr uint64_t PollIntervalMs = playbackRefreshIntervalMs;
   static constexpr uint64_t AutomaticRateLimitMs = 1000;
+  // A preempted automatic read unwinds within one socket operation; bound the
+  // unreachable-speaker case. User jobs keep the ordinary connect timeout.
+  static constexpr uint32_t AutomaticConnectTimeoutMs = 1500;
+  static constexpr uint32_t UserConnectTimeoutMs = 3000;
   struct Admission {
     bool allowed = false;
     std::string notice, reason;
@@ -55,6 +83,7 @@ public:
     SubscriptionSnapshot subscription;
     bool reconciliationPending, discoveryPending, discardHost;
     uint64_t nextAutomaticJobAt, lastAutomaticJobAt;
+    std::optional<TransportFailure> lastTransportFailure;
   };
 
 private:
@@ -65,9 +94,9 @@ private:
     };
     std::optional<Completion> completion;
     std::vector<std::string> transitions;
-    void started(uint64_t id, uint64_t deadline) override {
-      transitions.push_back("worker Idle -> Running id=" + std::to_string(id) +
-                            " deadline=" + std::to_string(deadline));
+    void started(uint64_t id, uint64_t deadline, JobOrigin origin) override {
+      transitions.push_back("worker Idle -> Running id=" + std::to_string(id) + " deadline=" +
+                            std::to_string(deadline) + " origin=" + originName(origin));
     }
     void finished(uint64_t id, JobOutcome outcome) override {
       completion = Completion{id, outcome};
@@ -118,6 +147,10 @@ private:
   std::vector<std::string> transitions_;
   std::optional<std::string> routineDiscoveryLog_;
   std::optional<std::string> notice_;
+  std::optional<TransportFailure> lastTransportFailure_;
+  // Preempted IDs whose worker has not yet returned. The worker finishes jobs
+  // in order, so a handful covers every unwinding job.
+  std::vector<uint64_t> preemptedJobs_;
 
   void logWifi(const WifiSnapshot& before) {
     const auto after = wifi_.snapshot();
@@ -204,6 +237,10 @@ private:
       return;
     const auto outcome = workerFacts_.completion->outcome;
     workerFacts_.completion.reset();
+    // Nothing failed: a preempted read keeps the observation, Sonos health,
+    // discovery generation, and reconciliation schedule exactly as they were.
+    if (outcome == JobOutcome::Preempted)
+      return;
     if (outcome != JobOutcome::Success && (outcome != JobOutcome::Failure || reconcileFailure))
       reconciliationPending_ = true;
     if (outcome != JobOutcome::Success && outcome != JobOutcome::Failure) {
@@ -266,7 +303,8 @@ public:
   Snapshots snapshots() const {
     return {worker_.snapshot(),       wifi_.snapshot(),       sonos_.snapshot(),
             subscription_.snapshot(), reconciliationPending_, sonosFacts_.discoveryPending,
-            sonosFacts_.discardHost,  nextAutomaticJobAt_,    lastAutomaticJobAt_};
+            sonosFacts_.discardHost,  nextAutomaticJobAt_,    lastAutomaticJobAt_,
+            lastTransportFailure_};
   }
   void configAvailable(uint64_t now) {
     wifiEvent(wifi_lifecycle::ConfigAvailable{now});
@@ -315,35 +353,75 @@ public:
   bool sonosUsable() const {
     return wifi_.snapshot().networkReady && sonos_.usable(sonos_.snapshot().discoveryId);
   }
-  Admission admission(uint64_t now, bool refresh, bool stopping = false) {
+
+private:
+  bool preemptable(JobOrigin origin) const {
+    const auto worker = worker_.snapshot();
+    return origin == JobOrigin::User && worker.running && worker.origin == JobOrigin::Automatic;
+  }
+  void recordPreempted(uint64_t id) {
+    if (preemptedJobs_.size() == 8)
+      preemptedJobs_.erase(preemptedJobs_.begin());
+    preemptedJobs_.push_back(id);
+  }
+
+public:
+  // Busy means another user job is running. Automatic reads yield to user
+  // input; Sonos authority rules are unchanged by preemption.
+  Admission admission(uint64_t now, bool refresh, JobOrigin origin, bool stopping = false) {
     service(now);
-    if (worker_.snapshot().running)
+    const bool preempt = preemptable(origin);
+    if (worker_.snapshot().running && !preempt)
       return {false, "Busy; input ignored", "worker busy", 0};
     if (stopping)
       return {false, "Device stopping", "device stopping", 0};
     const auto sonos = sonos_.snapshot();
-    if (!wifi_.snapshot().networkReady ||
-        (sonos.state != SonosState::Ready && !(refresh && sonos.state == SonosState::Discovering)))
+    // A routine refresh opened by the automatic job is handed to the user job,
+    // which binds the same generation. A recovery discovery is not Ready.
+    const bool routine = preempt && sonos.state == SonosState::Discovering && !sonos.recovering &&
+                         workerDiscoveryId_ && workerDiscoveryId_ == sonos.discoveryId;
+    if (!wifi_.snapshot().networkReady || (sonos.state != SonosState::Ready && !routine &&
+                                           !(refresh && sonos.state == SonosState::Discovering)))
       return recoveryAdmission(now);
     return {true, {}, {}, 0};
+  }
+  // End a running automatic read without any failure effects. Used by admitted
+  // user jobs and by USB config/reboot, which need an Idle worker.
+  bool preemptAutomatic(uint64_t now) {
+    expireWorker(now);
+    const auto worker = worker_.snapshot();
+    // Delivered regardless: the lifecycle ignores and counts a Preempt against
+    // a user job or an Idle worker.
+    workerEvent(worker_lifecycle::Preempt{});
+    if (!worker.running || worker.origin != JobOrigin::Automatic || worker_.snapshot().running)
+      return false;
+    recordPreempted(worker.jobId);
+    applyFacts(now);
+    return true;
   }
   // Validate local input before calling. The callback performs a nonblocking
   // queue send with this predicted ID while the caller still holds its mutex;
   // the consumer must acquire that mutex before it can use the queued job.
   // A rejected queue send never enters Running or consumes an identity.
+  // A user job admitted over an automatic read preempts it only after the
+  // queue send succeeds; the preempted task unwinds while this job waits in
+  // the queue. A failed send leaves the automatic read running.
   template <class Enqueue>
-  uint64_t enqueueJob(uint64_t now, bool refresh, Enqueue&& enqueue, bool stopping = false) {
-    if (!admission(now, refresh, stopping).allowed)
+  uint64_t enqueueJob(uint64_t now, bool refresh, JobOrigin origin, Enqueue&& enqueue,
+                      bool stopping = false) {
+    if (!admission(now, refresh, origin, stopping).allowed)
       return 0;
     const auto budget = refresh ? ReadBudgetMs : MutationBudgetMs;
     const auto accepted = worker_.snapshot().accepted;
     if (accepted == std::numeric_limits<uint64_t>::max() ||
         now > std::numeric_limits<uint64_t>::max() - budget || !enqueue(accepted + 1))
       return 0;
+    if (preemptable(origin) && !preemptAutomatic(now))
+      return 0;
     workerDiscoveryId_ = 0;
     discoveryResultReceived_ = false;
     jobRefresh_ = refresh;
-    workerEvent(worker_lifecycle::Submit{now, budget});
+    workerEvent(worker_lifecycle::Submit{now, budget, origin});
     return worker_.snapshot().jobId;
   }
   bool automaticJobDue(uint64_t now, bool workerAvailable, bool stopping = false) {
@@ -400,10 +478,15 @@ public:
     applyFacts(now);
     return true;
   }
-  bool finishJob(uint64_t now, uint64_t jobId, JobOutcomeInput input) {
+  JobFinish finishJob(uint64_t now, uint64_t jobId, JobOutcomeInput input) {
     expireWorker(now);
     const auto worker = worker_.snapshot();
     const bool accepted = worker.running && worker.jobId == jobId;
+    const auto preempted = std::find(preemptedJobs_.begin(), preemptedJobs_.end(), jobId);
+    if (!accepted && preempted != preemptedJobs_.end()) {
+      preemptedJobs_.erase(preempted);
+      return JobFinish::Preempted;
+    }
     bool reconcileFailure = true;
     if (accepted) {
       if (!input.unavailable && workerDiscoveryId_ && !discoveryResultReceived_ &&
@@ -433,8 +516,9 @@ public:
     else
       workerEvent(worker_lifecycle::Failure{jobId});
     applyFacts(now, reconcileFailure);
-    return accepted;
+    return accepted ? JobFinish::Accepted : JobFinish::Cancelled;
   }
+  void transportFailure(TransportFailure failure) { lastTransportFailure_ = std::move(failure); }
   bool jobActive(uint64_t id, uint64_t now, bool stopping = false) const {
     return runtimeJobActive(worker_.snapshot(), id, now, stopping);
   }

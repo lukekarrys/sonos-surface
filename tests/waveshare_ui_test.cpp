@@ -201,8 +201,14 @@ int main() {
   c = context();
   c.busy = true;
   ui.update(observation(), c, 2500);
-  assert(tap(ui, 184, 286).input == Input::None);
+  assert(tap(ui, 184, 286).input == Input::None && ui.toast == "Busy - try again");
+  // An automatic read in progress is not busy: the observation stays fresh.
   c.busy = false;
+  c.backgroundActive = true;
+  ui.update(observation(), c, 2550);
+  assert(ui.fresh() && tap(ui, 184, 286).input == Input::Intent && ui.toast != "Busy - try again" &&
+         ui.toast != "Refresh room first");
+  c.backgroundActive = false;
   c.online = false;
   ui.update(observation(), c, 2600);
   assert(tap(ui, 184, 351).input == Input::None);
@@ -245,8 +251,8 @@ int main() {
          json["touch"]["held"] == true && json["touch"]["cancelled"] == false &&
          json["touch"]["injectPending"] == 3 && json["touch"]["injectOpen"] == true);
   assert(json["preview"]["volume"] == 50 && json["preview"]["seek"].is_null());
-  assert(json["toast"] == "Hello" && json["busy"] == false && json["online"] == true &&
-         json["readOnly"] == true);
+  assert(json["toast"] == "Hello" && json["busy"] == false && json["backgroundActive"] == false &&
+         json["online"] == true && json["readOnly"] == true);
   assert(json["observed"]["room"] == "Office" && json["observed"]["targetId"] == "room-a" &&
          json["observed"]["known"] == true && json["observed"]["stale"] == false &&
          json["observed"]["transport"] == "Paused" && json["observed"]["title"] == "Track A");

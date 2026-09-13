@@ -455,6 +455,8 @@ export const summaryRelevant = (line: string) => {
 export function captureSummary(entries: CapturedLine[]): string {
   let heartbeats = 0,
     busy = 0,
+    background = 0,
+    preempted = 0,
     transitions = 0,
     buttonGap = 0,
     uiGap = 0;
@@ -475,6 +477,7 @@ export function captureSummary(entries: CapturedLine[]): string {
     if (text.startsWith("heartbeat ")) {
       heartbeats++;
       if (text.includes("busy=1")) busy++;
+      if (text.includes("background=1")) background++;
       continue;
     }
     const running = /^worker Idle -> Running id=(\d+)/.exec(text);
@@ -486,6 +489,7 @@ export function captureSummary(entries: CapturedLine[]): string {
     const idle = /^worker Running -> Idle id=(\d+)/.exec(text);
     if (idle) {
       transitions++;
+      if (text.includes("outcome=preempted")) preempted++;
       const start = started.get(idle[1]);
       if (start !== undefined) {
         // A host fallback time is fractional; report whole milliseconds.
@@ -506,14 +510,21 @@ export function captureSummary(entries: CapturedLine[]): string {
     : sorted.length % 2
       ? sorted[middle]
       : (sorted[middle - 1] + sorted[middle]) / 2;
+  const span = last - (first ?? 0);
+  // Heartbeats sample a fixed cadence that can phase-lock with polling; the
+  // running ratio sums measured job time over the span instead.
+  const running = sorted.reduce((total, ms) => total + ms, 0);
   return [
-    `capture span-ms=${last - (first ?? 0)}`,
+    `capture span-ms=${span}`,
     `heartbeats=${heartbeats}`,
     `busy-ratio=${(heartbeats ? busy / heartbeats : 0).toFixed(3)}`,
+    `background-ratio=${(heartbeats ? background / heartbeats : 0).toFixed(3)}`,
     `worker-transitions=${transitions}`,
     `jobs=${sorted.length}`,
     `job-ms-median=${Math.round(median)}`,
     `job-ms-max=${sorted.length ? sorted[sorted.length - 1] : 0}`,
+    `worker-running-ratio=${(span > 0 ? Math.min(1, running / span) : 0).toFixed(3)}`,
+    `preempted=${preempted}`,
     `button-poll-gap-ms-max=${buttonGap}`,
     `ui-poll-gap-ms-max=${uiGap}`,
   ].join(" ");

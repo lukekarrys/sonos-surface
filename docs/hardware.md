@@ -82,7 +82,8 @@ The front/side application keys are identified by position; `KEY1/KEY2` are sche
 | State | Blue front key (KEY1) | Side application key (KEY2) | Black side power/reset button (PM1-owned) |
 | --- | --- | --- | --- |
 | Active, normal | Single click: refresh; double click: next configured eligible room; hold: no application action. Press/hold resets inactivity. | Single click: play/pause; double click: next track; triple click: restart current track if >3s, otherwise previous track. Normal policy/gate applies. Press/hold resets inactivity. | Single click: reset; double click: board power-off; long press: download mode. |
-| Active, worker busy | Activity still counts; new refresh/room actions reject as busy. | Activity still counts; completed music gestures reject as busy. | Same PM1 controls. |
+| Active, automatic read running | Same as normal: refresh/room actions preempt the read. | Same as normal: music gestures preempt the read. | Same PM1 controls. |
+| Active, user job running | Activity still counts; new refresh/room actions reject as busy. | Activity still counts; completed music gestures reject as busy. | Same PM1 controls. |
 | Entering sleep | Application actions ignored; a key still down when EXT0 is armed can immediately wake the CPU. | No application action; not a wake source. | PM1 controls remain available. |
 | Sleeping (automatic deep sleep) | Press: wake into fresh boot. | No effect. | Single click: fresh reset/boot; double/long retain PM1 power-off/download behavior. |
 | Booting/waking | Initial held key/click window is consumed until release; release before another gesture. | Initial held key/click window is consumed until release. | Repeated/long presses can power off or enter download mode; release for normal boot. |

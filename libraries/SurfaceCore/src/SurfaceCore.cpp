@@ -708,6 +708,7 @@ void Application::discardCancelledResult(const AppState& retained, bool mutation
     state_.recoveryRequired = true;
   }
 }
+void Application::discardPreemptedResult(const AppState& retained) { state_ = retained; }
 Result Application::readObservation(bool reconcile) {
   if (busy_)
     return Result::fail("Busy");
