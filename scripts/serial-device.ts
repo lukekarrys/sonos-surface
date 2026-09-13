@@ -105,10 +105,19 @@ export async function openPort(path: string): Promise<DevicePort> {
 export const listPorts = () => SerialPort.list();
 // Every device line carries a millisecond prefix from the runtime console.
 export const deviceMessage = (line: string) => line.replace(/^\[\d+\] /, "");
-// Unsolicited background chatter, never a reply to a command.
+// Unsolicited background chatter, never a reply to a command: heartbeats,
+// worker transitions, Sonos job logging, and bracketed adapter diagnostics.
+// A solicited reply starts with its own command token.
 export const backgroundLine = (line: string) => {
   const text = deviceMessage(line);
-  return text.startsWith("heartbeat ") || text.startsWith("worker ");
+  return (
+    text.startsWith("heartbeat ") ||
+    text.startsWith("worker ") ||
+    text.startsWith("request=") ||
+    text.startsWith("Sonos ") ||
+    text.startsWith("[") ||
+    / http=\d+ ms=\d+/.test(text)
+  );
 };
 // A device line containing one of these is a refusal, not a reply.
 export const configRejectionTokens = [

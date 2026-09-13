@@ -337,9 +337,10 @@ bool boardCommand(const std::string& line) {
     return true;
   }
   if (line == "ui-state") {
-    Serial.printf(
-        "ui-state %s\n",
-        waveshareStateJson(ui, lastFrame, held, unsigned(injected.pending())).dump().c_str());
+    Serial.printf("ui-state %s\n", waveshareStateJson(ui, lastFrame, held,
+                                                      unsigned(injected.pending()), injected.open())
+                                       .dump()
+                                       .c_str());
     return true;
   }
   // Development input injection: a queued sample replaces one hardware sample
@@ -515,14 +516,24 @@ static BoardEvent pollInput() {
     // todo/4-ws-1.8-multiscreen give it one.
     Serial.println("[ui] inject button=boot (no action)");
   }
-  const auto injection = injected.poll(fingers > 0, held);
+  const auto injection = injected.poll(fingers > 0, held, millis());
   if (injection.cancelled)
     Serial.println("[ui] inject cancelled=physical-touch");
+  if (injection.expired)
+    Serial.println("[ui] inject gesture expired; hardware sampling resumed");
+  // An open injected gesture owns the screen until its release arrives.
+  if (injection.suppress)
+    return {};
   const bool injecting = injection.consumed;
   if (injecting) {
     fingers = uint8_t(injection.sample.fingers);
-    Serial.printf("[ui] inject %s x=%d y=%d fingers=%u held=%d\n", fingers ? "touch" : "release",
-                  injection.sample.x, injection.sample.y, fingers, int(injection.held));
+    // A delivered contact is logged with its result below; these two cannot
+    // reach the interaction model, so they report themselves here.
+    if (!fingers)
+      Serial.println("[ui] inject release");
+    else if (injection.held)
+      Serial.printf("[ui] inject touch x=%d y=%d fingers=%u held=1 (release required)\n",
+                    injection.sample.x, injection.sample.y, fingers);
   }
   if (!fingers) {
     if (loggingContact)
@@ -544,10 +555,7 @@ static BoardEvent pollInput() {
   const auto point = injecting ? TouchPoint{injection.sample.x, injection.sample.y}
                                : waveshareTouchPoint(x, y, calibration);
   static int loggedX = 0, loggedY = 0;
-  if (injecting)
-    Serial.printf("[ui] inject mapped=%d,%d hit=%d\n", point.x, point.y,
-                  int(ui.hit(point.x, point.y)));
-  else {
+  if (!injecting) {
     if (!loggingContact || abs(x - loggedX) >= 8 || abs(y - loggedY) >= 8) {
       Serial.printf("[touch] raw=%d,%d mapped=%d,%d fingers=%d hit=%d\n", x, y, point.x, point.y,
                     fingers, int(ui.hit(point.x, point.y)));
@@ -556,7 +564,17 @@ static BoardEvent pollInput() {
     }
     loggingContact = true;
   }
-  return ui.touch(point.x, point.y, fingers, millis());
+  const auto hit = injecting ? ui.hit(point.x, point.y) : WaveshareControl::None;
+  const auto event = ui.touch(point.x, point.y, fingers, millis());
+  // One loud line per delivered injection, mirroring the hardware sample log
+  // and carrying the preview the sample produced.
+  if (injecting)
+    Serial.printf("[ui] inject touch x=%d y=%d fingers=%u hit=%d volume-preview=%d "
+                  "seek-preview=%ld\n",
+                  point.x, point.y, fingers, int(hit),
+                  ui.volumePreview ? int(*ui.volumePreview) : -1,
+                  ui.seekPreview ? long(*ui.seekPreview) : -1L);
+  return event;
 #endif
 }
 void boardContext(const BoardContext& context) { uiContext = context; }

@@ -52,8 +52,12 @@ const uiPort = (state: { held?: boolean; cancelled?: boolean } = {}) => {
 test("usb returns one reply, skips background lines, and bounds the wait", async () => {
   const port = new Port();
   port.reply = () => [
-    "[10] heartbeat wifi=3 busy=0 heap=1",
+    "[10] heartbeat wifi=3 busy=0 heap=1 inactivity=42",
     "[11] worker Idle -> Running id=4 deadline=9",
+    "[11] Sonos 192.0.2.1 urn:schemas-upnp-org:service:AVTransport:1#Play",
+    "[11] GetZoneGroupState http=200 ms=90",
+    "[11] request=2 status=succeeded Observed requested result refresh-error=",
+    "[11] [ui] frame screen=0 draw=16 flush=44 total=60",
     '[12] lifecycles {"worker":{}}',
   ];
   const printed: string[] = [];
@@ -64,7 +68,7 @@ test("usb returns one reply, skips background lines, and bounds the wait", async
     '[12] lifecycles {"worker":{}}',
   );
   assert.deepEqual(port.writes, ["lifecycle-status\n"]);
-  assert.equal(printed.length, 3);
+  assert.equal(printed.length, 7);
   port.reply = () => [
     "[10] heartbeat wifi=3 busy=0 heap=1",
     "[11] ui-state {}",
@@ -77,7 +81,10 @@ test("usb returns one reply, skips background lines, and bounds the wait", async
     "[11] ui-state {}",
   );
   // Only heartbeats and transitions arrive: the command produced no reply.
-  port.reply = () => ["[10] heartbeat wifi=3 busy=0 heap=1"];
+  port.reply = () => [
+    "[10] heartbeat wifi=3 busy=0 heap=1 inactivity=42",
+    "[11] worker Running -> Idle id=4 outcome=Success",
+  ];
   await assert.rejects(
     usbRequest(port, `preview ${SECRET}`, {
       seconds: 0.05,
@@ -205,7 +212,7 @@ test("ui drags step through the screen in order and release first only when requ
     "ui-touch 1 2 1",
     "ui-touch release",
   ]);
-  const options = { steps: 3, intervalMs: 0 };
+  const options = { steps: 3, intervalMs: 0, tailSeconds: 0 };
   const free = uiPort();
   await uiAction(free, ["tap", "184", "286"], options, () => {});
   assert.deepEqual(free.writes, [
@@ -292,7 +299,10 @@ test("bounded captures stop at a token and summarize worker, busy and poll gaps"
     "[4] worker Running -> Idle id=1 outcome=Success",
   ]);
   assert.ok(port.closed);
-  const stats = new Port(["[1] heartbeat wifi=3 busy=1 heap=1"]);
+  // A stats capture discards the backlog first and measures live output only.
+  const stats = new Port([
+    "[1000] heartbeat wifi=3 busy=1 heap=1 inactivity=1",
+  ]);
   const lines: string[] = [];
   await monitor(
     "fake",
@@ -301,33 +311,46 @@ test("bounded captures stop at a token and summarize worker, busy and poll gaps"
     async () => stats,
     (line) => lines.push(line),
   );
-  assert.match(lines.at(-1)!, /^capture heartbeats=1 busy-ratio=1\.000 /);
+  assert.deepEqual(lines, [
+    "capture start: discarded 1 buffered lines",
+    "capture span-ms=0 heartbeats=0 busy-ratio=0.000 worker-transitions=0 jobs=0 " +
+      "job-ms-median=0 job-ms-max=0 button-poll-gap-ms-max=0 ui-poll-gap-ms-max=0",
+  ]);
   t.diagnostic(lines.at(-1)!);
-  // Durations come from host arrival times, in the order the lines arrived.
+  // Durations come from the device timestamps, so a buffered backlog arriving
+  // in one burst still reports the real job times.
   const fixture: CapturedLine[] = [
-    { at: 0, line: "[1] heartbeat wifi=3 busy=0 heap=1" },
-    { at: 10, line: "[2] worker Idle -> Running id=1 deadline=5" },
-    { at: 20, line: "[3] heartbeat wifi=3 busy=1 heap=1" },
-    { at: 110, line: "[4] worker Running -> Idle id=1 outcome=Success" },
-    { at: 120, line: "[5] worker Idle -> Running id=2 deadline=5" },
-    { at: 130, line: "[6] worker stale-result id=1" },
-    { at: 320, line: "[7] worker Running -> Idle id=2 outcome=Timeout" },
-    { at: 330, line: "[8] worker Idle -> Running id=3 deadline=5" },
-    { at: 630, line: "[9] worker Running -> Idle id=3 outcome=Success" },
-    { at: 700, line: "[10] heartbeat wifi=3 busy=1 heap=1" },
-    { at: 800, line: "[button] max-poll-gap-ms=31" },
-    { at: 900, line: "[button] max-poll-gap-ms=12" },
-    { at: 950, line: "[ui] frame screen=0 poll-gap-max=44 heap=1" },
-    { at: 999, line: "[11] worker Running -> Idle id=9 outcome=Success" },
+    { at: 0, line: "[1000] heartbeat wifi=3 busy=0 heap=1 inactivity=1" },
+    { at: 0, line: "[1010] worker Idle -> Running id=1 deadline=5" },
+    { at: 0, line: "[1020] heartbeat wifi=3 busy=1 heap=1 inactivity=1" },
+    { at: 0, line: "[1110] worker Running -> Idle id=1 outcome=Success" },
+    { at: 0, line: "[1120] worker Idle -> Running id=2 deadline=5" },
+    { at: 0, line: "[1130] worker stale-result id=1" },
+    { at: 0, line: "[1320] worker Running -> Idle id=2 outcome=Timeout" },
+    { at: 0, line: "[1330] worker Idle -> Running id=3 deadline=5" },
+    { at: 0, line: "[1630] worker Running -> Idle id=3 outcome=Success" },
+    { at: 0, line: "[1700] heartbeat wifi=3 busy=1 heap=1 inactivity=1" },
+    { at: 0, line: "[button] max-poll-gap-ms=31" },
+    { at: 0, line: "[button] max-poll-gap-ms=12" },
+    { at: 0, line: "[ui] frame screen=0 poll-gap-max=44 heap=1" },
+    { at: 0, line: "[1999] worker Running -> Idle id=9 outcome=Success" },
   ];
   assert.equal(
     captureSummary(fixture),
-    "capture heartbeats=3 busy-ratio=0.667 worker-transitions=7 jobs=3 " +
+    "capture span-ms=999 heartbeats=3 busy-ratio=0.667 worker-transitions=7 jobs=3 " +
       "job-ms-median=200 job-ms-max=300 button-poll-gap-ms-max=31 ui-poll-gap-ms-max=44",
+  );
+  // Without a device timestamp, host arrival time still bounds the job.
+  assert.match(
+    captureSummary([
+      { at: 1000, line: "worker Idle -> Running id=1 deadline=5" },
+      { at: 1450.6, line: "worker Running -> Idle id=1 outcome=Success" },
+    ]),
+    /jobs=1 job-ms-median=451 job-ms-max=451/,
   );
   assert.equal(
     captureSummary([]),
-    "capture heartbeats=0 busy-ratio=0.000 worker-transitions=0 jobs=0 " +
+    "capture span-ms=0 heartbeats=0 busy-ratio=0.000 worker-transitions=0 jobs=0 " +
       "job-ms-median=0 job-ms-max=0 button-poll-gap-ms-max=0 ui-poll-gap-ms-max=0",
   );
 });

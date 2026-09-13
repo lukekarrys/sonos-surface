@@ -2,7 +2,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { cli, main, numberOption, required } from "./common.ts";
 import { readyPort } from "./serial-device.ts";
 import type { DevicePort } from "./serial-device.ts";
-import { usbRequest } from "./usb.ts";
+import { usbRequest, usbTail } from "./usb.ts";
 
 export type Point = [number, number];
 // Injected samples are consumed one per 30 ms touch poll, so a drag is a
@@ -55,7 +55,7 @@ export async function releaseRequired(
 export async function uiAction(
   port: DevicePort,
   positionals: string[],
-  options: { steps: number; intervalMs: number },
+  options: { steps: number; intervalMs: number; tailSeconds: number },
   print: (line: string) => void = console.log,
 ) {
   const [action, ...rest] = positionals;
@@ -64,6 +64,8 @@ export async function uiAction(
       if (index) await delay(options.intervalMs);
       await usbRequest(port, command, { expect: "[ui] inject ", print });
     }
+    // The release action and the job it admits arrive after the last reply.
+    await usbTail(port, options.tailSeconds, print);
   };
   if (action === "state") {
     if (rest.length) throw new Error("state takes no arguments");
@@ -110,18 +112,19 @@ export async function uiAction(
 }
 export async function ui(argv = process.argv.slice(2), open = readyPort) {
   const { values, positionals } = cli(
-    ["port", "steps", "interval-ms"],
+    ["port", "steps", "interval-ms", "tail-seconds"],
     [],
     argv,
   );
   if (values.help)
     return console.log(
-      "node --run ui -- --port PORT tap X Y\nnode --run ui -- --port PORT drag X1 Y1 X2 Y2 [--steps N] [--interval-ms 30]\nnode --run ui -- --port PORT release\nnode --run ui -- --port PORT button boot\nnode --run ui -- --port PORT screen now|rooms|queue\nnode --run ui -- --port PORT state",
+      "node --run ui -- --port PORT tap X Y\nnode --run ui -- --port PORT drag X1 Y1 X2 Y2 [--steps N] [--interval-ms 30]\nnode --run ui -- --port PORT release\nnode --run ui -- --port PORT button boot\nnode --run ui -- --port PORT screen now|rooms|queue\nnode --run ui -- --port PORT state\nTouch actions print what follows for [--tail-seconds 4].",
     );
   const name = required(values.port, "port");
   const options = {
     steps: numberOption(values.steps, 10, 2, maxDragSteps),
     intervalMs: numberOption(values["interval-ms"], 30, 0, 1000),
+    tailSeconds: numberOption(values["tail-seconds"], 4, 0, 60),
   };
   const port = await open(name);
   try {

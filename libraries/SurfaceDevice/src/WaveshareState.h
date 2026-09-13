@@ -64,7 +64,8 @@ template <typename T> nlohmann::json optionalJson(const std::optional<T>& value)
 // Built field by field on purpose: the main loop's 8 KiB stack cannot hold a
 // large nested initializer for a USB command handler (docs/hardware.md).
 inline nlohmann::json waveshareStateJson(const WaveshareUi& ui, const WaveshareFrame& frame,
-                                         bool held, unsigned injectPending) {
+                                         bool held, unsigned injectPending,
+                                         bool injectOpen = false) {
   const auto& observed = ui.state.observed;
   nlohmann::json state = nlohmann::json::object();
   state["screen"] = waveshareScreenName(ui.screen);
@@ -78,6 +79,8 @@ inline nlohmann::json waveshareStateJson(const WaveshareUi& ui, const WaveshareF
   touch["held"] = held;
   touch["cancelled"] = ui.releaseRequired();
   touch["injectPending"] = injectPending;
+  // An open injected gesture holds the screen between samples.
+  touch["injectOpen"] = injectOpen;
   auto& preview = state["preview"];
   preview["volume"] = optionalJson(ui.volumePreview);
   preview["seek"] = optionalJson(ui.seekPreview);

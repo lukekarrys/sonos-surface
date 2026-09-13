@@ -19,7 +19,11 @@ export async function usbRequest(
   options: RequestOptions = {},
 ): Promise<string> {
   const { expect, seconds = 10, lines = 40, print = console.log } = options;
-  await port.clear();
+  // Discard what is already buffered without cutting a line in flight: a
+  // flush truncates a partially received line, and a headless fragment can
+  // pass for a reply. Nothing sent after this can arrive before the command.
+  const drained = performance.now() + 300;
+  while (performance.now() < drained && (await port.readLine(20)));
   await port.write(`${command}\n`);
   const deadline = performance.now() + seconds * 1000;
   let printed = 0;
@@ -38,6 +42,21 @@ export async function usbRequest(
   throw new Error(
     "Expected device reply not observed within the bound (arguments omitted)",
   );
+}
+// What the device logs after a reply is the interesting part of an action:
+// the release action, the admitted intent, and the job it produced.
+export async function usbTail(
+  port: DevicePort,
+  seconds: number,
+  print: (line: string) => void = console.log,
+) {
+  const deadline = performance.now() + seconds * 1000;
+  while (performance.now() < deadline) {
+    const line = await port.readLine(
+      Math.min(200, Math.max(1, deadline - performance.now())),
+    );
+    if (line) print(line);
+  }
 }
 export function refused(command: string) {
   return refusedCommands.includes(command.split(" ")[0]);

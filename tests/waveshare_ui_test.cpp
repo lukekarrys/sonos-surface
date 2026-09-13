@@ -238,12 +238,12 @@ int main() {
   ui = makeUi();
   ui.notify("Hello", 5000);
   assert(ui.touch(184, 351, 1, 5100).input == Input::None);
-  auto json = waveshareStateJson(ui, WaveshareFrame{7, 21, 28, 44}, true, 3);
+  auto json = waveshareStateJson(ui, WaveshareFrame{7, 21, 28, 44}, true, 3, true);
   assert(json["screen"] == "now" && json["queueStart"] == 0 && json["roomStart"] == 0 &&
          json["rooms"] == 2);
   assert(json["touch"]["touching"] == true && json["touch"]["control"] == "volume" &&
          json["touch"]["held"] == true && json["touch"]["cancelled"] == false &&
-         json["touch"]["injectPending"] == 3);
+         json["touch"]["injectPending"] == 3 && json["touch"]["injectOpen"] == true);
   assert(json["preview"]["volume"] == 50 && json["preview"]["seek"].is_null());
   assert(json["toast"] == "Hello" && json["busy"] == false && json["online"] == true &&
          json["readOnly"] == true);
@@ -260,7 +260,7 @@ int main() {
   json = waveshareStateJson(ui, {}, false, 0);
   assert(json["touch"]["touching"] == false && json["touch"]["control"] == "none" &&
          json["touch"]["held"] == false && json["touch"]["cancelled"] == true &&
-         json["preview"]["volume"].is_null());
+         json["touch"]["injectOpen"] == false && json["preview"]["volume"].is_null());
   ui.screen = WaveshareScreen::Queue;
   ui.queueStart = 4;
   assert(waveshareStateJson(ui, {}, false, 0)["screen"] == "queue");

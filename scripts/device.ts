@@ -449,8 +449,9 @@ export const summaryRelevant = (line: string) => {
     text.includes("poll-gap-max=")
   );
 };
-// Job durations come from the host arrival times of the worker transitions:
-// the transitions themselves carry no device timestamp.
+// Job durations come from the device's own log timestamps, which a buffered
+// serial backlog cannot distort; host arrival time is the fallback for a line
+// that carries none.
 export function captureSummary(entries: CapturedLine[]): string {
   let heartbeats = 0,
     busy = 0,
@@ -459,7 +460,17 @@ export function captureSummary(entries: CapturedLine[]): string {
     uiGap = 0;
   const started = new Map<string, number>();
   const durations: number[] = [];
+  // A capture can begin with buffered backlog, so counts are only readable
+  // beside the device time the capture actually spans.
+  let first: number | undefined,
+    last = 0;
   for (const { at, line } of entries) {
+    const stamp = /^\[(\d+)\] /.exec(line);
+    const time = stamp ? Number(stamp[1]) : at;
+    if (stamp) {
+      first ??= time;
+      last = time;
+    }
     const text = deviceMessage(line);
     if (text.startsWith("heartbeat ")) {
       heartbeats++;
@@ -469,7 +480,7 @@ export function captureSummary(entries: CapturedLine[]): string {
     const running = /^worker Idle -> Running id=(\d+)/.exec(text);
     if (running) {
       transitions++;
-      started.set(running[1], at);
+      started.set(running[1], time);
       continue;
     }
     const idle = /^worker Running -> Idle id=(\d+)/.exec(text);
@@ -477,7 +488,8 @@ export function captureSummary(entries: CapturedLine[]): string {
       transitions++;
       const start = started.get(idle[1]);
       if (start !== undefined) {
-        durations.push(at - start);
+        // A host fallback time is fractional; report whole milliseconds.
+        durations.push(Math.round(time - start));
         started.delete(idle[1]);
       }
       continue;
@@ -495,7 +507,8 @@ export function captureSummary(entries: CapturedLine[]): string {
       ? sorted[middle]
       : (sorted[middle - 1] + sorted[middle]) / 2;
   return [
-    `capture heartbeats=${heartbeats}`,
+    `capture span-ms=${last - (first ?? 0)}`,
+    `heartbeats=${heartbeats}`,
     `busy-ratio=${(heartbeats ? busy / heartbeats : 0).toFixed(3)}`,
     `worker-transitions=${transitions}`,
     `jobs=${sorted.length}`,
@@ -539,6 +552,15 @@ export async function monitor(
   });
   const entries: CapturedLine[] = [];
   try {
+    // A measurement starts from live output: an unread port holds a backlog
+    // whose device time would otherwise be counted as part of this capture.
+    if (options.stats) {
+      let discarded = 0;
+      const drained = performance.now() + 2000;
+      while (performance.now() < drained && (await port.readLine(20)))
+        discarded++;
+      print(`capture start: discarded ${discarded} buffered lines`);
+    }
     const deadline = seconds ? performance.now() + seconds * 1000 : Infinity;
     while (!stopped && performance.now() < deadline) {
       const line = await port.readLine();

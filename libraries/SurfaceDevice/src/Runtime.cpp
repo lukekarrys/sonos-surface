@@ -1174,8 +1174,11 @@ void loop() {
   }
   if (millis() - lastHeartbeat >= 5000) {
     lastHeartbeat = millis();
+    // inactivity is the local-activity timer sleep uses: USB commands and
+    // injected input must never reset it.
     log("heartbeat wifi=" + std::to_string(WiFi.status()) +
-        " busy=" + std::to_string(workerBusy()) + " heap=" + std::to_string(ESP.getFreeHeap()));
+        " busy=" + std::to_string(workerBusy()) + " heap=" + std::to_string(ESP.getFreeHeap()) +
+        " inactivity=" + std::to_string(power.inactivityMs(nowMs()) / 1000));
   }
   vTaskDelay(1); // Yield the UI task; no Sonos ordering depends on this scheduler tick.
 }
