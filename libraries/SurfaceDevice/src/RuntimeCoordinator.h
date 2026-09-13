@@ -371,8 +371,12 @@ public:
   Admission admission(uint64_t now, bool refresh, JobOrigin origin, bool stopping = false) {
     service(now);
     const bool preempt = preemptable(origin);
-    if (worker_.snapshot().running && !preempt)
-      return {false, "Busy; input ignored", "worker busy", 0};
+    const auto worker = worker_.snapshot();
+    if (worker.running && !preempt)
+      return {false, "Busy; input ignored",
+              std::string("worker busy origin=") + originName(worker.origin) +
+                  " id=" + std::to_string(worker.jobId),
+              0};
     if (stopping)
       return {false, "Device stopping", "device stopping", 0};
     const auto sonos = sonos_.snapshot();

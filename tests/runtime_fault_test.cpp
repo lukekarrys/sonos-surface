@@ -852,7 +852,7 @@ void userInputDuringUserJobRejectsBusy() {
     for (bool refresh : {false, true}) {
       const auto rejected = f.coordinator.admission(f.now, refresh, JobOrigin::User);
       f.check(!rejected.allowed && rejected.notice == "Busy; input ignored" &&
-                  rejected.reason == "worker busy",
+                  rejected.reason == "worker busy origin=user id=" + std::to_string(id),
               "a user action during a user job is rejected visibly");
       f.check(f.queueJob(refresh, JobOrigin::User) == 0 &&
                   f.queueJob(refresh, JobOrigin::Automatic) == 0,
