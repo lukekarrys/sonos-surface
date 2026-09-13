@@ -10,6 +10,7 @@ import type { CapturedLine } from "../scripts/device.ts";
 import { usb, usbRequest } from "../scripts/usb.ts";
 import {
   dragPoints,
+  injectReply,
   touchCommands,
   uiAction,
   releaseRequired,
@@ -40,12 +41,21 @@ class Port implements DevicePort {
     this.closed = true;
   }
 }
+// Replies in the device's own formats: the ui-state line, and one delivery
+// line per queued sample, preceded by inject chatter that is not a delivery.
 const uiPort = (state: { held?: boolean; cancelled?: boolean } = {}) => {
   const port = new Port();
-  port.reply = (command) =>
-    command === "ui-state\n"
-      ? [`[10] ui-state ${JSON.stringify({ touch: state })}`]
-      : [`[11] [ui] inject ${command.trim()}`];
+  port.reply = (command) => {
+    if (command === "ui-state\n")
+      return [`[10] ui-state ${JSON.stringify({ touch: state })}`];
+    const touch = /^ui-touch (\d+) (\d+) 1\n$/.exec(command);
+    return [
+      "[11] [ui] inject gesture expired; hardware sampling resumed",
+      touch
+        ? `[11] [ui] inject touch x=${touch[1]} y=${touch[2]} fingers=1 hit=3 volume-preview=-1 seek-preview=-1`
+        : "[11] [ui] inject release",
+    ];
+  };
   return port;
 };
 
@@ -212,7 +222,9 @@ test("ui drags step through the screen in order and release first only when requ
     "ui-touch 1 2 1",
     "ui-touch release",
   ]);
-  const options = { steps: 3, intervalMs: 0, tailSeconds: 0 };
+  assert.equal(injectReply("ui-touch 1 2 1"), "[ui] inject touch x=1 y=2 ");
+  assert.equal(injectReply("ui-touch release"), "[ui] inject release");
+  const options = { steps: 3, intervalMs: 0, tailSeconds: 0, seconds: 0.05 };
   const free = uiPort();
   await uiAction(free, ["tap", "184", "286"], options, () => {});
   assert.deepEqual(free.writes, [
@@ -238,6 +250,18 @@ test("ui drags step through the screen in order and release first only when requ
     ]);
     assert.equal(await releaseRequired(port, () => {}), true);
   }
+  // A sample a physical finger cancelled was never delivered, so the tap
+  // fails instead of reporting the discarded contact as done.
+  const cancelled = new Port();
+  cancelled.reply = (command) =>
+    command === "ui-state\n"
+      ? ["[10] ui-state {}"]
+      : ["[11] [ui] inject cancelled=physical-touch"];
+  await assert.rejects(
+    uiAction(cancelled, ["tap", "184", "286"], options, () => {}),
+    /not observed/,
+  );
+  assert.deepEqual(cancelled.writes, ["ui-state\n", "ui-touch 184 286 1\n"]);
   const navigation = new Port();
   navigation.reply = (command) => [
     command === "ui-state\n"

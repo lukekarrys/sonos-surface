@@ -25,6 +25,16 @@ export function touchCommands(points: Point[]): string[] {
     "ui-touch release",
   ];
 }
+// The device reports each delivered sample by its own coordinates. A
+// cancellation or gesture expiry also begins with "[ui] inject", so matching
+// the sample itself makes a discarded sample time out instead of passing as
+// delivered.
+export function injectReply(command: string): string {
+  const touch = /^ui-touch (\d+) (\d+) \d$/.exec(command);
+  return touch
+    ? `[ui] inject touch x=${touch[1]} y=${touch[2]} `
+    : "[ui] inject release";
+}
 export function coordinate(value: string | undefined, maximum: number): number {
   if (!/^\d{1,3}$/.test(value ?? "") || Number(value) > maximum)
     throw new Error(`Screen coordinates are 0..367 by 0..447`);
@@ -38,9 +48,11 @@ function point(values: string[], index: number): Point {
 export async function releaseRequired(
   port: DevicePort,
   print?: (line: string) => void,
+  seconds?: number,
 ) {
   const line = await usbRequest(port, "ui-state", {
     expect: "ui-state ",
+    seconds,
     print,
   });
   const state: unknown = JSON.parse(
@@ -52,24 +64,35 @@ export async function releaseRequired(
       : {};
   return Boolean(touch.held || touch.cancelled);
 }
+export interface UiOptions {
+  steps: number;
+  intervalMs: number;
+  tailSeconds: number;
+  seconds?: number; // bound per device reply; usbRequest's default when omitted
+}
 export async function uiAction(
   port: DevicePort,
   positionals: string[],
-  options: { steps: number; intervalMs: number; tailSeconds: number },
+  options: UiOptions,
   print: (line: string) => void = console.log,
 ) {
   const [action, ...rest] = positionals;
+  const { seconds } = options;
   const inject = async (commands: string[]) => {
     for (const [index, command] of commands.entries()) {
       if (index) await delay(options.intervalMs);
-      await usbRequest(port, command, { expect: "[ui] inject ", print });
+      await usbRequest(port, command, {
+        expect: injectReply(command),
+        seconds,
+        print,
+      });
     }
     // The release action and the job it admits arrive after the last reply.
     await usbTail(port, options.tailSeconds, print);
   };
   if (action === "state") {
     if (rest.length) throw new Error("state takes no arguments");
-    await usbRequest(port, "ui-state", { expect: "ui-state ", print });
+    await usbRequest(port, "ui-state", { expect: "ui-state ", seconds, print });
     return;
   }
   if (action === "screen") {
@@ -77,6 +100,7 @@ export async function uiAction(
       throw new Error("screen takes now, rooms, or queue");
     await usbRequest(port, `ui-screen ${rest[0]}`, {
       expect: "[ui] navigation ",
+      seconds,
       print,
     });
     return;
@@ -86,6 +110,7 @@ export async function uiAction(
       throw new Error("button takes boot");
     await usbRequest(port, "ui-button boot", {
       expect: "[ui] inject button=",
+      seconds,
       print,
     });
     return;
@@ -103,7 +128,7 @@ export async function uiAction(
       action === "tap"
         ? [point(rest, 0)]
         : dragPoints(point(rest, 0), point(rest, 2), options.steps);
-    const first = (await releaseRequired(port, print))
+    const first = (await releaseRequired(port, print, seconds))
       ? ["ui-touch release"]
       : [];
     return inject([...first, ...touchCommands(points)]);
