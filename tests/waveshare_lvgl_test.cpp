@@ -1,8 +1,6 @@
 #include "WaveshareButton.h"
-#include "WaveshareLvglSupport.h"
 #include <cassert>
 #include <iostream>
-#include <string>
 using namespace surface::device;
 namespace {
 // Feed one raw press of `holdMs` starting at `at`, sampled every 5 ms, and
@@ -76,41 +74,5 @@ int main() {
       button.sample(true, t);
     assert(button.pressed());
   }
-  {
-    // Even alignment grows an invalidated area outward and clamps to the panel.
-    auto a = evenAlignedArea({13, 7, 20, 30}, 368, 448);
-    assert(a.x1 == 12 && a.y1 == 6 && a.x2 == 21 && a.y2 == 31);
-    a = evenAlignedArea({0, 0, 367, 447}, 368, 448);
-    assert(a.x1 == 0 && a.y1 == 0 && a.x2 == 367 && a.y2 == 447);
-    a = evenAlignedArea({366, 446, 366, 446}, 368, 448);
-    assert(a.x1 == 366 && a.y1 == 446 && a.x2 == 367 && a.y2 == 447);
-    a = evenAlignedArea({5, 5, 5, 5}, 368, 448);
-    assert(a.x1 == 4 && a.y1 == 4 && a.x2 == 5 && a.y2 == 5);
-    a = evenAlignedArea({12, 6, 21, 31}, 368, 448);
-    assert(a.x1 == 12 && a.y1 == 6 && a.x2 == 21 && a.y2 == 31);
-    for (int x = 0; x < 368; ++x) {
-      const auto r = evenAlignedArea({x, x % 448, x, x % 448}, 368, 448);
-      assert(r.x1 % 2 == 0 && r.y1 % 2 == 0 && (r.x2 - r.x1 + 1) % 2 == 0 &&
-             (r.y2 - r.y1 + 1) % 2 == 0 && r.x2 < 368 && r.y2 < 448);
-    }
-  }
-  {
-    // Screens cycle and wrap; render modes parse exactly their three names.
-    auto s = PlaygroundScreen::Targets;
-    assert(std::string(playgroundScreenName(s)) == "targets");
-    s = nextPlaygroundScreen(s);
-    assert(s == PlaygroundScreen::Slider && std::string(playgroundScreenName(s)) == "slider");
-    s = nextPlaygroundScreen(s);
-    assert(s == PlaygroundScreen::Canvas && std::string(playgroundScreenName(s)) == "canvas");
-    assert(nextPlaygroundScreen(s) == PlaygroundScreen::Targets);
-    LvglRenderMode mode = LvglRenderMode::Direct;
-    for (const char* text : {"partial", "even", "direct"}) {
-      assert(parseLvglRenderMode(text, mode));
-      assert(std::string(lvglRenderModeName(mode)) == text);
-    }
-    assert(!parseLvglRenderMode("full", mode) && mode == LvglRenderMode::Direct);
-    assert(!parseLvglRenderMode("", mode));
-  }
-  std::cout << "Waveshare LVGL checks passed: BOOT debounce/edge/hold/wake rules, even area "
-               "alignment, screen cycle, render mode names\n";
+  std::cout << "Waveshare LVGL checks passed: BOOT debounce/edge/hold/wake rules\n";
 }

@@ -5,22 +5,9 @@ import { ROOT } from "./common.ts";
 // sketch with one extra define into its own build directory, so a variant
 // never disturbs the normal image's cache or its flashed configuration.
 export const buildVariants = {
-  runtime: { option: undefined, define: undefined, flags: [], checked: false },
+  runtime: { option: undefined, define: undefined },
   // Raw touch coordinates for per-unit calibration; no playback actions.
-  touch: {
-    option: "touch-diagnostic",
-    define: "SURFACE_TOUCH_DIAGNOSTIC",
-    flags: [],
-    checked: false,
-  },
-  // LVGL evaluation playground: the full runtime with LVGL owning the panel.
-  // LV_CONF_INCLUDE_SIMPLE selects the repo-owned lv_conf.h on the include path.
-  lvgl: {
-    option: "lvgl-playground",
-    define: "SURFACE_LVGL_PLAYGROUND",
-    flags: ["-DLV_CONF_INCLUDE_SIMPLE"],
-    checked: true,
-  },
+  touch: { option: "touch-diagnostic", define: "SURFACE_TOUCH_DIAGNOSTIC" },
 } as const;
 export type BuildVariant = keyof typeof buildVariants;
 
@@ -30,6 +17,7 @@ export const hardwareTargets = {
     define: "SURFACE_STICK_S3",
     flashSize: "8M",
     partitionScheme: "default_8MB",
+    flags: [] as readonly string[],
     variants: [] as readonly BuildVariant[],
     power: {
       mechanism: "esp32-deep-sleep",
@@ -41,7 +29,10 @@ export const hardwareTargets = {
     define: "SURFACE_WAVESHARE_1_8",
     flashSize: "16M",
     partitionScheme: "app3M_fat9M_16MB",
-    variants: ["touch", "lvgl"] as readonly BuildVariant[],
+    // LVGL is the ws-1.8 UI; LV_CONF_INCLUDE_SIMPLE selects the repo-owned
+    // lv_conf.h on the include path. stick-s3 never links LVGL.
+    flags: ["-DLV_CONF_INCLUDE_SIMPLE"] as readonly string[],
+    variants: ["touch"] as readonly BuildVariant[],
     power: { mechanism: "esp32-deep-sleep", wakeButton: "BOOT" },
   },
 } as const;
@@ -73,14 +64,20 @@ export function buildPath(
 // sources never depend on an undefined macro.
 export function variantDefines(variant: BuildVariant): string[] {
   const chosen = buildVariants[variant];
-  return [
-    ...Object.values(buildVariants).flatMap((candidate) =>
-      candidate.define
-        ? [`-D${candidate.define}=${Number(candidate === chosen)}`]
-        : [],
-    ),
-    ...chosen.flags,
-  ];
+  return Object.values(buildVariants).flatMap((candidate) =>
+    candidate.define
+      ? [`-D${candidate.define}=${Number(candidate === chosen)}`]
+      : [],
+  );
+}
+// The complete extra compiler flags of one build: the target define, the
+// target's own flags, and every variant define.
+export function buildDefines(
+  targetId: HardwareTargetId,
+  variant: BuildVariant = "runtime",
+): string[] {
+  const target = hardwareTargets[targetId];
+  return [`-D${target.define}`, ...target.flags, ...variantDefines(variant)];
 }
 
 export function fqbn(targetId: HardwareTargetId) {

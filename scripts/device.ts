@@ -33,9 +33,9 @@ import {
   hardwareTargets,
   hardwareTargetId,
   buildPath,
+  buildDefines,
   buildVariants,
   fqbn,
-  variantDefines,
 } from "./hardware-targets.ts";
 import type { BuildVariant, HardwareTargetId } from "./hardware-targets.ts";
 
@@ -58,7 +58,7 @@ export function compileArguments(
     "--warnings",
     "more",
     "--build-property",
-    `compiler.cpp.extra_flags=-std=gnu++17 -D${hardwareTargets[targetId].define} ${variantDefines(variant).join(" ")}`,
+    `compiler.cpp.extra_flags=-std=gnu++17 ${buildDefines(targetId, variant).join(" ")}`,
     "--build-property",
     'compiler.cpp.flags=-MMD -c "@{compiler.sdk.path}/flags/cpp_flags" {compiler.warning_flags} {compiler.optimization_flags} {compiler.common_werror_flags} -std=gnu++17',
     "--build-property",
@@ -321,8 +321,7 @@ function hardwareDirectory(
   ) as { hardwareFolders: string; customBuildProperties: string };
   const properties = options.customBuildProperties.split(/[ ,]+/);
   if (
-    !properties.includes(`-D${hardwareTargets[targetId].define}`) ||
-    variantDefines(variant).some((flag) => !properties.includes(flag))
+    buildDefines(targetId, variant).some((flag) => !properties.includes(flag))
   )
     throw new Error(
       "Built image hardware target differs; rebuild before flashing",
@@ -603,18 +602,12 @@ export async function monitor(
 export async function device(argv = process.argv.slice(2)) {
   const { values, positionals } = cli(
     ["port", "seconds", "config", "env-file", "until"],
-    [
-      "download-mode",
-      "touch-diagnostic",
-      "lvgl-playground",
-      "stats",
-      "identify",
-    ],
+    ["download-mode", "touch-diagnostic", "stats", "identify"],
     argv,
   );
   if (values.help)
     return console.log(
-      `node --run build:TARGET|flash:TARGET -- [--port PORT] [--config PATH] [--env-file PATH] [--touch-diagnostic|--lvgl-playground]\nnode --run cpp:configure -- [TARGET]\nnode --run monitor -- TARGET --port PORT [--seconds N] [--until TOKEN] [--stats]\nnode --run reset|reboot -- TARGET --port PORT [--download-mode]\nnode --run ports -- [--identify]\nHardware targets: ${Object.keys(hardwareTargets).join(", ")}`,
+      `node --run build:TARGET|flash:TARGET -- [--port PORT] [--config PATH] [--env-file PATH] [--touch-diagnostic]\nnode --run cpp:configure -- [TARGET]\nnode --run monitor -- TARGET --port PORT [--seconds N] [--until TOKEN] [--stats]\nnode --run reset|reboot -- TARGET --port PORT [--download-mode]\nnode --run ports -- [--identify]\nHardware targets: ${Object.keys(hardwareTargets).join(", ")}`,
     );
   const [action, positionalTarget, ...extra] = positionals;
   if (

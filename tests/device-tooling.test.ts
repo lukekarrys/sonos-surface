@@ -281,10 +281,12 @@ test("ui drags step through the screen in order and release first only when requ
         : "[10] [ui] navigation screen=2 (no playback intent)",
   ];
   await uiAction(navigation, ["screen", "queue"], options, () => {});
+  await uiAction(navigation, ["screen", "playground"], options, () => {});
   await uiAction(navigation, ["button", "boot"], options, () => {});
   await uiAction(navigation, ["state"], options, () => {});
   assert.deepEqual(navigation.writes, [
     "ui-screen queue\n",
+    "ui-screen playground\n",
     "ui-button boot\n",
     "ui-state\n",
   ]);

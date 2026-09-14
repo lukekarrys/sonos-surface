@@ -23,6 +23,7 @@ import {
 import {
   hardwareTargets,
   hardwareTargetId,
+  buildDefines,
   buildPath,
   fqbn,
   variantDefines,
@@ -152,41 +153,41 @@ test("hardware targets retain their FQBN facts and isolated build outputs", asyn
   assert.equal(buildPath("stick-s3"), join(ROOT, ".build/stick-s3-runtime"));
   assert.equal(buildPath("ws-1.8"), join(ROOT, ".build/ws-1.8-runtime"));
   assert.equal(buildPath("ws-1.8", "touch"), join(ROOT, ".build/ws-1.8-touch"));
-  assert.equal(buildPath("ws-1.8", "lvgl"), join(ROOT, ".build/ws-1.8-lvgl"));
-  for (const variant of ["touch", "lvgl"] as const)
-    assert.throws(
-      () => compileArguments("stick-s3", variant),
-      /no touch-diagnostic variant|no lvgl-playground variant/,
-    );
+  assert.throws(
+    () => compileArguments("stick-s3", "touch"),
+    /no touch-diagnostic variant/,
+  );
   // Every variant define is explicit in every build, so guarded sources never
-  // see an undefined macro; only the chosen variant is 1.
-  const flags = (variant: BuildVariant) =>
-    compileArguments("ws-1.8", variant).find((arg) =>
+  // see an undefined macro; only the chosen variant is 1. LVGL's config flag
+  // belongs to the ws-1.8 target alone: stick-s3 never links LVGL.
+  const flags = (target: "stick-s3" | "ws-1.8", variant: BuildVariant) =>
+    compileArguments(target, variant).find((arg) =>
       arg.startsWith("compiler.cpp.extra_flags="),
     ) ?? "";
-  assert.ok(flags("runtime").includes("-DSURFACE_TOUCH_DIAGNOSTIC=0"));
-  assert.ok(flags("runtime").includes("-DSURFACE_LVGL_PLAYGROUND=0"));
-  assert.ok(!flags("runtime").includes("LV_CONF"));
-  assert.ok(flags("touch").includes("-DSURFACE_TOUCH_DIAGNOSTIC=1"));
-  assert.ok(flags("touch").includes("-DSURFACE_LVGL_PLAYGROUND=0"));
-  assert.ok(flags("lvgl").includes("-DSURFACE_TOUCH_DIAGNOSTIC=0"));
-  assert.ok(flags("lvgl").includes("-DSURFACE_LVGL_PLAYGROUND=1"));
-  assert.ok(flags("lvgl").includes("-DLV_CONF_INCLUDE_SIMPLE"));
-  assert.deepEqual(variantDefines("lvgl"), [
-    "-DSURFACE_TOUCH_DIAGNOSTIC=0",
-    "-DSURFACE_LVGL_PLAYGROUND=1",
+  assert.ok(
+    flags("ws-1.8", "runtime").includes("-DSURFACE_TOUCH_DIAGNOSTIC=0"),
+  );
+  assert.ok(flags("ws-1.8", "runtime").includes("-DLV_CONF_INCLUDE_SIMPLE"));
+  assert.ok(flags("ws-1.8", "touch").includes("-DSURFACE_TOUCH_DIAGNOSTIC=1"));
+  assert.ok(flags("stick-s3", "runtime").includes("-DSURFACE_STICK_S3"));
+  assert.ok(!flags("stick-s3", "runtime").includes("LV_CONF"));
+  assert.ok(!flags("stick-s3", "runtime").includes("SURFACE_WAVESHARE_1_8"));
+  assert.deepEqual(variantDefines("touch"), ["-DSURFACE_TOUCH_DIAGNOSTIC=1"]);
+  assert.deepEqual(buildDefines("ws-1.8"), [
+    "-DSURFACE_WAVESHARE_1_8",
     "-DLV_CONF_INCLUDE_SIMPLE",
+    "-DSURFACE_TOUCH_DIAGNOSTIC=0",
   ]);
-  for (const options of [
-    ["--touch-diagnostic", "--lvgl-playground"],
-    ["--lvgl-playground"],
-  ])
-    await assert.rejects(
-      device(["build", "stick-s3", ...options]),
-      /at most one build variant|requires a supported hardware target/,
-    );
+  assert.deepEqual(buildDefines("stick-s3"), [
+    "-DSURFACE_STICK_S3",
+    "-DSURFACE_TOUCH_DIAGNOSTIC=0",
+  ]);
   await assert.rejects(
-    device(["monitor", "ws-1.8", "--port", "fake", "--lvgl-playground"]),
+    device(["build", "stick-s3", "--touch-diagnostic"]),
+    /requires a supported hardware target/,
+  );
+  await assert.rejects(
+    device(["monitor", "ws-1.8", "--port", "fake", "--touch-diagnostic"]),
     /requires a supported hardware target build or flash/,
   );
 });
@@ -243,12 +244,8 @@ test("full checks build every current target through the matching package task",
   assert.deepEqual(checkTasks(true).slice(checkTasks().length), [
     "build:stick-s3",
     "build:ws-1.8",
-    "build:ws-1.8:lvgl",
   ]);
-  assert.equal(
-    scripts["build:ws-1.8:lvgl"],
-    "node scripts/device.ts build ws-1.8 --lvgl-playground",
-  );
+  assert.equal(scripts["build:ws-1.8:lvgl"], undefined);
   for (const { id } of Object.values(hardwareTargets))
     for (const action of ["build", "flash"])
       assert.equal(

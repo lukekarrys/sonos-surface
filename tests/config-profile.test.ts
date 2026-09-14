@@ -379,16 +379,16 @@ test("flash resolves the profile before building and applies that captured profi
   const f = fixture(t);
   const expected = loadProfile(f.path, f.env);
   const events: string[] = [];
-  await flash("ws-1.8", "fake", f.path, f.env, "lvgl", {
+  await flash("ws-1.8", "fake", f.path, f.env, "touch", {
     async build(board, variant) {
       assert.equal(board, "ws-1.8");
-      assert.equal(variant, "lvgl");
+      assert.equal(variant, "touch");
       events.push("build");
       // Changing the file after preflight must not change the submitted profile.
       writeFileSync(f.path, "{invalid");
     },
     async upload(board, port, variant) {
-      assert.deepEqual([board, port, variant], ["ws-1.8", "fake", "lvgl"]);
+      assert.deepEqual([board, port, variant], ["ws-1.8", "fake", "touch"]);
       events.push("flash");
     },
     async ready() {

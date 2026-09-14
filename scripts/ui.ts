@@ -5,6 +5,8 @@ import type { DevicePort } from "./serial-device.ts";
 import { usbRequest, usbTail } from "./usb.ts";
 
 export type Point = [number, number];
+// Top-level screens plus the Now Playing sub-views `ui-screen` can show.
+export const uiScreens = ["now", "rooms", "queue", "grouping", "playground"];
 // Injected samples are consumed one per 30 ms touch poll, so a drag is a
 // sequence of commands; the device queue bounds how many may be in flight.
 export const maxDragSteps = 31;
@@ -96,8 +98,8 @@ export async function uiAction(
     return;
   }
   if (action === "screen") {
-    if (!["now", "rooms", "queue"].includes(rest[0]) || rest.length !== 1)
-      throw new Error("screen takes now, rooms, or queue");
+    if (!uiScreens.includes(rest[0]) || rest.length !== 1)
+      throw new Error(`screen takes ${uiScreens.join(", ")}`);
     await usbRequest(port, `ui-screen ${rest[0]}`, {
       expect: "[ui] navigation ",
       seconds,
@@ -153,7 +155,7 @@ export async function ui(argv = process.argv.slice(2), open = readyPort) {
   );
   if (values.help)
     return console.log(
-      "node --run ui -- --port PORT tap X Y\nnode --run ui -- --port PORT drag X1 Y1 X2 Y2 [--steps N] [--interval-ms 30]\nnode --run ui -- --port PORT release\nnode --run ui -- --port PORT button boot\nnode --run ui -- --port PORT nav next\nnode --run ui -- --port PORT screen now|rooms|queue\nnode --run ui -- --port PORT state\nTouch actions print what follows for [--tail-seconds 4].",
+      "node --run ui -- --port PORT tap X Y\nnode --run ui -- --port PORT drag X1 Y1 X2 Y2 [--steps N] [--interval-ms 30]\nnode --run ui -- --port PORT release\nnode --run ui -- --port PORT button boot\nnode --run ui -- --port PORT nav next\nnode --run ui -- --port PORT screen now|rooms|queue|grouping|playground\nnode --run ui -- --port PORT state\nTouch actions print what follows for [--tail-seconds 4].",
     );
   const name = required(values.port, "port");
   const options = {

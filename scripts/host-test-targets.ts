@@ -75,6 +75,11 @@ export function hostTestTargets(): HostTarget[] {
       includes: [deviceInclude],
     },
     {
+      name: "waveshare_shell_test",
+      sources: coreSources(),
+      includes: [deviceInclude, ...includes],
+    },
+    {
       name: "artwork_test",
       sources: [],
       includes: [deviceInclude, includes[0]],

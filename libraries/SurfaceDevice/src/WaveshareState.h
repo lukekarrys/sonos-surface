@@ -1,13 +1,9 @@
 #pragma once
-#include "WaveshareUi.h"
+#include "WaveshareShell.h"
 #include <optional>
 #include <surface_json.hpp>
 
 namespace surface::device {
-// Last rendered frame cost, reported by ui-state for host-side verification.
-struct WaveshareFrame {
-  uint32_t draw = 0, flush = 0, total = 0, pollGapMax = 0;
-};
 inline const char* waveshareScreenName(WaveshareScreen screen) {
   switch (screen) {
   case WaveshareScreen::Rooms:
@@ -61,14 +57,16 @@ inline const char* waveshareControlName(WaveshareControl control) {
 template <typename T> nlohmann::json optionalJson(const std::optional<T>& value) {
   return value ? nlohmann::json(*value) : nlohmann::json(nullptr);
 }
-// Built field by field on purpose: the main loop's 8 KiB stack cannot hold a
-// large nested initializer for a USB command handler (docs/hardware.md).
-inline nlohmann::json waveshareStateJson(const WaveshareUi& ui, const WaveshareFrame& frame,
-                                         bool held, unsigned injectPending,
-                                         bool injectOpen = false) {
+// The portable part of `ui-state`; the LVGL adapter adds its sample, frame,
+// and memory fields. Built field by field on purpose: a large nested
+// initializer inflates the USB command handler's frame (docs/hardware.md).
+inline nlohmann::json waveshareStateJson(const WaveshareShell& shell, bool held,
+                                         unsigned injectPending, bool injectOpen = false) {
+  const auto& ui = shell.nowPlaying;
   const auto& observed = ui.state.observed;
   nlohmann::json state = nlohmann::json::object();
-  state["screen"] = waveshareScreenName(ui.screen);
+  state["screen"] = surfaceScreenName(shell.active());
+  state["view"] = waveshareScreenName(ui.screen);
   state["queueStart"] = ui.queueStart;
   state["roomStart"] = ui.roomStart;
   state["rooms"] = ui.context.rooms.size();
@@ -103,11 +101,6 @@ inline nlohmann::json waveshareStateJson(const WaveshareUi& ui, const WaveshareF
   playback["queueIndex"] = optionalJson(observed.queueIndex);
   playback["queueTotal"] = optionalJson(observed.queueTotal);
   playback["queueRevision"] = optionalJson(observed.queueRevision);
-  auto& timing = state["frame"];
-  timing["draw"] = frame.draw;
-  timing["flush"] = frame.flush;
-  timing["total"] = frame.total;
-  timing["pollGapMax"] = frame.pollGapMax;
   return state;
 }
 } // namespace surface::device

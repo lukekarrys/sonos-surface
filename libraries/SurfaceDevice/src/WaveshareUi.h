@@ -6,10 +6,15 @@
 
 namespace surface::device {
 // Device-local, portable interaction logic. No network, persistence, or SDKs.
+// LVGL owns the widgets and their hit-testing on the device; this model owns
+// the gesture rules (release-to-submit, cancellation, identity checks) and
+// receives the control LVGL found under a new press.
 struct UiRect {
   int x, y, w, h;
-  bool contains(int px, int py) const { return px >= x && px < x + w && py >= y && py < y + h; }
 };
+// The accepted Now Playing layout: every control inside the calibrated
+// reachable area and corner mask (x=32–336 / y=28–416, slider endpoints
+// x=52/316). The LVGL screen is built from exactly these rectangles.
 namespace waveshareLayout {
 constexpr UiRect header{32, 28, 304, 44};
 constexpr UiRect progress{40, 210, 288, 42};
@@ -21,7 +26,12 @@ constexpr UiRect pageBack{32, 364, 140, 48}, pageNext{196, 364, 140, 48};
 constexpr UiRect row(unsigned i) { return {32, 108 + int(i) * 60, 304, 56}; }
 constexpr int sliderLeft = 52, sliderRight = 316;
 constexpr uint32_t pageSize = 4;
+// Reachable area every control must stay inside (docs/hardware.md).
+constexpr UiRect reachable{32, 28, 304, 388};
+// The seek slider reports its knob in these units; volume reports 0–100.
+constexpr uint32_t seekResolution = 1000;
 } // namespace waveshareLayout
+// Rooms and Queue are sub-views of Now Playing, never top-level screens.
 enum class WaveshareScreen { NowPlaying, Rooms, Queue };
 enum class WaveshareControl {
   None,
@@ -66,7 +76,9 @@ inline const char* playbackLabel(PlaybackStatus s) {
   }
 }
 class WaveshareUi {
-  WaveshareControl contact = WaveshareControl::None;
+  // contact: the control the current gesture started on; pending: the control
+  // LVGL reported pressed before the sample that starts the gesture arrives.
+  WaveshareControl contact = WaveshareControl::None, pending = WaveshareControl::None;
   bool touching = false, cancelled = false, queueRequested = false, sawQueueBusy = false;
   int firstX = 0, firstY = 0;
   std::string gestureRoom, gestureTrack;
@@ -74,11 +86,8 @@ class WaveshareUi {
   uint32_t toastUntil = 0;
   std::string lastOutcome, lastFeedback;
   bool outcomeInitialized = false;
-  static uint32_t valueAt(int x, uint32_t maximum) {
-    using namespace waveshareLayout;
-    const auto clamped = std::clamp(x, sliderLeft, sliderRight) - sliderLeft;
-    return (uint64_t(clamped) * maximum + (sliderRight - sliderLeft) / 2) /
-           (sliderRight - sliderLeft);
+  static bool slider(WaveshareControl control) {
+    return control == WaveshareControl::Volume || control == WaveshareControl::Seek;
   }
   // Busy is another user job; an automatic read in progress never rejects input.
   BoardEvent mutation(MusicIntent intent, const std::string& label, uint32_t now) {
@@ -141,11 +150,40 @@ public:
     dirty = true;
   }
   void cancelTouch() {
-    contact = WaveshareControl::None;
+    contact = pending = WaveshareControl::None;
     touching = false;
     cancelled = true;
     volumePreview.reset();
     seekPreview.reset();
+    dirty = true;
+  }
+  // LVGL found `control` under a new press. A press that lands on a second
+  // control during one gesture crossed a button gap, which cancels the tap.
+  void pressed(WaveshareControl control) {
+    if (cancelled)
+      return;
+    if (touching)
+      contact = WaveshareControl::None;
+    else
+      pending = control;
+  }
+  // The finger slid off the control it pressed: nothing completes on release.
+  void pressLost() {
+    if (touching)
+      contact = WaveshareControl::None;
+  }
+  // A slider knob moved to value/maximum. The preview stays local until the
+  // release sample submits it; a slider that is not usable previews nothing.
+  void slid(WaveshareControl control, uint32_t value, uint32_t maximum) {
+    if (cancelled || !maximum || (contact != control && pending != control))
+      return;
+    value = std::min(value, maximum);
+    if (control == WaveshareControl::Volume && fresh() && state.observed.volume)
+      volumePreview = uint32_t(uint64_t(value) * 100 / maximum);
+    else if (control == WaveshareControl::Seek && canSeek())
+      seekPreview = uint32_t(uint64_t(value) * *state.observed.durationMs / maximum);
+    else
+      return;
     dirty = true;
   }
   void update(const AppState& next, const BoardContext& c, uint32_t now) {
@@ -222,42 +260,6 @@ public:
       dirty = true;
     }
   }
-  WaveshareControl hit(int x, int y) const {
-    using namespace waveshareLayout;
-    if (screen == WaveshareScreen::NowPlaying) {
-      if (header.contains(x, y))
-        return WaveshareControl::RoomHeader;
-      if (previous.contains(x, y))
-        return WaveshareControl::Previous;
-      if (play.contains(x, y))
-        return WaveshareControl::Play;
-      if (next.contains(x, y))
-        return WaveshareControl::Next;
-      if (volume.contains(x, y))
-        return WaveshareControl::Volume;
-      if (progress.contains(x, y))
-        return WaveshareControl::Seek;
-      if (shuffle.contains(x, y))
-        return WaveshareControl::Shuffle;
-      if (repeat.contains(x, y))
-        return WaveshareControl::Repeat;
-      if (queue.contains(x, y))
-        return WaveshareControl::Queue;
-    } else {
-      if (back.contains(x, y))
-        return WaveshareControl::Back;
-      if (reload.contains(x, y))
-        return WaveshareControl::Reload;
-      if (pageBack.contains(x, y))
-        return WaveshareControl::PageBack;
-      if (pageNext.contains(x, y))
-        return WaveshareControl::PageNext;
-      for (unsigned i = 0; i < 4; ++i)
-        if (row(i).contains(x, y))
-          return WaveshareControl(int(WaveshareControl::Row0) + i);
-    }
-    return WaveshareControl::None;
-  }
   BoardEvent requestQueue() {
     if (screen != WaveshareScreen::Queue || context.busy || !context.online ||
         state.observed.targetId.empty() || queueRequested)
@@ -285,21 +287,20 @@ public:
         touching = true;
         firstX = x;
         firstY = y;
-        contact = hit(x, y);
+        contact = pending;
+        pending = WaveshareControl::None;
         gestureRoom = state.observed.targetId;
         gestureTrack = state.observed.trackUri;
         gestureRevision = state.observed.queueRevision;
         gestureDuration = state.observed.durationMs;
       }
-      if (contact == WaveshareControl::Volume && fresh() && state.observed.volume)
-        volumePreview = valueAt(x, 100);
-      else if (contact == WaveshareControl::Seek && canSeek())
-        seekPreview = valueAt(x, *state.observed.durationMs);
-      else if (abs(x - firstX) > 16 || abs(y - firstY) > 16 || hit(x, y) != contact)
+      // Sliders follow the knob through slid(); a button tap that wanders more
+      // than 16 px is no tap.
+      if (!slider(contact) && (abs(x - firstX) > 16 || abs(y - firstY) > 16))
         contact = WaveshareControl::None;
-      dirty = true;
       return {};
     }
+    pending = WaveshareControl::None;
     if (cancelled) {
       cancelled = false;
       return {};

@@ -135,6 +135,7 @@ export const rejectionTokens = [
   "REBOOT_BUSY",
   "UI_INJECT_INVALID",
   "UI_INJECT_FULL",
+  "UI_SCREEN_INVALID",
 ];
 export async function waitReady(port: DevicePort, seconds = 20, echo = false) {
   const deadline = performance.now() + seconds * 1000;

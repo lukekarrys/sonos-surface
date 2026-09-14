@@ -1,18 +1,18 @@
-/* Project-owned LVGL 9 configuration for the ws-1.8 LVGL playground build.
- * Everything not listed keeps the lv_conf_internal.h default. Only the widgets,
- * fonts, and features the playground uses are enabled; examples, demos, file
- * systems, image codecs, and every other extra are off. */
+/* Project-owned LVGL 9 configuration for the ws-1.8 build. Everything not
+ * listed keeps the lv_conf_internal.h default. Only the widgets, fonts, and
+ * features the screens use are enabled; examples, demos, file systems, image
+ * codecs, and every other extra are off. */
 #ifndef LV_CONF_H
 #define LV_CONF_H
 
 #define LV_COLOR_DEPTH 16
 
-/* Allocator: the C library heap (Espressif's heap_caps-backed malloc) instead of
- * LVGL's static pool. Internal SRAM is the scarce resource; a fixed pool would
- * reserve it permanently, while malloc keeps small objects internal and lets
- * large buffers spill to PSRAM. Free heap/PSRAM are measured instead of
- * lv_mem_monitor, which needs the built-in pool. */
-#define LV_USE_STDLIB_MALLOC LV_STDLIB_CLIB
+/* Allocator: WaveshareLvgl.cpp implements lv_malloc_core and friends on the
+ * ESP heap with PSRAM preferred and internal SRAM as the fallback. Internal
+ * SRAM is the scarce resource (networking lives there); widgets, styles, label
+ * texts, and LVGL's draw buffers all fit PSRAM's speed. Free heap/PSRAM are
+ * measured instead of lv_mem_monitor, which needs the built-in pool. */
+#define LV_USE_STDLIB_MALLOC LV_STDLIB_CUSTOM
 #define LV_USE_STDLIB_STRING LV_STDLIB_CLIB
 #define LV_USE_STDLIB_SPRINTF LV_STDLIB_CLIB
 
@@ -64,14 +64,14 @@
 #define LV_USE_BIDI 0
 #define LV_USE_ARABIC_PERSIAN_CHARS 0
 
-/* Widgets the playground uses. */
+/* Widgets the screens use. */
 #define LV_USE_LABEL 1
 #define LV_USE_BUTTON 1
 #define LV_USE_BAR 1
 #define LV_USE_SLIDER 1
-#define LV_USE_ARC 1
-#define LV_USE_CANVAS 1
-#define LV_USE_LINE 1
+#define LV_USE_ARC 0
+#define LV_USE_CANVAS 0
+#define LV_USE_LINE 0
 #define LV_USE_IMAGE 1
 #define LV_USE_ANIMIMG 0
 #define LV_USE_ARCLABEL 0

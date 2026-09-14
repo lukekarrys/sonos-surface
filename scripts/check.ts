@@ -1,5 +1,5 @@
 import { cli, main, run } from "./common.ts";
-import { buildVariants, hardwareTargets } from "./hardware-targets.ts";
+import { hardwareTargets } from "./hardware-targets.ts";
 
 export function checkTasks(full = false) {
   return [
@@ -9,12 +9,7 @@ export function checkTasks(full = false) {
     "writer:page:check",
     "test",
     ...(full
-      ? Object.values(hardwareTargets).flatMap((target) => [
-          `build:${target.id}`,
-          ...target.variants
-            .filter((variant) => buildVariants[variant].checked)
-            .map((variant) => `build:${target.id}:${variant}`),
-        ])
+      ? Object.values(hardwareTargets).map((target) => `build:${target.id}`)
       : []),
   ];
 }
