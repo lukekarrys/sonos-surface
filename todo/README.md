@@ -11,7 +11,7 @@ Each file in this folder is a self-contained prompt for one autonomous agent. `A
 | `3-lvgl`                                 | done (24896d6) | `1`, `2`                                         | `5` Phase A, `6` Phase A     |
 | `5-new-view-model` Phase A               |        | `2`                                              | `3`, `6` Phase A             |
 | `6-subscription-reconciliation` Phase A  |        | `2`                                              | `3`, `5` Phase A             |
-| `4-ws-1.8-multiscreen`                   | in progress | `3`, `1`                                         |                              |
+| `4-ws-1.8-multiscreen`                   | implemented (09f511a) | `3`, `1`                                         |                              |
 | `5-new-view-model` Phase B               |        | `4`, merged `5` Phase A                          |                              |
 | `6-subscription-reconciliation` Phase B  |        | `5` Phase B, merged `6` Phase A                  |                              |
 | `7-grouping`                             |        | `5` Phase B; topology subscription (done)        | `6` Phase B                  |
