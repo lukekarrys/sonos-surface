@@ -250,6 +250,16 @@ test("ui drags step through the screen in order and release first only when requ
     ]);
     assert.equal(await releaseRequired(port, () => {}), true);
   }
+  // Navigation is one command with one reply, the same shape as button boot.
+  const nav = new Port();
+  nav.reply = (command) =>
+    command === "ui-nav next\n" ? ["[12] [ui] nav next screen=1"] : [];
+  await uiAction(nav, ["nav", "next"], options, () => {});
+  assert.deepEqual(nav.writes, ["ui-nav next\n"]);
+  await assert.rejects(
+    uiAction(nav, ["nav", "previous"], options, () => {}),
+    /nav takes next/,
+  );
   // A sample a physical finger cancelled was never delivered, so the tap
   // fails instead of reporting the discarded contact as done.
   const cancelled = new Port();

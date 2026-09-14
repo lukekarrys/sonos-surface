@@ -25,7 +25,9 @@ import {
   hardwareTargetId,
   buildPath,
   fqbn,
+  variantDefines,
 } from "../scripts/hardware-targets.ts";
+import type { BuildVariant } from "../scripts/hardware-targets.ts";
 import { checkTasks } from "../scripts/check.ts";
 
 test("process arguments remain literal and failures/signals propagate", async () => {
@@ -96,7 +98,7 @@ test("both formatter check modes reject broken fixtures without modifying them",
 test("editor target generation uses the normal compiler options", () => {
   for (const { id, define } of Object.values(hardwareTargets)) {
     const normal = compileArguments(id);
-    const editor = compileArguments(id, false, true);
+    const editor = compileArguments(id, "runtime", true);
     assert.deepEqual(
       editor.filter((arg) => arg !== "--only-compilation-database"),
       normal,
@@ -136,7 +138,7 @@ test("hardware registry accepts exactly the current model IDs and rejects aliase
     await assert.rejects(device(["flash", id]), /--port/);
 });
 
-test("hardware targets retain their FQBN facts and isolated build outputs", () => {
+test("hardware targets retain their FQBN facts and isolated build outputs", async () => {
   const common =
     "esp32:esp32:esp32s3:USBMode=hwcdc,CDCOnBoot=cdc,PSRAM=opi,UploadSpeed=460800,";
   assert.equal(
@@ -149,15 +151,43 @@ test("hardware targets retain their FQBN facts and isolated build outputs", () =
   );
   assert.equal(buildPath("stick-s3"), join(ROOT, ".build/stick-s3-runtime"));
   assert.equal(buildPath("ws-1.8"), join(ROOT, ".build/ws-1.8-runtime"));
-  assert.equal(buildPath("ws-1.8", true), join(ROOT, ".build/ws-1.8-touch"));
-  assert.throws(
-    () => compileArguments("stick-s3", true),
-    /no touch diagnostic/,
-  );
-  assert.ok(
-    compileArguments("ws-1.8", true).some((arg) =>
-      arg.includes("-DSURFACE_TOUCH_DIAGNOSTIC=1"),
-    ),
+  assert.equal(buildPath("ws-1.8", "touch"), join(ROOT, ".build/ws-1.8-touch"));
+  assert.equal(buildPath("ws-1.8", "lvgl"), join(ROOT, ".build/ws-1.8-lvgl"));
+  for (const variant of ["touch", "lvgl"] as const)
+    assert.throws(
+      () => compileArguments("stick-s3", variant),
+      /no touch-diagnostic variant|no lvgl-playground variant/,
+    );
+  // Every variant define is explicit in every build, so guarded sources never
+  // see an undefined macro; only the chosen variant is 1.
+  const flags = (variant: BuildVariant) =>
+    compileArguments("ws-1.8", variant).find((arg) =>
+      arg.startsWith("compiler.cpp.extra_flags="),
+    ) ?? "";
+  assert.ok(flags("runtime").includes("-DSURFACE_TOUCH_DIAGNOSTIC=0"));
+  assert.ok(flags("runtime").includes("-DSURFACE_LVGL_PLAYGROUND=0"));
+  assert.ok(!flags("runtime").includes("LV_CONF"));
+  assert.ok(flags("touch").includes("-DSURFACE_TOUCH_DIAGNOSTIC=1"));
+  assert.ok(flags("touch").includes("-DSURFACE_LVGL_PLAYGROUND=0"));
+  assert.ok(flags("lvgl").includes("-DSURFACE_TOUCH_DIAGNOSTIC=0"));
+  assert.ok(flags("lvgl").includes("-DSURFACE_LVGL_PLAYGROUND=1"));
+  assert.ok(flags("lvgl").includes("-DLV_CONF_INCLUDE_SIMPLE"));
+  assert.deepEqual(variantDefines("lvgl"), [
+    "-DSURFACE_TOUCH_DIAGNOSTIC=0",
+    "-DSURFACE_LVGL_PLAYGROUND=1",
+    "-DLV_CONF_INCLUDE_SIMPLE",
+  ]);
+  for (const options of [
+    ["--touch-diagnostic", "--lvgl-playground"],
+    ["--lvgl-playground"],
+  ])
+    await assert.rejects(
+      device(["build", "stick-s3", ...options]),
+      /at most one build variant|requires a supported hardware target/,
+    );
+  await assert.rejects(
+    device(["monitor", "ws-1.8", "--port", "fake", "--lvgl-playground"]),
+    /requires a supported hardware target build or flash/,
   );
 });
 
@@ -213,7 +243,12 @@ test("full checks build every current target through the matching package task",
   assert.deepEqual(checkTasks(true).slice(checkTasks().length), [
     "build:stick-s3",
     "build:ws-1.8",
+    "build:ws-1.8:lvgl",
   ]);
+  assert.equal(
+    scripts["build:ws-1.8:lvgl"],
+    "node scripts/device.ts build ws-1.8 --lvgl-playground",
+  );
   for (const { id } of Object.values(hardwareTargets))
     for (const action of ["build", "flash"])
       assert.equal(

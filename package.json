@@ -30,6 +30,7 @@
     "check:full": "node scripts/check.ts --full",
     "build:stick-s3": "node scripts/device.ts build stick-s3",
     "build:ws-1.8": "node scripts/device.ts build ws-1.8",
+    "build:ws-1.8:lvgl": "node scripts/device.ts build ws-1.8 --lvgl-playground",
     "flash:stick-s3": "node scripts/device.ts flash stick-s3",
     "flash:ws-1.8": "node scripts/device.ts flash ws-1.8",
     "configure": "node scripts/configure.ts",

@@ -19,6 +19,7 @@ export const libraries = [
   "M5UnitUnified@0.5.5",
   "M5Unit-NFC@0.1.0",
   "GFX Library for Arduino@1.6.7",
+  "lvgl@9.5.0",
 ];
 
 export interface RunOptions {

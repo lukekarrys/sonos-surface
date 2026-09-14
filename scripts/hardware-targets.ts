@@ -1,13 +1,36 @@
 import { join } from "node:path";
 import { ROOT } from "./common.ts";
 
+// Optional build variants of one hardware target. Each compiles the same
+// sketch with one extra define into its own build directory, so a variant
+// never disturbs the normal image's cache or its flashed configuration.
+export const buildVariants = {
+  runtime: { option: undefined, define: undefined, flags: [], checked: false },
+  // Raw touch coordinates for per-unit calibration; no playback actions.
+  touch: {
+    option: "touch-diagnostic",
+    define: "SURFACE_TOUCH_DIAGNOSTIC",
+    flags: [],
+    checked: false,
+  },
+  // LVGL evaluation playground: the full runtime with LVGL owning the panel.
+  // LV_CONF_INCLUDE_SIMPLE selects the repo-owned lv_conf.h on the include path.
+  lvgl: {
+    option: "lvgl-playground",
+    define: "SURFACE_LVGL_PLAYGROUND",
+    flags: ["-DLV_CONF_INCLUDE_SIMPLE"],
+    checked: true,
+  },
+} as const;
+export type BuildVariant = keyof typeof buildVariants;
+
 export const hardwareTargets = {
   "stick-s3": {
     id: "stick-s3",
     define: "SURFACE_STICK_S3",
     flashSize: "8M",
     partitionScheme: "default_8MB",
-    touchDiagnostic: false,
+    variants: [] as readonly BuildVariant[],
     power: {
       mechanism: "esp32-deep-sleep",
       wakeButton: "front (KEY1 / M5 BtnA)",
@@ -18,7 +41,7 @@ export const hardwareTargets = {
     define: "SURFACE_WAVESHARE_1_8",
     flashSize: "16M",
     partitionScheme: "app3M_fat9M_16MB",
-    touchDiagnostic: true,
+    variants: ["touch", "lvgl"] as readonly BuildVariant[],
     power: { mechanism: "esp32-deep-sleep", wakeButton: "BOOT" },
   },
 } as const;
@@ -34,11 +57,30 @@ export function hardwareTargetId(value: string): HardwareTargetId {
   return value as HardwareTargetId;
 }
 
-export function buildPath(targetId: HardwareTargetId, touch = false) {
+export function buildPath(
+  targetId: HardwareTargetId,
+  variant: BuildVariant = "runtime",
+) {
   const target = hardwareTargets[targetId];
-  if (touch && !target.touchDiagnostic)
-    throw new Error(`Hardware target ${target.id} has no touch diagnostic`);
-  return join(ROOT, ".build", `${target.id}-${touch ? "touch" : "runtime"}`);
+  if (variant !== "runtime" && !target.variants.includes(variant))
+    throw new Error(
+      `Hardware target ${target.id} has no ${buildVariants[variant].option} variant`,
+    );
+  return join(ROOT, ".build", `${target.id}-${variant}`);
+}
+
+// Every variant define is always passed explicitly (0 or 1), so guarded
+// sources never depend on an undefined macro.
+export function variantDefines(variant: BuildVariant): string[] {
+  const chosen = buildVariants[variant];
+  return [
+    ...Object.values(buildVariants).flatMap((candidate) =>
+      candidate.define
+        ? [`-D${candidate.define}=${Number(candidate === chosen)}`]
+        : [],
+    ),
+    ...chosen.flags,
+  ];
 }
 
 export function fqbn(targetId: HardwareTargetId) {

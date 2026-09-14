@@ -33,14 +33,16 @@ import {
   hardwareTargets,
   hardwareTargetId,
   buildPath,
+  buildVariants,
   fqbn,
+  variantDefines,
 } from "./hardware-targets.ts";
-import type { HardwareTargetId } from "./hardware-targets.ts";
+import type { BuildVariant, HardwareTargetId } from "./hardware-targets.ts";
 
 const sketch = join(ROOT, "firmware/sonos_surface");
 export function compileArguments(
   targetId: HardwareTargetId,
-  touch = false,
+  variant: BuildVariant = "runtime",
   database = false,
 ) {
   return [
@@ -52,11 +54,11 @@ export function compileArguments(
     "--libraries",
     join(ROOT, "libraries"),
     "--build-path",
-    buildPath(targetId, touch),
+    buildPath(targetId, variant),
     "--warnings",
     "more",
     "--build-property",
-    `compiler.cpp.extra_flags=-std=gnu++17 -D${hardwareTargets[targetId].define} -DSURFACE_TOUCH_DIAGNOSTIC=${Number(touch)}`,
+    `compiler.cpp.extra_flags=-std=gnu++17 -D${hardwareTargets[targetId].define} ${variantDefines(variant).join(" ")}`,
     "--build-property",
     'compiler.cpp.flags=-MMD -c "@{compiler.sdk.path}/flags/cpp_flags" {compiler.warning_flags} {compiler.optimization_flags} {compiler.common_werror_flags} -std=gnu++17',
     "--build-property",
@@ -65,9 +67,12 @@ export function compileArguments(
     sketch,
   ];
 }
-export async function build(targetId: HardwareTargetId, touch = false) {
+export async function build(
+  targetId: HardwareTargetId,
+  variant: BuildVariant = "runtime",
+) {
   let diagnostics = "";
-  await run("arduino-cli", compileArguments(targetId, touch), {
+  await run("arduino-cli", compileArguments(targetId, variant), {
     onOutput: (text) => {
       diagnostics += text;
     },
@@ -79,7 +84,7 @@ export async function build(targetId: HardwareTargetId, touch = false) {
         (line) =>
           (line.includes(`${ROOT}/libraries/`) ||
             line.includes(`${ROOT}/firmware/`) ||
-            line.includes(`${buildPath(targetId, touch)}/sketch/`)) &&
+            line.includes(`${buildPath(targetId, variant)}/sketch/`)) &&
           line.includes("warning:"),
       )
   )
@@ -278,7 +283,7 @@ export function validateHostEditorDatabase(
 }
 export async function configureCpp(targetId: HardwareTargetId) {
   let diagnostics = "";
-  await run("arduino-cli", compileArguments(targetId, false, true), {
+  await run("arduino-cli", compileArguments(targetId, "runtime", true), {
     onOutput: (text) => {
       diagnostics += text;
     },
@@ -304,17 +309,20 @@ export async function configureCpp(targetId: HardwareTargetId) {
     `C++ editor target: ${targetId}. Verified firmware, owned libraries, and all host test translation units in .build/compile_commands.json.`,
   );
 }
-function hardwareDirectory(targetId: HardwareTargetId, touch = false): string {
+function hardwareDirectory(
+  targetId: HardwareTargetId,
+  variant: BuildVariant = "runtime",
+): string {
   const options = JSON.parse(
     readFileSync(
-      join(buildPath(targetId, touch), "build.options.json"),
+      join(buildPath(targetId, variant), "build.options.json"),
       "utf8",
     ),
   ) as { hardwareFolders: string; customBuildProperties: string };
+  const properties = options.customBuildProperties.split(/[ ,]+/);
   if (
-    !options.customBuildProperties
-      .split(/[ ,]+/)
-      .includes(`-D${hardwareTargets[targetId].define}`)
+    !properties.includes(`-D${hardwareTargets[targetId].define}`) ||
+    variantDefines(variant).some((flag) => !properties.includes(flag))
   )
     throw new Error(
       "Built image hardware target differs; rebuild before flashing",
@@ -324,12 +332,12 @@ function hardwareDirectory(targetId: HardwareTargetId, touch = false): string {
 export async function upload(
   targetId: HardwareTargetId,
   port: string,
-  touch = false,
+  variant: BuildVariant = "runtime",
 ) {
-  if (!existsSync(join(buildPath(targetId, touch), "sonos_surface.ino.bin")))
+  if (!existsSync(join(buildPath(targetId, variant), "sonos_surface.ino.bin")))
     throw new Error(`Build first: node --run build:${targetId}`);
   const platform = join(
-    hardwareDirectory(targetId, touch),
+    hardwareDirectory(targetId, variant),
     `esp32/hardware/esp32/${CORE_VERSION}/platform.txt`,
   );
   const prefix = "tools.esptool_py.upload.pattern_args=";
@@ -349,7 +357,7 @@ export async function upload(
     "--port",
     port,
     "--input-dir",
-    buildPath(targetId, touch),
+    buildPath(targetId, variant),
     "--upload-property",
     recipe
       .replace(prefix, "upload.pattern_args=")
@@ -381,17 +389,17 @@ export async function flash(
   port: string,
   config?: string,
   envFile?: string,
-  touch = false,
+  variant: BuildVariant = "runtime",
   ops = operations,
 ) {
   if (envFile && !config)
     throw new Error("--env-file requires --config when flashing");
   // Resolve before builds, USB access, or writes. Never place credentials in process args.
   const profile = config ? loadProfile(config, envFile) : undefined;
-  await ops.build(targetId, touch);
+  await ops.build(targetId, variant);
   let uploadError: unknown;
   try {
-    await ops.upload(targetId, port, touch);
+    await ops.upload(targetId, port, variant);
   } catch (error) {
     uploadError = error;
   }
@@ -595,12 +603,18 @@ export async function monitor(
 export async function device(argv = process.argv.slice(2)) {
   const { values, positionals } = cli(
     ["port", "seconds", "config", "env-file", "until"],
-    ["download-mode", "touch-diagnostic", "stats", "identify"],
+    [
+      "download-mode",
+      "touch-diagnostic",
+      "lvgl-playground",
+      "stats",
+      "identify",
+    ],
     argv,
   );
   if (values.help)
     return console.log(
-      `node --run build:TARGET|flash:TARGET -- [--port PORT] [--config PATH] [--env-file PATH] [--touch-diagnostic]\nnode --run cpp:configure -- [TARGET]\nnode --run monitor -- TARGET --port PORT [--seconds N] [--until TOKEN] [--stats]\nnode --run reset|reboot -- TARGET --port PORT [--download-mode]\nnode --run ports -- [--identify]\nHardware targets: ${Object.keys(hardwareTargets).join(", ")}`,
+      `node --run build:TARGET|flash:TARGET -- [--port PORT] [--config PATH] [--env-file PATH] [--touch-diagnostic|--lvgl-playground]\nnode --run cpp:configure -- [TARGET]\nnode --run monitor -- TARGET --port PORT [--seconds N] [--until TOKEN] [--stats]\nnode --run reset|reboot -- TARGET --port PORT [--download-mode]\nnode --run ports -- [--identify]\nHardware targets: ${Object.keys(hardwareTargets).join(", ")}`,
     );
   const [action, positionalTarget, ...extra] = positionals;
   if (
@@ -627,14 +641,22 @@ export async function device(argv = process.argv.slice(2)) {
   const targetId = hardwareTargetId(
     positionalTarget ?? (action === "cpp:configure" ? "stick-s3" : ""),
   );
-  const touch = Boolean(values["touch-diagnostic"]);
+  const chosen = (Object.keys(buildVariants) as BuildVariant[]).filter(
+    (name) => {
+      const option = buildVariants[name].option;
+      return option !== undefined && Boolean(values[option]);
+    },
+  );
+  if (chosen.length > 1)
+    throw new Error("Choose at most one build variant option");
+  const variant: BuildVariant = chosen[0] ?? "runtime";
   if (
-    touch &&
-    (!hardwareTargets[targetId].touchDiagnostic ||
+    variant !== "runtime" &&
+    (!hardwareTargets[targetId].variants.includes(variant) ||
       !["build", "flash"].includes(action))
   )
     throw new Error(
-      "--touch-diagnostic requires a supported hardware target build or flash",
+      `--${buildVariants[variant].option} requires a supported hardware target build or flash`,
     );
   if (values["download-mode"] && action !== "reset")
     throw new Error("--download-mode is only for reset");
@@ -647,7 +669,7 @@ export async function device(argv = process.argv.slice(2)) {
     action !== "monitor"
   )
     throw new Error("--seconds, --until, and --stats are only for monitor");
-  if (action === "build") return build(targetId, touch);
+  if (action === "build") return build(targetId, variant);
   if (action === "cpp:configure") return configureCpp(targetId);
   const port = required(values.port, "port");
   if (action === "flash")
@@ -656,7 +678,7 @@ export async function device(argv = process.argv.slice(2)) {
       port,
       stringOption(values.config),
       stringOption(values["env-file"]),
-      touch,
+      variant,
     );
   if (action === "monitor")
     return monitor(port, numberOption(values.seconds, 0, 0, 86400), {

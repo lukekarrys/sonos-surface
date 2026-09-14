@@ -3,9 +3,13 @@
 #include "TouchCoordinates.h"
 #include "WaveshareDrawing.h"
 #include "WaveshareArtwork.h"
+#include "WaveshareButton.h"
 #if !SURFACE_TOUCH_DIAGNOSTIC
 #include "WaveshareInjection.h"
 #include "WaveshareState.h"
+#endif
+#if SURFACE_LVGL_PLAYGROUND
+#include "WaveshareLvgl.h"
 #endif
 #include <Arduino.h>
 #include <Wire.h>
@@ -71,9 +75,18 @@ void loadCalibration() {
 }
 bool held = false;
 uint32_t lastTouch = 0, maxPollGap = 0;
+BootButton bootButton;
+// Every path that requires a release before the next contact also drops the
+// press LVGL may be holding, so nothing completes against a stale widget.
+WaveshareUi ui;
+void cancelUiTouch() {
+  ui.cancelTouch();
+#if SURFACE_LVGL_PLAYGROUND
+  lvgl::cancelTouch(millis());
+#endif
+}
 LocalActivity activity = LocalActivity::None;
 std::string lastScreen;
-WaveshareUi ui;
 BoardContext uiContext;
 int edgeInset = -1; // Temporary serial-controlled display diagnostic; never persisted.
 int edgeRadius = 0;
@@ -309,12 +322,19 @@ bool boardBegin(std::string& notice) {
   panel->setBrightness(140);
   gfx->setTextSize(2);
   Serial.println("[display] PSRAM canvas=329728 bytes; full-frame flush");
+#if SURFACE_LVGL_PLAYGROUND
+  if (!lvgl::begin(*panel, gfx->getFramebuffer(), millis())) {
+    notice = "LVGL draw buffer allocation failed";
+    Serial.println(notice.c_str());
+    return false;
+  }
+#endif
   Serial.println(notice.c_str());
   loadCalibration();
   Serial.printf("[board] display=%dx%d touch=0x%02x SDA=15 SCL=14\n", gfx->width(), gfx->height(),
                 touchAddress);
   ready = true;
-  ui.cancelTouch();
+  cancelUiTouch();
   held = true; // Require a release after boot/recovery/calibration changes.
   lastScreen.clear();
 #if SURFACE_TOUCH_DIAGNOSTIC
@@ -328,7 +348,7 @@ bool boardCommand(const std::string& line) {
   // Read-only navigation aid for serial layout/performance inspection. It emits
   // no intent and does not inject physical touch samples.
   if (line == "ui-screen now" || line == "ui-screen rooms" || line == "ui-screen queue") {
-    ui.cancelTouch();
+    cancelUiTouch();
     held = true;
     ui.screen = line == "ui-screen now"     ? WaveshareScreen::NowPlaying
                 : line == "ui-screen rooms" ? WaveshareScreen::Rooms
@@ -337,12 +357,32 @@ bool boardCommand(const std::string& line) {
     return true;
   }
   if (line == "ui-state") {
-    Serial.printf("ui-state %s\n", waveshareStateJson(ui, lastFrame, held,
-                                                      unsigned(injected.pending()), injected.open())
-                                       .dump()
-                                       .c_str());
+#if SURFACE_LVGL_PLAYGROUND
+    const auto json = lvgl::stateJson(held, unsigned(injected.pending()), injected.open());
+#else
+    const auto json =
+        waveshareStateJson(ui, lastFrame, held, unsigned(injected.pending()), injected.open());
+#endif
+    Serial.printf("ui-state %s\n", json.dump().c_str());
     return true;
   }
+  // The BOOT short-press action without a button; never local activity.
+  if (line == "ui-nav next") {
+#if SURFACE_LVGL_PLAYGROUND
+    lvgl::nextScreen("nav");
+#else
+    Serial.println("[ui] nav next (no action)");
+#endif
+    return true;
+  }
+#if SURFACE_LVGL_PLAYGROUND
+  // Evaluation toggle for the three render strategies of todo/3-lvgl.md §6.
+  if (line.rfind("lvgl-render ", 0) == 0) {
+    if (!lvgl::setRenderMode(line.substr(12)))
+      Serial.println("LVGL_RENDER_INVALID: use lvgl-render partial|even|direct");
+    return true;
+  }
+#endif
   // Development input injection: a queued sample replaces one hardware sample
   // and is otherwise exactly a finger. It records no local activity.
   if (line.rfind("ui-touch ", 0) == 0) {
@@ -387,7 +427,7 @@ bool boardCommand(const std::string& line) {
       edgeInset = std::stoi(inset);
       edgeRadius = std::stoi(radius);
     }
-    ui.cancelTouch();
+    cancelUiTouch();
     held = true;
     lastScreen.clear();
     Serial.printf("DISPLAY_EDGE inset=%d radius=%d (touch actions disabled while visible)\n",
@@ -396,7 +436,7 @@ bool boardCommand(const std::string& line) {
   }
   if (line == "peripherals-retry") {
     ready = false;
-    ui.cancelTouch();
+    cancelUiTouch();
     held = true;
     lastInit = millis() - 5000;
     Serial.println("[board] peripheral retry requested; networking continues");
@@ -429,14 +469,38 @@ bool boardCommand(const std::string& line) {
   }
   calibration = next;
   calibrationStored = true;
-  ui.cancelTouch();
+  cancelUiTouch();
   held = true;
   Serial.printf("CALIBRATION_SAVED %s\n", calibrationJson(calibration).c_str());
   return true;
 }
+#if !SURFACE_TOUCH_DIAGNOSTIC
+// One BOOT short press (physical release edge or injected) is one navigation
+// action. The LVGL playground cycles its screens; the current UI has no
+// top-level screens yet, so it only logs.
+void bootShortPress(bool injected) {
+#if SURFACE_LVGL_PLAYGROUND
+  Serial.println(injected ? "[ui] inject button=boot" : "[button] boot short-press");
+  lvgl::nextScreen(injected ? "inject" : "boot");
+#else
+  Serial.println(injected ? "[ui] inject button=boot (no action)"
+                          : "[button] boot short-press (no action)");
+#endif
+}
+#endif
 static BoardEvent pollInput() {
-  if (digitalRead(0) == LOW)
+  // The raw level is the activity channel; the debounced release edge is the
+  // action, and the press that woke the device is consumed until released.
+  const bool bootLow = digitalRead(0) == LOW;
+  if (bootLow)
     activity = LocalActivity::Button;
+  const bool bootPress = bootButton.sample(bootLow, millis());
+#if SURFACE_TOUCH_DIAGNOSTIC
+  (void)bootPress;
+#else
+  if (bootPress)
+    bootShortPress(false);
+#endif
   static uint32_t lastPoll = 0;
   const auto now = millis();
   if (lastPoll)
@@ -465,7 +529,7 @@ static BoardEvent pollInput() {
       Serial.println("[touch] I2C read failed");
       lastError = millis();
     }
-    ui.cancelTouch();
+    cancelUiTouch();
     held = true;
 #if SURFACE_TOUCH_DIAGNOSTIC
     calibrationContact = false;
@@ -485,7 +549,7 @@ static BoardEvent pollInput() {
   if (fingers > 0 && fingers <= 2)
     activity = LocalActivity::Touch;
   if (edgeInset >= 0) {
-    ui.cancelTouch();
+    cancelUiTouch();
     held = true;
     return {};
   }
@@ -512,9 +576,7 @@ static BoardEvent pollInput() {
 #else
   if (injectedButton) {
     injectedButton = false;
-    // The BOOT release has no assigned action yet; todo/3-lvgl and
-    // todo/4-ws-1.8-multiscreen give it one.
-    Serial.println("[ui] inject button=boot (no action)");
+    bootShortPress(true);
   }
   const auto injection = injected.poll(fingers > 0, held, millis());
   if (injection.cancelled)
@@ -535,6 +597,40 @@ static BoardEvent pollInput() {
       Serial.printf("[ui] inject touch x=%d y=%d fingers=%u held=1 (release required)\n",
                     injection.sample.x, injection.sample.y, fingers);
   }
+#if SURFACE_LVGL_PLAYGROUND
+  // LVGL owns hit-testing: the calibrated (or injected) sample is the indev.
+  if (!fingers || fingers > 1) {
+    if (loggingContact)
+      Serial.printf("[touch] release raw=%d,%d fingers=%u\n", x, y, fingers);
+    loggingContact = false;
+    if (!fingers)
+      held = false;
+    lvgl::touch(0, 0, false, millis());
+    return {};
+  }
+  if (held)
+    return {};
+  const auto point = injecting ? TouchPoint{injection.sample.x, injection.sample.y}
+                               : waveshareTouchPoint(x, y, calibration);
+  if (point.x < 0) {
+    lvgl::touch(0, 0, false, millis());
+    return {};
+  }
+  static int loggedX = 0, loggedY = 0;
+  if (!injecting) {
+    if (!loggingContact || abs(x - loggedX) >= 8 || abs(y - loggedY) >= 8) {
+      Serial.printf("[touch] raw=%d,%d mapped=%d,%d fingers=%d hit=%s\n", x, y, point.x, point.y,
+                    fingers, lvgl::hitName(point.x, point.y));
+      loggedX = x;
+      loggedY = y;
+    }
+    loggingContact = true;
+  } else
+    Serial.printf("[ui] inject touch x=%d y=%d fingers=%u hit=%s\n", point.x, point.y, fingers,
+                  lvgl::hitName(point.x, point.y));
+  lvgl::touch(point.x, point.y, true, millis());
+  return {};
+#else
   if (!fingers) {
     if (loggingContact)
       Serial.printf("[touch] release raw=%d,%d\n", x, y);
@@ -576,6 +672,7 @@ static BoardEvent pollInput() {
                   ui.seekPreview ? long(*ui.seekPreview) : -1L);
   return event;
 #endif
+#endif
 }
 void boardContext(const BoardContext& context) { uiContext = context; }
 
@@ -583,10 +680,16 @@ BoardEvent boardPoll() {
   activity = LocalActivity::None;
   auto event = pollInput();
   event.activity = activity;
+#if SURFACE_LVGL_PLAYGROUND
+  lvgl::service(millis(), maxPollGap);
+#endif
   return event;
 }
 void boardPrepareSleep() {
-  ui.cancelTouch();
+  cancelUiTouch();
+#if SURFACE_LVGL_PLAYGROUND
+  lvgl::stop();
+#endif
   if (displayReady)
     panel->displayOff(); // Both pinned panel drivers send DISPOFF then SLPIN.
   // Vendor V2 CST816x-family driver uses E5=3 for the fitted CST820.
@@ -658,6 +761,12 @@ void boardRender(const AppState& state, const std::string& notice) {
   (void)state;
   (void)notice;
   return;
+#elif SURFACE_LVGL_PLAYGROUND
+  // Widgets are updated from the main task's state copy; LVGL redraws only
+  // what changed on its own cadence in boardPoll.
+  const bool artworkChanged = artworkUpdate(state.observed, uiContext.online, millis());
+  lvgl::render(state, uiContext, artworkPixels(), artworkChanged, millis());
+  (void)notice;
 #else
   ui.update(state, uiContext, millis());
   if (artworkUpdate(state.observed, uiContext.online, millis()))

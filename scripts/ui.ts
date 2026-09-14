@@ -115,6 +115,16 @@ export async function uiAction(
     });
     return;
   }
+  if (action === "nav") {
+    if (rest[0] !== "next" || rest.length !== 1)
+      throw new Error("nav takes next");
+    await usbRequest(port, "ui-nav next", {
+      expect: "[ui] nav ",
+      seconds,
+      print,
+    });
+    return;
+  }
   if (action === "release") {
     if (rest.length) throw new Error("release takes no arguments");
     return inject(["ui-touch release"]);
@@ -133,7 +143,7 @@ export async function uiAction(
       : [];
     return inject([...first, ...touchCommands(points)]);
   }
-  throw new Error("Use tap, drag, release, button, screen, or state");
+  throw new Error("Use tap, drag, release, button, nav, screen, or state");
 }
 export async function ui(argv = process.argv.slice(2), open = readyPort) {
   const { values, positionals } = cli(
@@ -143,7 +153,7 @@ export async function ui(argv = process.argv.slice(2), open = readyPort) {
   );
   if (values.help)
     return console.log(
-      "node --run ui -- --port PORT tap X Y\nnode --run ui -- --port PORT drag X1 Y1 X2 Y2 [--steps N] [--interval-ms 30]\nnode --run ui -- --port PORT release\nnode --run ui -- --port PORT button boot\nnode --run ui -- --port PORT screen now|rooms|queue\nnode --run ui -- --port PORT state\nTouch actions print what follows for [--tail-seconds 4].",
+      "node --run ui -- --port PORT tap X Y\nnode --run ui -- --port PORT drag X1 Y1 X2 Y2 [--steps N] [--interval-ms 30]\nnode --run ui -- --port PORT release\nnode --run ui -- --port PORT button boot\nnode --run ui -- --port PORT nav next\nnode --run ui -- --port PORT screen now|rooms|queue\nnode --run ui -- --port PORT state\nTouch actions print what follows for [--tail-seconds 4].",
     );
   const name = required(values.port, "port");
   const options = {

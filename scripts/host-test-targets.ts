@@ -70,6 +70,11 @@ export function hostTestTargets(): HostTarget[] {
       includes: [deviceInclude],
     },
     {
+      name: "waveshare_lvgl_test",
+      sources: [],
+      includes: [deviceInclude],
+    },
+    {
       name: "artwork_test",
       sources: [],
       includes: [deviceInclude, includes[0]],

@@ -320,12 +320,12 @@ test("flash preflight, preservation, readiness, failed build/upload ordering", a
       assert.equal(profile.config.read_only, true);
     },
   };
-  await flash("stick-s3", "fake", f.path, f.env, false, ops);
+  await flash("stick-s3", "fake", f.path, f.env, "runtime", ops);
   assert.deepEqual(events.splice(0), ["build", "flash", "ready", "configure"]);
-  await flash("stick-s3", "fake", undefined, undefined, false, ops);
+  await flash("stick-s3", "fake", undefined, undefined, "runtime", ops);
   assert.deepEqual(events.splice(0), ["build", "flash", "ready"]);
   await assert.rejects(
-    flash("stick-s3", "fake", undefined, undefined, false, {
+    flash("stick-s3", "fake", undefined, undefined, "runtime", {
       ...ops,
       async build() {
         events.push("build");
@@ -335,7 +335,7 @@ test("flash preflight, preservation, readiness, failed build/upload ordering", a
   );
   assert.deepEqual(events.splice(0), ["build"]);
   await assert.rejects(
-    flash("stick-s3", "fake", f.path, f.env, false, {
+    flash("stick-s3", "fake", f.path, f.env, "runtime", {
       ...ops,
       async build() {
         events.push("build");
@@ -345,7 +345,7 @@ test("flash preflight, preservation, readiness, failed build/upload ordering", a
   );
   assert.deepEqual(events.splice(0), ["build"]);
   await assert.rejects(
-    flash("stick-s3", "fake", f.path, f.env, false, {
+    flash("stick-s3", "fake", f.path, f.env, "runtime", {
       ...ops,
       async upload() {
         events.push("flash");
@@ -355,7 +355,9 @@ test("flash preflight, preservation, readiness, failed build/upload ordering", a
   );
   assert.deepEqual(events.splice(0), ["build", "flash", "ready"]);
   writeFileSync(f.path, "{invalid");
-  await assert.rejects(flash("stick-s3", "fake", f.path, f.env, false, ops));
+  await assert.rejects(
+    flash("stick-s3", "fake", f.path, f.env, "runtime", ops),
+  );
   assert.deepEqual(events, []);
   let touched = false;
   await assert.rejects(
@@ -368,23 +370,25 @@ test("flash preflight, preservation, readiness, failed build/upload ordering", a
     f.path,
     '{"wifi_password":"${SURFACE_MISSING_SECRET_FIXTURE}"}',
   );
-  await assert.rejects(flash("stick-s3", "fake", f.path, f.env, false, ops));
+  await assert.rejects(
+    flash("stick-s3", "fake", f.path, f.env, "runtime", ops),
+  );
   assert.deepEqual(events, []);
 });
 test("flash resolves the profile before building and applies that captured profile", async (t) => {
   const f = fixture(t);
   const expected = loadProfile(f.path, f.env);
   const events: string[] = [];
-  await flash("ws-1.8", "fake", f.path, f.env, true, {
-    async build(board, touch) {
+  await flash("ws-1.8", "fake", f.path, f.env, "lvgl", {
+    async build(board, variant) {
       assert.equal(board, "ws-1.8");
-      assert.equal(touch, true);
+      assert.equal(variant, "lvgl");
       events.push("build");
       // Changing the file after preflight must not change the submitted profile.
       writeFileSync(f.path, "{invalid");
     },
-    async upload(board, port, touch) {
-      assert.deepEqual([board, port, touch], ["ws-1.8", "fake", true]);
+    async upload(board, port, variant) {
+      assert.deepEqual([board, port, variant], ["ws-1.8", "fake", "lvgl"]);
       events.push("flash");
     },
     async ready() {
@@ -434,12 +438,12 @@ test("flash model, arbitrary profile filename and explicit USB port remain indep
     for (const path of paths) {
       for (const port of ["/dev/cu.usbmodem101", "/dev/cu.usbmodem102"]) {
         const events: unknown[] = [];
-        await flash(id, port, path, f.env, false, {
-          async build(target, touch) {
-            events.push(["build", target, touch]);
+        await flash(id, port, path, f.env, "runtime", {
+          async build(target, variant) {
+            events.push(["build", target, variant]);
           },
-          async upload(target, selectedPort, touch) {
-            events.push(["upload", target, selectedPort, touch]);
+          async upload(target, selectedPort, variant) {
+            events.push(["upload", target, selectedPort, variant]);
           },
           async ready(selectedPort) {
             events.push(["ready", selectedPort]);
@@ -450,8 +454,8 @@ test("flash model, arbitrary profile filename and explicit USB port remain indep
           },
         });
         assert.deepEqual(events, [
-          ["build", id, false],
-          ["upload", id, port, false],
+          ["build", id, "runtime"],
+          ["upload", id, port, "runtime"],
           ["ready", port],
           ["configure", port],
         ]);

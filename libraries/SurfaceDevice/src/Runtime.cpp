@@ -1281,6 +1281,7 @@ void loop() {
     log("heartbeat wifi=" + std::to_string(WiFi.status()) + " busy=" +
         std::to_string(activity.user) + " background=" + std::to_string(activity.automatic) +
         " heap=" + std::to_string(ESP.getFreeHeap()) +
+        " psram=" + std::to_string(ESP.getFreePsram()) +
         " inactivity=" + std::to_string(power.inactivityMs(nowMs()) / 1000));
   }
   vTaskDelay(1); // Yield the UI task; no Sonos ordering depends on this scheduler tick.
