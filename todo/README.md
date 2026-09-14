@@ -11,7 +11,7 @@ Each file in this folder is a self-contained prompt for one autonomous agent. `A
 | `3-lvgl`                                 | implemented (ad33b91) | `1`, `2`                                         | `5` Phase A, `6` Phase A     |
 | `5-new-view-model` Phase A               |        | `2`                                              | `3`, `6` Phase A             |
 | `6-subscription-reconciliation` Phase A  |        | `2`                                              | `3`, `5` Phase A             |
-| `4-ws-1.8-multiscreen`                   |        | `3` decision (one track left), `1`               |                              |
+| `4-ws-1.8-multiscreen`                   |        | `3`, `1`                                         |                              |
 | `5-new-view-model` Phase B               |        | `4`, merged `5` Phase A                          |                              |
 | `6-subscription-reconciliation` Phase B  |        | `5` Phase B, merged `6` Phase A                  |                              |
 | `7-grouping`                             |        | `5` Phase B; topology subscription (done)        | `6` Phase B                  |
@@ -50,7 +50,7 @@ Kickoff messages (replace the number and name):
 
 ## Conventions
 
-- **Two-track prompt.** `4-ws-1.8-multiscreen` contains an LVGL track and a hand-rolled track. The last step of `3-lvgl` rewrites it to the chosen track and deletes the other. An agent that finds both tracks present stops and reports instead of guessing.
+- **Track decision.** `4-ws-1.8-multiscreen` was a two-track prompt; `3-lvgl` concluded adopt-with-limitation and rewrote it to the LVGL track (DIRECT render mode fixed). The hand-rolled track is in history at `git show b491051:todo/4-ws-1.8-multiscreen.md`.
 - **Phases.** `5-new-view-model` and `6-subscription-reconciliation` are split into Phase A (portable, host tests only, no UI) and Phase B (device UI). The default is sequential in the table's order; a Phase A may run beside `3-lvgl` in a separate git worktree only when the owner asks for it, in which case work there and never merge it yourself. A Phase B never starts before its Phase A is merged and `done`.
 - **Autonomous device verification.** Every prompt that touches the device carries a section with the exact USB steps an agent runs before asking the owner for anything. They rely on `1-device-tooling`: `node --run ports -- --identify`, `node --run usb`, `node --run ui` (`ui-touch`, `ui-button`, `ui-state`), and `monitor --until` / `--stats`. Injected input is never local activity and never bypasses admission, read_only, or policy.
 - **Live mutations.** The committed default profile has `read_only: false`; device verification sends real transport, volume, seek, and queue mutations to the configured room because real-world behavior is what is being tested. The owner mutes the amplifier during long loops. `read_only: true` is the deliberate brake for tests where mutations would be disruptive; agents may flash such a profile for that purpose but never flip an existing true flag to false.
@@ -64,5 +64,5 @@ Kickoff messages (replace the number and name):
 - Recorded as default, `2-user-input-priority` §1: a user action during another user action is rejected visibly, never queued.
 - Default off, `2-user-input-priority` §5: Stick B sends explicit Play/Pause from observed state instead of toggle's refresh-then-decide.
 - By measurement, `2-user-input-priority` §6: Wi-Fi modem power save off while awake.
-- Outstanding, `3-lvgl` §27: adopt, reject, or adopt with a limitation, after the physical test.
+- Decided, `3-lvgl` §27: adopt with a limitation. LVGL owns widgets, input, screens, and invalidation on ws-1.8; the display path is fixed to DIRECT mode into the PSRAM canvas with the full-frame flush because partial windows tear on this panel (no tearing-effect line). Layouts stay inside the calibrated reachable area and corner mask with targets of at least 32 px.
 - `5-new-view-model` §7: pending stays visible until the job's terminal outcome (default) or reverts after a shorter horizon.
