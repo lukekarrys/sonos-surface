@@ -400,6 +400,13 @@ public:
     if (!worker.running || worker.origin != JobOrigin::Automatic || worker_.snapshot().running)
       return false;
     recordPreempted(worker.jobId);
+    // A generation the preempted read opened stays open. Offer it to the next
+    // automatic job so that, when no user job binds it (USB config or reboot
+    // that then fails to save), it does not wait for its own deadline.
+    const auto sonos = sonos_.snapshot();
+    if (workerDiscoveryId_ && sonos.state == SonosState::Discovering &&
+        workerDiscoveryId_ == sonos.discoveryId)
+      sonosFacts_.discoveryPending = true;
     applyFacts(now);
     return true;
   }
@@ -420,8 +427,11 @@ public:
     if (accepted == std::numeric_limits<uint64_t>::max() ||
         now > std::numeric_limits<uint64_t>::max() - budget || !enqueue(accepted + 1))
       return 0;
-    if (preemptable(origin) && !preemptAutomatic(now))
-      return 0;
+    // The queued job now belongs to the worker; nothing below may reject it.
+    // Admission proved the automatic read Running at this same `now`, so the
+    // Preempt always ends it and Submit always finds an Idle worker.
+    if (preemptable(origin))
+      preemptAutomatic(now);
     workerDiscoveryId_ = 0;
     discoveryResultReceived_ = false;
     jobRefresh_ = refresh;

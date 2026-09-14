@@ -906,6 +906,51 @@ void recoveryStillRejectsMutationsDuringAutomaticRead() {
   f.invariants();
 }
 
+// USB config and reboot preempt an automatic read with no user job to follow
+// it. A routine generation the read had opened must not sit unbound until its
+// own deadline turns into a recovery cycle.
+void maintenancePreemptOffersOpenDiscoveryToNextAutomaticJob() {
+  RuntimeFixture f(129);
+  f.ready();
+  f.tick(RuntimeCoordinator::PollIntervalMs);
+  f.check(f.automaticDue(), "routine automatic poll becomes due");
+  const auto automatic = f.beginJob(true, JobOrigin::Automatic);
+  const auto generation = f.health().discoveryId;
+  f.check(f.health().state == SonosState::Discovering && !f.health().recovering,
+          "routine poll opens its topology generation at pickup");
+  const auto display = f.display;
+  const auto before = f.coordinator.snapshots();
+  f.check(f.coordinator.preemptAutomatic(f.now) && !f.jobs().running &&
+              f.jobs().lastJobId == automatic && f.jobs().lastOutcome == JobOutcome::Preempted,
+          "maintenance preempts a running automatic read without submitting a job");
+  unwindPreempted(f, automatic, display, before);
+  f.tick(RuntimeCoordinator::AutomaticRateLimitMs);
+  f.check(f.health().state == SonosState::Discovering && f.health().discoveryId == generation &&
+              f.automaticDue(),
+          "the open generation makes the next automatic job due before its deadline");
+  const auto next = f.beginJob(true, JobOrigin::Automatic);
+  f.check(next != 0 && f.http.discoveryId == generation,
+          "the next automatic job binds the generation the preempted read opened");
+  f.discovery(true);
+  f.check(f.health().state == SonosState::Ready && f.usable(generation) && f.reconcile().ok,
+          "that job completes the generation and reads normally");
+  f.finish(next, true);
+  f.invariants();
+  // Preempting after the read's discovery completed leaves nothing to offer:
+  // the next poll keeps its ordinary cadence.
+  f.tick(RuntimeCoordinator::PollIntervalMs);
+  f.check(f.automaticDue(), "next routine poll due");
+  const auto completed = f.beginJob(true, JobOrigin::Automatic);
+  f.discovery(true);
+  f.check(f.health().state == SonosState::Ready, "pickup topology completed");
+  f.check(f.coordinator.preemptAutomatic(f.now), "maintenance preempts the room read");
+  f.finish(completed, false);
+  f.tick(RuntimeCoordinator::AutomaticRateLimitMs);
+  f.check(!f.automaticDue() && !f.coordinator.snapshots().discoveryPending,
+          "a preempted read with completed discovery requests no extra automatic work");
+  f.invariants();
+}
+
 void recoveryRejectsWithoutClearingRoom() {
   for (bool offline : {false, true}) {
     RuntimeFixture f(120 + offline);
@@ -1603,6 +1648,7 @@ int main(int argc, char** argv) {
   userInputPreemptsAutomaticRead();
   userInputDuringUserJobRejectsBusy();
   recoveryStillRejectsMutationsDuringAutomaticRead();
+  maintenancePreemptOffersOpenDiscoveryToNextAutomaticJob();
   recoveryRejectsWithoutClearingRoom();
   boundDiscoveryFailureIsImmediate();
   queuedDiscoveryRejectionReportsRecovery();
