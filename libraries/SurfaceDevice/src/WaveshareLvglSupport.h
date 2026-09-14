@@ -27,7 +27,8 @@ inline LvglArea evenAlignedArea(LvglArea area, int width, int height) {
 
 // Section 6 of todo/3-lvgl.md, in order: PARTIAL with a small internal
 // stripe, PARTIAL plus even alignment, then DIRECT into the PSRAM canvas with
-// the known-good full-frame flush.
+// the known-good full-frame flush. DIRECT is the default: the panel has no
+// tearing-effect line, and partial windows tear on any motion (hardware.md).
 enum class LvglRenderMode { Partial, PartialEven, Direct };
 inline const char* lvglRenderModeName(LvglRenderMode mode) {
   switch (mode) {

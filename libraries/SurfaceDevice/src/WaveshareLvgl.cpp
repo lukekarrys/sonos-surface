@@ -25,7 +25,7 @@ uint16_t* frame = nullptr;  // The adapter's PSRAM canvas: DIRECT-mode buffer.
 uint16_t* stripe = nullptr; // Internal SRAM: PARTIAL-mode buffer.
 lv_display_t* display = nullptr;
 lv_indev_t* indev = nullptr;
-LvglRenderMode mode = LvglRenderMode::Partial;
+LvglRenderMode mode = LvglRenderMode::Direct;
 LvglTouchSample sample;
 bool stopped = false;
 // Frame diagnostics, in the style of the [ui] frame line. A touch-driven frame
@@ -65,10 +65,13 @@ struct Named {
   char name[12];
   int size, bucket;
 };
-Named targets[16];
+constexpr unsigned namedCapacity = 24; // 16 targets + slider, pad, list, clear, canvas
+Named targets[namedCapacity];
 unsigned namedCount = 0;
 unsigned clicks[4] = {};
 Named* name(const char* text, int size = 0, int bucket = -1) {
+  if (namedCount >= namedCapacity)
+    surfaceLvglAssertFailed(__FILE__, __LINE__);
   auto& entry = targets[namedCount++];
   snprintf(entry.name, sizeof entry.name, "%s", text);
   entry.size = size;
@@ -407,8 +410,18 @@ void readTouch(lv_indev_t*, lv_indev_data_t* data) {
   data->point.y = sample.y;
   data->state = sample.pressed ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
 }
-void applyRenderMode() {
+bool applyRenderMode() {
   const bool direct = mode == LvglRenderMode::Direct;
+  // The internal-SRAM stripe exists only while a partial mode is selected:
+  // DIRECT is the measured default and internal heap is the scarce resource.
+  if (!direct && !stripe)
+    stripe = static_cast<uint16_t*>(
+        heap_caps_aligned_alloc(16, stripeBytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+  if (!direct && !stripe) {
+    Serial.println("[lvgl] stripe allocation failed; staying in direct mode");
+    mode = LvglRenderMode::Direct;
+    return false;
+  }
   lv_display_set_buffers(display, direct ? frame : stripe, nullptr,
                          direct ? frameBytes : stripeBytes,
                          direct ? LV_DISPLAY_RENDER_MODE_DIRECT : LV_DISPLAY_RENDER_MODE_PARTIAL);
@@ -416,6 +429,7 @@ void applyRenderMode() {
     lv_obj_invalidate(active);
   Serial.printf("[lvgl] render mode=%s buffer=%u bytes\n", lvglRenderModeName(mode),
                 unsigned(direct ? frameBytes : stripeBytes));
+  return true;
 }
 } // namespace
 
@@ -427,10 +441,6 @@ bool begin(Arduino_GFX& output, uint16_t* canvas, uint32_t now) {
     lv_obj_invalidate(lv_display_get_screen_active(display));
     return true;
   }
-  stripe = static_cast<uint16_t*>(
-      heap_caps_aligned_alloc(16, stripeBytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-  if (!stripe)
-    return false;
   const auto heap = ESP.getFreeHeap(), psram = ESP.getFreePsram();
   Serial.printf("[lvgl] init stage=lv_init stack-free=%u\n",
                 unsigned(uxTaskGetStackHighWaterMark(nullptr)));
@@ -473,6 +483,14 @@ bool begin(Arduino_GFX& output, uint16_t* canvas, uint32_t now) {
 void touch(int x, int y, bool pressed, uint32_t now) {
   if (!indev)
     return;
+  // A release keeps the last finger position, as touch controllers report it:
+  // LVGL finishes the gesture (slider value, click target) at that point.
+  if (!pressed) {
+    x = sample.x;
+    y = sample.y;
+  }
+  if (pressed != sample.pressed)
+    Serial.printf("[lvgl] touch %s x=%d y=%d\n", pressed ? "down" : "up", x, y);
   sample = {x, y, pressed, now};
   if (pressed)
     pendingSampleAt = now;
@@ -482,7 +500,7 @@ void cancelTouch(uint32_t now) {
   if (!indev)
     return;
   const bool wasPressed = sample.pressed;
-  sample = {0, 0, false, now};
+  sample = {sample.x, sample.y, false, now};
   if (wasPressed) {
     // Drop the active object first so the release reaches no widget, then
     // ignore the finger until it is actually lifted.
@@ -553,8 +571,7 @@ bool setRenderMode(const std::string& text) {
   if (!parseLvglRenderMode(text, next) || !display)
     return false;
   mode = next;
-  applyRenderMode();
-  return true;
+  return applyRenderMode();
 }
 const char* hitName(int x, int y) {
   if (!display)
