@@ -185,10 +185,10 @@ It is acceptable to render several times per second for a smooth test.
 
 No additional Sonos requests should result merely from these local UI ticks.
 
-Rendering cost: on the hand-rolled track a moving clock makes every 100 ms frame dirty,
-and a full-frame flush costs 43-63 ms of main-task time. Rate-limit clock-only redraws
-to at most 2 Hz on that track and measure the poll gap. On the LVGL track only the
-label/bar invalidates; keep it that way.
+Rendering cost: the display path is LVGL DIRECT mode with one ~44 ms full-frame flush
+per refresh (todo/3-lvgl.md decision), so a clock that ticks several times per second
+costs a flush each time. Only the label/bar may invalidate; keep it that way, and
+measure the poll gap under the ticking clock.
 
 ==================================================
 6. PLAYGROUND: SEEK DRAG
