@@ -113,8 +113,13 @@ bool parseInjectedTouch(const std::string& text, InjectedTouch& sample) {
   return true;
 }
 // The shell already moved to its next screen: load it and report the change.
+// A contact still down is held until it lifts, exactly as after `ui-screen`:
+// LVGL's own wait-for-release ends with the next released sample, which the
+// cancel inside load() feeds it at once, so without the hold a finger that
+// was on the old screen would start a fresh press on the new one.
 void loadScreen(const char* source) {
   const auto loadMs = lvgl::load();
+  held = true;
   Serial.printf("[ui] nav next screen=%s source=%s load=%lu\n", surfaceScreenName(shell.active()),
                 source, loadMs);
 }

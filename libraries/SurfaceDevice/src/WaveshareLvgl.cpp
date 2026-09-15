@@ -769,8 +769,9 @@ void cancelTouch(uint32_t) {
   const bool wasPressed = sample.pressed;
   sample.pressed = false;
   if (wasPressed) {
-    // Drop the active object first so the release reaches no widget, then
-    // ignore the finger until it is actually lifted.
+    // Drop the active object so the release below reaches no widget. The
+    // released read also ends LVGL's wait-for-release, so the adapter's
+    // `held` flag is what keeps a finger still down from pressing again.
     lv_indev_reset(indev, nullptr);
     lv_indev_wait_release(indev);
   }
