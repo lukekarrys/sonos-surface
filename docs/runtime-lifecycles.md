@@ -25,7 +25,7 @@ A user job admitted while an automatic job is Running preempts it: the automatic
 
 A user job reaches the worker within one in-flight socket operation of its admission. Automatic requests use a 1.5-second connect timeout and user requests 3 seconds, so an unreachable speaker bounds the wait at 1.5 seconds; a reachable one unwinds at its next socket check. The worker logs `worker pickup id=N wait-ms=M` for each user job.
 
-Local input, room, and UI-context validation completes before reserving and queuing a job. Local rejections create no worker lifecycle outcome and request no network reconciliation. Busy takes precedence over a temporary discovery/recovery notice. Explicit refresh, room, and queue-page requests respect Sonos backoff and report recovery with its pending retry time; they cannot bypass it.
+Local input, room, and UI-context validation completes before reserving and queuing a job. Local rejections create no worker lifecycle outcome, no pending display values, and request no network reconciliation. Busy takes precedence over a temporary discovery/recovery notice. Explicit refresh, room, and queue-page requests respect Sonos backoff and report recovery with its pending retry time; they cannot bypass it.
 
 The current experimental budgets are 45 seconds for reads/discovery and 90 seconds for mutation jobs, including queue wait and topology work. Discovery also has its own 45-second deadline. Every terminal event releases logical admission. An expired or preempted task unwinds cooperatively; a newer job can wait in the two-entry queue while it does so, behind at most one preempted job not yet picked up. Tasks are never forcibly deleted while holding SDK locks. Initial task/queue allocation failure retries at a bounded 30-second cadence.
 

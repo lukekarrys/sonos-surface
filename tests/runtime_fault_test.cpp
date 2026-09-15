@@ -1,6 +1,7 @@
 #include "RuntimeCoordinator.h"
 #include "lifecycle_test_support.h"
 #include <SurfaceSonos.h>
+#include <ViewModel.h>
 #include <algorithm>
 #include <deque>
 #include <map>
@@ -35,6 +36,13 @@ struct FaultHttp : GuardedHttp {
 struct FaultTransport : SonosTransport {
   FaultHttp& http;
   uint32_t verificationDelay = 0;
+  // The fake speaker. An external controller may overwrite the transport that
+  // a local command just set, before its verification read.
+  PlaybackStatus speaker = PlaybackStatus::Playing;
+  std::optional<PlaybackStatus> externalTransport;
+  uint32_t positionMs = 30000;
+  int volume = 20;
+  MusicIntent prepared;
   explicit FaultTransport(FaultHttp& value) : http(value) {}
   Result refresh(PlaybackState& state) override {
     auto result = http.request("/read", "urn:AVTransport#GetTransportInfo", "");
@@ -45,7 +53,13 @@ struct FaultTransport : SonosTransport {
     state.stale = false;
     state.room = "Office";
     state.title = "Last observed song";
-    state.playback = "PLAYING";
+    state.playback = speaker == PlaybackStatus::Playing ? "PLAYING" : "PAUSED_PLAYBACK";
+    state.transport = speaker;
+    state.trackUri = "track:1";
+    state.durationMs = 180000;
+    state.positionMs = positionMs;
+    state.positionObservedAtMs = http.nowMs();
+    state.volume = volume;
     state.observedAtMs = http.nowMs();
     return {};
   }
@@ -58,17 +72,26 @@ struct FaultTransport : SonosTransport {
     page.revision = 1;
     return {};
   }
-  Result prepare(const ResolvedIntent&) override {
+  Result prepare(const ResolvedIntent& intent) override {
+    prepared = intent.intent;
     PlaybackState state;
     return refresh(state);
   }
   Result execute(Operation operation) override {
-    if (operation != Operation::Next)
-      return Result::fail("Fixture only executes Next");
-    const auto response = http.request("/control", "urn:AVTransport#Next", "");
-    return response.status == 200
-               ? Result{}
-               : Result::fail(response.error, response.status == 0 && !response.notSent);
+    if (operation != Operation::Next && operation != Operation::Play &&
+        operation != Operation::Pause && operation != Operation::Seek)
+      return Result::fail("Fixture only executes Next, Play, Pause, and Seek");
+    const auto response =
+        http.request("/control", std::string("urn:AVTransport#") + operationName(operation), "");
+    if (response.status != 200)
+      return Result::fail(response.error, response.status == 0 && !response.notSent);
+    if (operation == Operation::Play || operation == Operation::Pause)
+      speaker = operation == Operation::Play ? PlaybackStatus::Playing : PlaybackStatus::Paused;
+    if (operation == Operation::Seek)
+      positionMs = uint32_t(*prepared.seekPositionMs);
+    if (externalTransport)
+      speaker = *std::exchange(externalTransport, std::nullopt);
+    return {};
   }
   Result verify(const ResolvedIntent&, PlaybackState& state) override {
     const auto result = refresh(state);
@@ -169,9 +192,17 @@ struct RuntimeFixture {
     coordinator.shutdown(now);
     consumePlatform();
   }
-  uint64_t queueJob(bool refresh = true, JobOrigin origin = JobOrigin::User) {
-    const auto id =
-        coordinator.enqueueJob(now, refresh, origin, [](uint64_t) { return true; }, stopping);
+  // A user mutation carries its frozen intent (Next unless given), exactly as
+  // the firmware passes an explicit mutation's intent at admission.
+  uint64_t queueJob(bool refresh = true, JobOrigin origin = JobOrigin::User,
+                    std::optional<MusicIntent> intent = std::nullopt) {
+    if (!intent) {
+      intent.emplace();
+      intent->transport = TransportCommand::Next;
+    }
+    const auto frozen = resolvePolicy(*intent, {"RINCON_A", {}, 1});
+    const auto id = coordinator.enqueueJob(
+        now, refresh, origin, [](uint64_t) { return true; }, stopping, &frozen);
     if (id) {
       ++accepted;
       check(id == accepted, "monotonic accepted job identity");
@@ -195,9 +226,10 @@ struct RuntimeFixture {
     }
     consumePlatform();
   }
-  uint64_t beginJob(bool refresh = true, JobOrigin origin = JobOrigin::User) {
+  uint64_t beginJob(bool refresh = true, JobOrigin origin = JobOrigin::User,
+                    std::optional<MusicIntent> intent = std::nullopt) {
     tick();
-    const auto id = queueJob(refresh, origin);
+    const auto id = queueJob(refresh, origin, intent);
     if (id)
       pickup(id);
     return id;
@@ -234,6 +266,11 @@ struct RuntimeFixture {
     mutations[http.jobId] = true;
     MusicIntent intent;
     intent.transport = TransportCommand::Next;
+    return app.submit(resolvePolicy(intent, {"RINCON_A", {}, 1}));
+  }
+  Result submit(const MusicIntent& intent) {
+    check(attempted.insert(http.jobId).second, "one deliberate command per worker job");
+    mutations[http.jobId] = true;
     return app.submit(resolvePolicy(intent, {"RINCON_A", {}, 1}));
   }
   Result reconcile() {
@@ -326,6 +363,10 @@ struct RuntimeFixture {
     check(display.observed.targetId == selectedId, "only selected UUID is published");
     check(http.writes.size() == http.mutations, "at most one Next dispatch per accepted job");
     const auto worker = jobs();
+    check(!display.pending.active() ||
+              (worker.running && worker.jobId == display.pending.jobId &&
+               origins.at(worker.jobId) == JobOrigin::User && mutations.at(worker.jobId)),
+          "pending values belong only to the running user mutation job");
     check(worker.lastOutcome != JobOutcome::Preempted ||
               origins.at(worker.lastJobId) == JobOrigin::Automatic,
           "every Preempted outcome belongs to an Automatic job");
@@ -1112,6 +1153,178 @@ void localRejectionsCreateNoWork() {
   f.invariants();
 }
 
+MusicIntent transportIntent(TransportCommand command) {
+  MusicIntent intent;
+  intent.transport = command;
+  return intent;
+}
+// The main task derives from its copy of the display; no interaction unless given.
+ViewModel visible(const RuntimeFixture& f, InteractionState interaction = {}) {
+  if (interaction.targetId.empty())
+    interaction.targetId = f.selectedId;
+  return deriveViewModel(f.display.observed, f.display.pending, interaction, f.now);
+}
+
+void optimisticTransportFollowsJobOutcome() {
+  // Confirmation, explicit failure, and a contradictory authoritative result.
+  for (unsigned scenario = 0; scenario < 3; ++scenario) {
+    RuntimeFixture f(160 + scenario);
+    f.ready();
+    const auto pause = transportIntent(TransportCommand::Pause);
+    const auto writes = f.http.writes;
+    const auto id = f.beginJob(false, JobOrigin::User, pause);
+    auto view = visible(f);
+    f.check(id && f.display.pending.jobId == id && view.updating &&
+                view.transport.value == PlaybackStatus::Paused &&
+                view.transport.authority == FieldAuthority::Pending && f.http.writes == writes,
+            "admission shows the requested transport before any HTTP");
+    const auto play = resolvePolicy(transportIntent(TransportCommand::Play), {"RINCON_A", {}, 1});
+    f.check(f.coordinator.enqueueJob(
+                f.now, false, JobOrigin::User, [](uint64_t) { return true; }, false, &play) == 0 &&
+                f.display.pending.jobId == id &&
+                f.display.pending.transport == PlaybackStatus::Paused,
+            "another tap during a pending mutation rejects as busy and replaces nothing");
+    f.discovery(true);
+    f.http.explicitFailure = scenario == 1;
+    if (scenario == 2)
+      f.transport.externalTransport = PlaybackStatus::Playing;
+    f.transport.volume = 45; // Another controller changes volume meanwhile.
+    const auto result = f.submit(pause);
+    view = visible(f);
+    f.check(result.ok == (scenario != 1) && f.display.pending.jobId == id &&
+                view.transport.value == PlaybackStatus::Paused &&
+                view.transport.authority == FieldAuthority::Pending && view.volume.value == 45 &&
+                view.volume.authority == FieldAuthority::Observed,
+            "pending owns transport until the terminal outcome while volume stays live");
+    f.finish(id, result.ok);
+    view = visible(f);
+    f.check(!f.display.pending.active() && !view.updating &&
+                view.transport.value ==
+                    (scenario == 0 ? PlaybackStatus::Paused : PlaybackStatus::Playing) &&
+                view.transport.authority == FieldAuthority::Observed,
+            "terminal outcome clears pending and the authoritative observation wins");
+    f.invariants();
+  }
+}
+
+void seekDragReleasesOnePendingSeek() {
+  for (bool fails : {false, true}) {
+    RuntimeFixture f(170 + fails);
+    f.ready();
+    const InteractionState drag{f.selectedId, 90000, std::nullopt};
+    f.check(visible(f, drag).positionMs.authority == FieldAuthority::Interaction,
+            "drag owns the visible position");
+    // An ordinary poll lands while the finger holds.
+    f.transport.positionMs = 41000;
+    f.transport.volume = 33;
+    f.tick(RuntimeCoordinator::PollIntervalMs);
+    f.check(f.automaticDue(), "poll comes due during the drag");
+    const auto poll = f.beginJob(true, JobOrigin::Automatic);
+    f.discovery(true);
+    f.check(f.reconcile().ok, "poll reads during the drag");
+    f.finish(poll, true);
+    auto view = visible(f, drag);
+    f.check(f.display.observed.positionMs == 41000u && view.positionMs.value == 90000u &&
+                view.positionMs.authority == FieldAuthority::Interaction &&
+                view.volume.value == 33 && view.volume.authority == FieldAuthority::Observed,
+            "observations keep updating but cannot move the active drag");
+    const auto accepted = f.jobs().accepted;
+    MusicIntent seek;
+    seek.seekPositionMs = 90000;
+    const auto id = f.beginJob(false, JobOrigin::User, seek);
+    view = visible(f);
+    f.check(id && f.jobs().accepted == accepted + 1 && f.display.pending.jobId == id &&
+                f.display.pending.positionMs == 90000u && view.positionMs.value == 90000u &&
+                view.positionMs.authority == FieldAuthority::Pending,
+            "release creates one pending seek that owns the position");
+    f.discovery(true);
+    f.tick(2000);
+    f.check(visible(f).positionMs.value == 92000u, "pending seek keeps playing time");
+    f.http.explicitFailure = fails;
+    const auto result = f.submit(seek);
+    f.check(result.ok == !fails && f.http.writes[id] == 1, "release sends exactly one seek");
+    f.finish(id, result.ok);
+    view = visible(f);
+    f.check(!f.display.pending.active() && view.positionMs.value == (fails ? 41000u : 90000u) &&
+                view.positionMs.authority == FieldAuthority::Observed,
+            "confirmation or failure returns the position to the observation");
+    f.invariants();
+  }
+}
+
+void pendingEndsWithJobLifetime() {
+  for (bool offline : {false, true}) {
+    RuntimeFixture f(180 + offline);
+    f.ready();
+    const auto previous = f.jobs().lastJobId;
+    const auto id = f.beginJob(false, JobOrigin::User, transportIntent(TransportCommand::Pause));
+    f.discovery(true);
+    f.coordinator.finishJob(f.now, previous, {true, true, false, false, false});
+    f.consumePlatform();
+    f.check(f.display.pending.jobId == id, "a late completion for another job id never clears");
+    if (offline)
+      f.drop();
+    else
+      f.tick(f.jobs().deadline - f.now);
+    auto view = visible(f);
+    f.check(!f.jobs().running && !f.display.pending.active() && view.stale &&
+                view.transport.value == PlaybackStatus::Playing &&
+                view.transport.authority == FieldAuthority::Observed,
+            "job deadline or network loss clears pending; visible returns to stale observed");
+    const auto held = view.positionMs.value;
+    f.tick(5000);
+    f.check(visible(f).positionMs.value == held, "a stale observation stops the projection");
+    const auto play = resolvePolicy(transportIntent(TransportCommand::Play), {"RINCON_A", {}, 1});
+    f.check(f.coordinator.enqueueJob(
+                f.now, false, JobOrigin::User, [](uint64_t) { return true; }, false, &play) == 0 &&
+                f.coordinator.enqueueJob(
+                    f.now, false, JobOrigin::User, [](uint64_t) { return false; }, false, &play) ==
+                    0 &&
+                !f.display.pending.active(),
+            "local rejections create no pending state");
+    if (offline) {
+      f.tickUntil(f.network().retryAt);
+      f.connect();
+    } else
+      f.tickUntil(f.health().retryAt);
+    f.transport.positionMs = 77000;
+    const auto read = f.beginJob();
+    f.discovery(true);
+    f.check(f.reconcile().ok, "recovery reads authoritative state");
+    f.finish(read, true);
+    view = visible(f);
+    f.check(!view.stale && view.positionMs.value == 77000u &&
+                view.positionMs.authority == FieldAuthority::Observed,
+            "a fresh authoritative observation replaces stale state");
+    f.tick(1000);
+    f.check(visible(f).positionMs.value == 78000u, "the fresh anchor projects again");
+    f.invariants();
+  }
+}
+
+void roomChangeClearsPendingAndInteraction() {
+  RuntimeFixture f(190);
+  f.ready();
+  const auto id = f.beginJob(false, JobOrigin::User, transportIntent(TransportCommand::Pause));
+  const InteractionState finger{f.selectedId, std::nullopt, 70};
+  auto view = visible(f, finger);
+  f.check(view.volume.authority == FieldAuthority::Interaction &&
+              view.transport.authority == FieldAuthority::Pending,
+          "interaction and pending own their fields before the room change");
+  f.selectedId = "RINCON_B";
+  Room bedroom;
+  bedroom.id = f.selectedId;
+  bedroom.name = "Bedroom";
+  f.check(selectObservedRoom(f.display, bedroom) && !f.display.pending.active(),
+          "room change clears pending with the observation");
+  view = deriveViewModel(f.display.observed, f.display.pending, finger, f.now);
+  f.check(!view.updating && view.volume.authority == FieldAuthority::Unknown &&
+              view.transport.authority == FieldAuthority::Unknown,
+          "an interaction from the old room owns nothing in the new room");
+  f.finish(id, false);
+  f.invariants();
+}
+
 void optionalQueueFailureIsLifecycleSuccess() {
   RuntimeFixture f(140);
   f.ready();
@@ -1653,6 +1866,10 @@ int main(int argc, char** argv) {
   boundDiscoveryFailureIsImmediate();
   queuedDiscoveryRejectionReportsRecovery();
   localRejectionsCreateNoWork();
+  optimisticTransportFollowsJobOutcome();
+  seekDragReleasesOnePendingSeek();
+  pendingEndsWithJobLifetime();
+  roomChangeClearsPendingAndInteraction();
   optionalQueueFailureIsLifecycleSuccess();
   publicDecisionsHonorDeadlinesBeforeTimerService();
   sharedTicksLogBootAndRecoveryTransitions();

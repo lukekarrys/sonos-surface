@@ -490,6 +490,32 @@ unsigned capabilityTests() {
            !bedroomApp.state().queue && !bedroomApp.state().observed.positionMs);
     ++cases;
   }
+  {
+    // The position anchor is the consistency re-read's RelTime stamped at its
+    // own reply, not the first read stamped at the end of the whole snapshot.
+    struct TimedHttp : CapabilityHttp {
+      int positionReplies = 0;
+      uint64_t finalPositionAt = 0;
+      HttpResponse request(const std::string& path, const std::string& action,
+                           const std::string& body) override {
+        clock += 100;
+        const bool reading = action.find("#GetPositionInfo") != std::string::npos;
+        if (reading && ++positionReplies == 2)
+          position = "0:00:25";
+        auto response = CapabilityHttp::request(path, action, body);
+        if (reading && positionReplies == 2)
+          finalPositionAt = clock;
+        return response;
+      }
+    } http;
+    http.position = "0:00:24";
+    DirectSonos sonos(http, {http.id, "52231"});
+    PlaybackState state;
+    assert(sonos.refresh(state).ok && http.positionReplies == 2);
+    assert(state.positionMs == 25000u && state.positionObservedAtMs == http.finalPositionAt &&
+           state.observedAtMs > state.positionObservedAtMs);
+    ++cases;
+  }
   AppState projected, officeState, bedroomState;
   officeState.observed.targetId = "RINCON_A";
   officeState.observed.title = "Office song";

@@ -684,7 +684,38 @@ bool publishSelectedState(AppState& state, const AppState& incoming,
                           const std::string& selectedId) {
   if (incoming.observed.targetId != selectedId)
     return false;
+  auto pending = std::move(state.pending);
   state = incoming;
+  state.pending = std::move(pending);
+  return true;
+}
+PendingState pendingMutation(uint64_t jobId, const ResolvedIntent& accepted,
+                             const PlaybackState& observed, uint64_t nowMs) {
+  const auto& intent = accepted.intent;
+  PendingState pending;
+  pending.jobId = jobId;
+  pending.acceptedAtMs = nowMs;
+  pending.targetId = accepted.targetId;
+  pending.trackUri = observed.trackUri;
+  if (intent.transport == TransportCommand::Play)
+    pending.transport = PlaybackStatus::Playing;
+  else if (intent.transport == TransportCommand::Pause)
+    pending.transport = PlaybackStatus::Paused;
+  if (intent.seekPositionMs)
+    pending.positionMs = uint32_t(std::clamp<int64_t>(*intent.seekPositionMs, 0, UINT32_MAX));
+  if (intent.volume && !intent.volume->relative)
+    pending.volume = std::clamp(intent.volume->value, 0, 100);
+  pending.shuffle = intent.shuffle;
+  pending.repeat = intent.repeat;
+  pending.content = intent.source || intent.queueIndex ||
+                    intent.transport == TransportCommand::Next ||
+                    intent.transport == TransportCommand::Previous;
+  return pending;
+}
+bool clearPending(PendingState& pending, uint64_t jobId) {
+  if (!jobId || pending.jobId != jobId)
+    return false;
+  pending = {};
   return true;
 }
 void Application::publish() {

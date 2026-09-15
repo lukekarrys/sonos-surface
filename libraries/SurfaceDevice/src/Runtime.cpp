@@ -691,14 +691,17 @@ void ensureWorker() {
 }
 // The queue send and model admission commit together under stateMutex. The
 // worker takes that mutex before using a queued job, so it sees the committed ID.
+// An explicit mutation's frozen intent becomes the displayed pending values; a
+// toggle resolves its command on the worker and has none at admission.
 bool enqueueJobLocked(Job* job) {
+  const bool explicitMutation = !job->refresh && !job->toggleContext;
   return coordinator.enqueueJob(
              nowMs(), job->refresh, job->origin,
              [&](uint64_t id) {
                job->id = id;
                return workerTask && jobs && xQueueSend(jobs, &job, 0) == pdTRUE;
              },
-             stopping.load()) != 0;
+             stopping.load(), explicitMutation ? &job->accepted : nullptr) != 0;
 }
 void rejectInput(const std::string& input, const RuntimeCoordinator::Admission& admission) {
   notice = admission.notice;

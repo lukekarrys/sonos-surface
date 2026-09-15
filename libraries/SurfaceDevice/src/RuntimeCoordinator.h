@@ -236,6 +236,9 @@ private:
     if (!workerFacts_.completion)
       return;
     const auto outcome = workerFacts_.completion->outcome;
+    // Every terminal outcome ends that job's optimistic values: a success has
+    // already published its verify read, and any failure returns to observed.
+    clearPending(display_.pending, workerFacts_.completion->id);
     workerFacts_.completion.reset();
     // Nothing failed: a preempted read keeps the observation, Sonos health,
     // discovery generation, and reconciliation schedule exactly as they were.
@@ -417,15 +420,17 @@ public:
   // A user job admitted over an automatic read preempts it only after the
   // queue send succeeds; the preempted task unwinds while this job waits in
   // the queue. A failed send leaves the automatic read running.
+  // `accepted` is a user mutation's frozen intent; its explicit fields become
+  // the displayed pending values under the new job's ID. Rejections create none.
   template <class Enqueue>
   uint64_t enqueueJob(uint64_t now, bool refresh, JobOrigin origin, Enqueue&& enqueue,
-                      bool stopping = false) {
+                      bool stopping = false, const ResolvedIntent* accepted = nullptr) {
     if (!admission(now, refresh, origin, stopping).allowed)
       return 0;
     const auto budget = refresh ? ReadBudgetMs : MutationBudgetMs;
-    const auto accepted = worker_.snapshot().accepted;
-    if (accepted == std::numeric_limits<uint64_t>::max() ||
-        now > std::numeric_limits<uint64_t>::max() - budget || !enqueue(accepted + 1))
+    const auto count = worker_.snapshot().accepted;
+    if (count == std::numeric_limits<uint64_t>::max() ||
+        now > std::numeric_limits<uint64_t>::max() - budget || !enqueue(count + 1))
       return 0;
     // The queued job now belongs to the worker; nothing below may reject it.
     // Admission proved the automatic read Running at this same `now`, so the
@@ -436,7 +441,10 @@ public:
     discoveryResultReceived_ = false;
     jobRefresh_ = refresh;
     workerEvent(worker_lifecycle::Submit{now, budget, origin});
-    return worker_.snapshot().jobId;
+    const auto id = worker_.snapshot().jobId;
+    if (!refresh && origin == JobOrigin::User && accepted)
+      display_.pending = pendingMutation(id, *accepted, display_.observed, now);
+    return id;
   }
   bool automaticJobDue(uint64_t now, bool workerAvailable, bool stopping = false) {
     service(now);

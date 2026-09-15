@@ -43,6 +43,7 @@ export function hostTestTargets(): HostTarget[] {
       includes: [deviceInclude, ...includes],
     },
     { name: "core_test", sources: sharedSources(), includes },
+    { name: "view_model_test", sources: coreSources(), includes },
     {
       name: "writer_test",
       sources: coreSources(),

@@ -652,13 +652,22 @@ Result DirectSonos::refresh(PlaybackState& state) {
   // A track/source change during the multi-call read must not pair old artwork
   // or timing with the newly selected content. The next poll retries the read.
   std::string finalPosition, finalMedia;
-  if (!(r = soap(AV, "GetPositionInfo", instance, finalPosition)).ok ||
-      !(r = soap(AV, "GetMediaInfo", instance, finalMedia)).ok)
+  if (!(r = soap(AV, "GetPositionInfo", instance, finalPosition)).ok)
+    return r;
+  // The position anchor is the re-read's RelTime at its own reply, not the
+  // first read's value stamped at the end of the whole snapshot.
+  const auto positionObservedAtMs = http_.nowMs();
+  if (!(r = soap(AV, "GetMediaInfo", instance, finalMedia)).ok)
     return r;
   if (next.uri != value(finalMedia, "CurrentURI") || next.track != value(finalPosition, "Track") ||
       next.trackUri != value(finalPosition, "TrackURI") ||
       metadata != value(finalPosition, "TrackMetaData"))
     return Result::fail("Content changed during observation; refresh required");
+  if (next.positionMs) {
+    if (const auto position = parseSonosTime(value(finalPosition, "RelTime")))
+      next.positionMs = position;
+    next.positionObservedAtMs = positionObservedAtMs;
+  }
   if (next.playback.empty() || next.mode.empty())
     return Result::fail("Incomplete playback state");
   next.known = true;

@@ -148,11 +148,13 @@ struct QueuePage {
   uint64_t observedAtMs = 0;
   std::vector<QueueItem> items;
 };
+// Observed Sonos facts. Never advanced locally: positionMs is an anchor read at
+// positionObservedAtMs (monotonic), and views project playing time from it.
 struct PlaybackState {
   bool known = false;
   bool stale = true;
   std::string targetId, room, playback, title, artist, mode, uri;
-  uint64_t observedAtMs = 0;
+  uint64_t observedAtMs = 0, positionObservedAtMs = 0;
   std::optional<int> volume;
   std::string track;
   std::string roomDisplayId, album, artwork, trackUri;
@@ -163,8 +165,33 @@ struct PlaybackState {
   std::optional<Repeat> repeat;
   std::string queueError;
 };
+// Optimistic values of one accepted user mutation awaiting reconciliation,
+// keyed to its worker job id. Only the accepted intent's explicit fields are
+// carried; metadata and queue contents are never fabricated. The entry ends
+// with that job's terminal outcome, a newer accepted job, or a room change;
+// it is never a standing desired state.
+struct PendingState {
+  uint64_t jobId = 0; // Zero: nothing pending.
+  uint64_t acceptedAtMs = 0;
+  std::string targetId, trackUri; // Accepted target; track observed at admission.
+  std::optional<PlaybackStatus> transport;
+  std::optional<uint32_t> positionMs;
+  std::optional<int> volume;
+  std::optional<bool> shuffle;
+  std::optional<Repeat> repeat;
+  bool content = false; // Source, queue item, or skip: new metadata comes only from Sonos.
+  bool active() const { return jobId != 0; }
+};
+// Relative volume has no optimistic value: its target is frozen at preflight.
+PendingState pendingMutation(uint64_t jobId, const ResolvedIntent& accepted,
+                             const PlaybackState& observed, uint64_t nowMs);
+// Clears only the entry owned by jobId; a late completion of another job is ignored.
+bool clearPending(PendingState& pending, uint64_t jobId);
 struct AppState {
   PlaybackState observed;
+  // Display projection only: the runtime coordinator owns it. Worker sessions
+  // never set it, and publication from a session preserves it.
+  PendingState pending;
   std::string status = "idle", detail;
   PolicyProvenance provenance;
   std::string refreshError; // Observation failures do not replace command outcomes.
@@ -173,8 +200,9 @@ struct AppState {
   std::optional<QueuePage> queue;
   std::string queueError;
 };
-// Device projection: discard all observations immediately when selection changes;
-// outcomes from a different bound executor never replace the selected room.
+// Device projection: discard all observations and pending values immediately
+// when selection changes; outcomes from a different bound executor never
+// replace the selected room, and a session's publication keeps pending values.
 bool selectObservedRoom(AppState& state, const Room& room);
 bool publishSelectedState(AppState& state, const AppState& incoming, const std::string& selectedId);
 class SonosTransport {
