@@ -12,7 +12,7 @@ Each file in this folder is a self-contained prompt for one autonomous agent. `A
 | `5-new-view-model` Phase A               | done (5fd34fa) | `2`                                              | `3`, `6` Phase A             |
 | `6-subscription-reconciliation` Phase A  |        | `2`                                              | `3`, `5` Phase A             |
 | `4-ws-1.8-multiscreen`                   | done (e98c3e3) | `3`, `1`                                         |                              |
-| `5-new-view-model` Phase B               |        | `4`, merged `5` Phase A                          |                              |
+| `5-new-view-model` Phase B               | implemented (832f5df) | `4`, merged `5` Phase A                          |                              |
 | `6-subscription-reconciliation` Phase B  |        | `5` Phase B, merged `6` Phase A                  |                              |
 | `7-grouping`                             |        | `5` Phase B; topology subscription (done)        | `6` Phase B                  |
 
