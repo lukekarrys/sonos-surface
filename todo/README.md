@@ -9,7 +9,7 @@ Each file in this folder is a self-contained prompt for one autonomous agent. `A
 | `1-device-tooling`                       | done (06f70b8) |                                                  |                              |
 | `2-user-input-priority`                  | done (4e10ab4) | `1`                                              |                              |
 | `3-lvgl`                                 | done (24896d6) | `1`, `2`                                         | `5` Phase A, `6` Phase A     |
-| `5-new-view-model` Phase A               |        | `2`                                              | `3`, `6` Phase A             |
+| `5-new-view-model` Phase A               | implemented (5fd34fa) | `2`                                              | `3`, `6` Phase A             |
 | `6-subscription-reconciliation` Phase A  |        | `2`                                              | `3`, `5` Phase A             |
 | `4-ws-1.8-multiscreen`                   | done (e98c3e3) | `3`, `1`                                         |                              |
 | `5-new-view-model` Phase B               |        | `4`, merged `5` Phase A                          |                              |
