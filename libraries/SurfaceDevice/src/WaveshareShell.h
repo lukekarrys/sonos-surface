@@ -33,8 +33,9 @@ class WaveshareShell {
   BootButton boot_;
   // Leaving a screen cancels the touch interaction it owns and discards an
   // open Now Playing sub-view. A gesture in progress (including a volume or
-  // seek preview) requires a release before the next contact rearms, so
-  // nothing started here completes elsewhere.
+  // seek drag on Now Playing or Playground) requires a release before the
+  // next contact rearms, so nothing started here completes elsewhere. Pending
+  // accepted mutations live in AppState and survive.
   void leave() {
     if (nowPlaying.contactActive())
       nowPlaying.cancelTouch();
@@ -71,26 +72,33 @@ public:
     next();
     return true;
   }
-  // Widget reports from LVGL's hit-testing. They can only come from Now
-  // Playing's widgets, which exist on that screen alone; the shell still
-  // drops them anywhere else so no hidden screen ever reacts.
+  // The controls a screen's widgets stand for. Now Playing owns all of them;
+  // Playground exercises the shared model with its own seek and play/pause
+  // widgets only; Grouping owns none.
+  bool owns(WaveshareControl control) const {
+    return active_ == SurfaceScreen::NowPlaying ||
+           (active_ == SurfaceScreen::Playground &&
+            (control == WaveshareControl::Seek || control == WaveshareControl::Play));
+  }
+  // Widget reports from LVGL's hit-testing. They can only come from the
+  // active screen's widgets; the shell still drops a control that screen does
+  // not own so no hidden screen ever reacts.
   void pressed(WaveshareControl control) {
-    if (active_ == SurfaceScreen::NowPlaying)
+    if (owns(control))
       nowPlaying.pressed(control);
   }
   void pressLost() {
-    if (active_ == SurfaceScreen::NowPlaying)
+    if (active_ != SurfaceScreen::Grouping)
       nowPlaying.pressLost();
   }
   void slid(WaveshareControl control, uint32_t value, uint32_t maximum) {
-    if (active_ == SurfaceScreen::NowPlaying)
+    if (owns(control))
       nowPlaying.slid(control, value, maximum);
   }
-  // Every touch sample reaches only the active screen. Now Playing keeps its
-  // interaction model; Grouping and Playground own no application actions and
-  // their local state lives in their widgets.
+  // Every touch sample reaches only the active screen. Now Playing and
+  // Playground drive the shared interaction model; Grouping owns no actions.
   BoardEvent touch(int x, int y, int fingers, uint32_t now) {
-    if (active_ != SurfaceScreen::NowPlaying)
+    if (active_ == SurfaceScreen::Grouping)
       return {};
     auto event = nowPlaying.touch(x, y, fingers, now);
     if (!fingers && event.input == Input::None)

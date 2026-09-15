@@ -52,7 +52,7 @@ const uiPort = (state: { held?: boolean; cancelled?: boolean } = {}) => {
     return [
       "[11] [ui] inject gesture expired; hardware sampling resumed",
       touch
-        ? `[11] [ui] inject touch x=${touch[1]} y=${touch[2]} fingers=1 hit=3 volume-preview=-1 seek-preview=-1`
+        ? `[11] [ui] inject touch x=${touch[1]} y=${touch[2]} fingers=1 hit=3 interaction-volume=-1 interaction-position=-1`
         : "[11] [ui] inject release",
     ];
   };

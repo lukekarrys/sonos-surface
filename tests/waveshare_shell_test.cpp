@@ -118,7 +118,7 @@ int main() {
            shell.nowPlaying.state.observed.transport == before.observed.transport &&
            shell.nowPlaying.state.status == before.status &&
            shell.nowPlaying.state.requestId == before.requestId);
-    assert(!shell.nowPlaying.volumePreview && !shell.nowPlaying.seekPreview);
+    assert(!shell.nowPlaying.interaction.volume && !shell.nowPlaying.interaction.positionMs);
     auto s = observation();
     s.requestId = 1;
     s.status = "succeeded";
@@ -129,9 +129,9 @@ int main() {
            shell.nowPlaying.state.observed.transport == PlaybackStatus::Playing);
   }
   {
-    // Touch reaches only the active screen: a press on Grouping or Playground
-    // never starts a Now Playing gesture, and Now Playing works again after
-    // cycling back.
+    // Touch reaches only the active screen: a press on Grouping never starts a
+    // gesture, Playground owns only its seek and play/pause controls, and Now
+    // Playing works again after cycling back.
     auto shell = makeShell();
     shell.next();
     shell.pressed(WaveshareControl::Play);
@@ -141,7 +141,8 @@ int main() {
     shell.next();
     shell.pressed(WaveshareControl::Volume);
     shell.slid(WaveshareControl::Volume, 90, 100);
-    assert(shell.touch(184, 351, 1, 200).input == Input::None && !shell.nowPlaying.volumePreview);
+    assert(shell.touch(184, 351, 1, 200).input == Input::None &&
+           !shell.nowPlaying.interaction.volume);
     assert(shell.touch(0, 0, 0, 230).input == Input::None);
     shell.next();
     assert(shell.touch(0, 0, 0, 260).input == Input::None);
@@ -154,9 +155,9 @@ int main() {
     shell.pressed(WaveshareControl::Volume);
     shell.slid(WaveshareControl::Volume, 80, 100);
     assert(shell.touch(263, 351, 1, 100).input == Input::None);
-    assert(shell.nowPlaying.volumePreview == 80);
+    assert(shell.nowPlaying.interaction.volume == 80);
     assert(shell.next() == SurfaceScreen::Grouping);
-    assert(!shell.nowPlaying.volumePreview && !shell.nowPlaying.contactActive() &&
+    assert(!shell.nowPlaying.interaction.volume && !shell.nowPlaying.contactActive() &&
            shell.nowPlaying.releaseRequired());
     assert(shell.touch(263, 351, 1, 130).input == Input::None);
     assert(shell.touch(0, 0, 0, 160).input == Input::None);
@@ -170,9 +171,10 @@ int main() {
     shell.pressed(WaveshareControl::Seek);
     shell.slid(WaveshareControl::Seek, 500, 1000);
     assert(shell.touch(184, 220, 1, 400).input == Input::None);
-    assert(shell.nowPlaying.seekPreview == 60000);
+    assert(shell.nowPlaying.interaction.positionMs == 60000);
     shell.next();
-    assert(!shell.nowPlaying.seekPreview && shell.touch(0, 0, 0, 430).input == Input::None);
+    assert(!shell.nowPlaying.interaction.positionMs &&
+           shell.touch(0, 0, 0, 430).input == Input::None);
     shell.next();
     shell.next();
     shell.touch(0, 0, 0, 460);
@@ -187,6 +189,55 @@ int main() {
     // Navigating with no gesture in progress requires no release.
     shell.next();
     assert(!shell.nowPlaying.releaseRequired());
+  }
+  {
+    // Playground drives the shared model: its seek drag belongs to the finger,
+    // leaving the screen cancels it and sends nothing, and a pending accepted
+    // mutation survives the change.
+    auto shell = makeShell();
+    shell.show(SurfaceScreen::Playground);
+    shell.pressed(WaveshareControl::Seek);
+    shell.slid(WaveshareControl::Seek, 250, 1000);
+    assert(shell.touch(118, 160, 1, 100).input == Input::None);
+    auto s = observation();
+    s.observed.positionMs = 70000; // An observation lands mid-drag.
+    MusicIntent pause;
+    pause.transport = TransportCommand::Pause;
+    s.pending = pendingMutation(4, resolvePolicy(pause, {"room-a", {}, 1}), s.observed, 110);
+    shell.update(s, context(), 110);
+    auto view = shell.nowPlaying.view(120);
+    assert(shell.nowPlaying.interaction.positionMs == 30000u && view.positionMs.value == 30000u &&
+           view.positionMs.authority == FieldAuthority::Interaction &&
+           view.transport.authority == FieldAuthority::Pending);
+    assert(shell.next() == SurfaceScreen::NowPlaying);
+    view = shell.nowPlaying.view(130);
+    assert(!shell.nowPlaying.interaction.active() && shell.nowPlaying.releaseRequired() &&
+           shell.nowPlaying.state.pending.jobId == 4 &&
+           view.transport.value == PlaybackStatus::Paused &&
+           view.positionMs.authority == FieldAuthority::Observed);
+    assert(shell.touch(0, 0, 0, 140).input == Input::None);
+    // Back on Playground the pending job ends; a seek drag then sends exactly
+    // one request, on release.
+    s.pending = {};
+    shell.update(s, context(), 150);
+    shell.show(SurfaceScreen::Playground);
+    assert(shell.touch(0, 0, 0, 160).input == Input::None);
+    shell.pressed(WaveshareControl::Seek);
+    shell.slid(WaveshareControl::Seek, 500, 1000);
+    assert(shell.touch(184, 160, 1, 200).input == Input::None);
+    shell.slid(WaveshareControl::Seek, 600, 1000);
+    assert(shell.touch(211, 160, 1, 230).input == Input::None);
+    auto event = shell.touch(0, 0, 0, 260);
+    assert(event.input == Input::Intent && event.intent.seekPositionMs == 72000 &&
+           !event.intent.transport);
+    assert(shell.touch(0, 0, 0, 290).input == Input::None);
+    // Its play control is the same explicit transport intent; anything else is inert.
+    s.observed.transport = PlaybackStatus::Playing;
+    shell.update(s, context(), 300);
+    assert(tap(shell, WaveshareControl::Play, 400).intent.transport == TransportCommand::Pause);
+    assert(tap(shell, WaveshareControl::Next, 500).input == Input::None);
+    assert(tap(shell, WaveshareControl::RoomHeader, 600).input == Input::None &&
+           shell.nowPlaying.screen == WaveshareScreen::NowPlaying);
   }
   {
     // Rooms and Queue are sub-views: the cycle discards them and a later
@@ -241,5 +292,6 @@ int main() {
   }
   std::cout << "Waveshare shell checks passed: default and cycling screens, BOOT activity and "
                "consumption, no Sonos mutation on navigation, screen-local touch, cancelled "
-               "previews, sub-view reset, ui-screen and ui-state names\n";
+               "interactions, Playground seek and pending survival, sub-view reset, ui-screen and "
+               "ui-state names\n";
 }

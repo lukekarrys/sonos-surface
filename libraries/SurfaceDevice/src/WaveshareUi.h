@@ -1,5 +1,6 @@
 #pragma once
 #include "SurfaceDevice.h"
+#include <ViewModel.h>
 #include <algorithm>
 #include <tuple>
 #include <cstdlib>
@@ -8,7 +9,9 @@ namespace surface::device {
 // Device-local, portable interaction logic. No network, persistence, or SDKs.
 // LVGL owns the widgets and their hit-testing on the device; this model owns
 // the gesture rules (release-to-submit, cancellation, identity checks) and
-// receives the control LVGL found under a new press.
+// receives the control LVGL found under a new press. Its InteractionState is
+// the only local preview: widgets render deriveViewModel over the observed
+// state, the runtime's pending mutation, and that interaction.
 struct UiRect {
   int x, y, w, h;
 };
@@ -119,7 +122,8 @@ public:
   BoardContext context;
   WaveshareScreen screen = WaveshareScreen::NowPlaying;
   uint32_t queueStart = 0, roomStart = 0;
-  std::optional<uint32_t> volumePreview, seekPreview;
+  // The finger currently owning a visible field (volume or seek position).
+  InteractionState interaction;
   std::string toast;
   bool dirty = true;
   // Gesture observation for diagnostics; the interaction model stays internal.
@@ -127,6 +131,10 @@ public:
   bool contactActive() const { return touching; }
   bool releaseRequired() const { return cancelled; }
   bool fresh() const { return context.online && state.observed.known && !state.observed.stale; }
+  // Visible values at monotonic `now`, the clock of the observation anchors.
+  ViewModel view(uint64_t now) const {
+    return deriveViewModel(state.observed, state.pending, interaction, now);
+  }
   bool canSeek() const {
     const auto& o = state.observed;
     return fresh() && o.seekable == true && o.durationMs && *o.durationMs > 0 && o.positionMs;
@@ -153,8 +161,7 @@ public:
     contact = pending = WaveshareControl::None;
     touching = false;
     cancelled = true;
-    volumePreview.reset();
-    seekPreview.reset();
+    interaction = {};
     dirty = true;
   }
   // LVGL found `control` under a new press. A press that lands on a second
@@ -172,25 +179,27 @@ public:
     if (touching)
       contact = WaveshareControl::None;
   }
-  // A slider knob moved to value/maximum. The preview stays local until the
-  // release sample submits it; a slider that is not usable previews nothing.
+  // A slider knob moved to value/maximum. The finger owns that field until
+  // the release sample submits it; an unusable slider owns nothing.
   void slid(WaveshareControl control, uint32_t value, uint32_t maximum) {
     if (cancelled || !maximum || (contact != control && pending != control))
       return;
     value = std::min(value, maximum);
     if (control == WaveshareControl::Volume && fresh() && state.observed.volume)
-      volumePreview = uint32_t(uint64_t(value) * 100 / maximum);
+      interaction.volume = int(uint64_t(value) * 100 / maximum);
     else if (control == WaveshareControl::Seek && canSeek())
-      seekPreview = uint32_t(uint64_t(value) * *state.observed.durationMs / maximum);
+      interaction.positionMs = uint32_t(uint64_t(value) * *state.observed.durationMs / maximum);
     else
       return;
+    interaction.targetId = state.observed.targetId;
     dirty = true;
   }
   void update(const AppState& next, const BoardContext& c, uint32_t now) {
     const auto visual = [](const PlaybackState& o) {
       return std::tie(o.targetId, o.room, o.known, o.stale, o.title, o.artist, o.album, o.transport,
-                      o.source, o.volume, o.mute, o.shuffle, o.repeat, o.positionMs, o.durationMs,
-                      o.seekable, o.queueBacked, o.queueIndex, o.queueTotal, o.queueRevision);
+                      o.source, o.volume, o.mute, o.shuffle, o.repeat, o.positionMs,
+                      o.positionObservedAtMs, o.durationMs, o.seekable, o.queueBacked, o.queueIndex,
+                      o.queueTotal, o.queueRevision);
     };
     bool roomsChanged = c.rooms.size() != context.rooms.size();
     if (!roomsChanged)
@@ -203,8 +212,8 @@ public:
                                next.queue->start != state.queue->start ||
                                next.queue->revision != state.queue->revision));
     dirty = dirty || visual(next.observed) != visual(state.observed) || pageChanged ||
-            roomsChanged || next.refreshError != state.refreshError ||
-            next.queueError != state.queueError ||
+            roomsChanged || next.pending.jobId != state.pending.jobId ||
+            next.refreshError != state.refreshError || next.queueError != state.queueError ||
             next.recoveryRequired != state.recoveryRequired || c.busy != context.busy ||
             c.backgroundActive != context.backgroundActive || c.readOnly != context.readOnly ||
             c.online != context.online;
@@ -310,9 +319,11 @@ public:
     touching = false;
     auto chosen = contact;
     contact = WaveshareControl::None;
-    auto volume = volumePreview, seek = seekPreview;
-    volumePreview.reset();
-    seekPreview.reset();
+    // Ownership passes from the finger to the pending mutation the runtime
+    // admits for this release; widgets resync only from the next state copy.
+    const auto volume = interaction.volume;
+    const auto seek = interaction.positionMs;
+    interaction = {};
     dirty = true;
     if (gestureRoom != state.observed.targetId)
       return {};
@@ -371,7 +382,7 @@ public:
     case WaveshareControl::Volume:
       if (!volume)
         break;
-      intent.volume = Volume{false, int(*volume)};
+      intent.volume = Volume{false, *volume};
       return mutation(intent, "Volume " + std::to_string(*volume), now);
     case WaveshareControl::Seek:
       if (!seek || !canSeek()) {
@@ -389,19 +400,19 @@ public:
     case WaveshareControl::Play:
       if (!canPlay())
         break;
-      intent.transport = state.observed.transport == PlaybackStatus::Playing
+      intent.transport = view(now).transport.value == PlaybackStatus::Playing
                              ? TransportCommand::Pause
                              : TransportCommand::Play;
       return mutation(intent, *intent.transport == TransportCommand::Pause ? "Pause" : "Play", now);
     case WaveshareControl::Shuffle:
       if (!activeQueue() || !state.observed.shuffle.has_value())
         break;
-      intent.shuffle = !*state.observed.shuffle;
+      intent.shuffle = !*view(now).shuffle.value;
       return mutation(intent, "Shuffle", now);
     case WaveshareControl::Repeat:
       if (!activeQueue() || !state.observed.repeat)
         break;
-      intent.repeat = nextRepeat(*state.observed.repeat);
+      intent.repeat = nextRepeat(*view(now).repeat.value);
       return mutation(intent, "Repeat " + std::string(repeatLabel(*intent.repeat)), now);
     case WaveshareControl::Row0:
     case WaveshareControl::Row1:

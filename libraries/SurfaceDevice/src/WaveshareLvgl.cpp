@@ -5,6 +5,7 @@
 #include <Arduino.h>
 #include <Arduino_GFX_Library.h>
 #include <esp_heap_caps.h>
+#include <esp_timer.h>
 #include <lvgl.h>
 #include <cstdio>
 #include <cstring>
@@ -56,13 +57,15 @@ uint32_t pendingSampleAt = 0, frameSampleAt = 0, handlerStart = 0, renderStart =
 uint32_t* pollGap = nullptr;
 struct Totals {
   uint32_t frames = 0, renderMs = 0, flushMs = 0, pixels = 0, touchFrames = 0, touchMs = 0,
-           touchMaxMs = 0;
+           touchMaxMs = 0, pollGapMax = 0;
 } totals;
 struct Frame {
   uint32_t touchToFlush = 0, sampleToHandler = 0, render = 0, flush = 0, flushes = 0, pixels = 0,
            pollGapMax = 0;
 } lastFrame;
 uint32_t frames = 0;
+// The observation anchors' clock (esp_timer), not the 32-bit millis() tick.
+uint64_t monotonicMs() { return uint64_t(esp_timer_get_time() / 1000); }
 
 lv_color_t white() { return lv_color_white(); }
 lv_color_t black() { return lv_color_black(); }
@@ -71,27 +74,21 @@ lv_color_t accent() { return lv_color_hex(0x68F0D8); }
 lv_color_t tile() { return lv_color_hex(0x181C18); }
 lv_color_t amber() { return lv_color_hex(0xF8B040); }
 
-// Every interactive widget carries a name for the logs and hit reports, the
-// Now Playing control it stands for, and for the playground's click targets
-// its size bucket (0 large, 1 medium, 2 small; -1 none).
+// Every interactive widget carries a name for the logs and hit reports and
+// the model control it stands for.
 struct Named {
   char name[12];
   WaveshareControl control;
-  int size, bucket;
 };
-constexpr unsigned namedCapacity = 48;
+constexpr unsigned namedCapacity = 40;
 Named names[namedCapacity];
 unsigned namedCount = 0;
-unsigned clicks[3] = {};
-Named* name(const char* text, WaveshareControl control = WaveshareControl::None, int size = 0,
-            int bucket = -1) {
+Named* name(const char* text, WaveshareControl control = WaveshareControl::None) {
   if (namedCount >= namedCapacity)
     surfaceLvglAssertFailed(__FILE__, __LINE__);
   auto& entry = names[namedCount++];
   snprintf(entry.name, sizeof entry.name, "%s", text);
   entry.control = control;
-  entry.size = size;
-  entry.bucket = bucket;
   return &entry;
 }
 
@@ -117,21 +114,18 @@ struct ListView {
 } rooms, queue;
 const uint16_t* artworkShown = nullptr;
 lv_image_dsc_t artworkDescriptor{};
-lv_obj_t* countLabel = nullptr;
-lv_obj_t* playSlider = nullptr;
-lv_obj_t* sliderValue = nullptr;
-lv_obj_t* pad = nullptr;
-lv_obj_t* cursor = nullptr;
-lv_obj_t* cursorLabel = nullptr;
+// Playground: the state-model lab.
+lv_obj_t *labRoom, *labObserved, *labVisible, *labDetail, *labSeek, *labPosition, *labDuration,
+    *labPlay, *labStatus;
+struct LabRow {
+  lv_obj_t *observed, *pending, *interaction, *visible;
+} labRows[3];
 
 lv_point_t activePoint() {
   lv_point_t point{-1, -1};
   if (auto* active = lv_indev_active())
     lv_indev_get_point(active, &point);
   return point;
-}
-void refreshCounts() {
-  lv_label_set_text_fmt(countLabel, "L %u   M %u   S %u", clicks[0], clicks[1], clicks[2]);
 }
 // Widget events reach the model as the control LVGL found under the press;
 // the sample stream keeps the gesture rules.
@@ -167,13 +161,9 @@ void onEvent(lv_event_t* e) {
   default:
     return;
   }
-  if (code == LV_EVENT_CLICKED && named->bucket >= 0) {
-    ++clicks[named->bucket];
-    refreshCounts();
-  }
   const auto point = activePoint();
-  Serial.printf("[lvgl] event=%s target=%s size=%d x=%d y=%d screen=%s\n", label, named->name,
-                named->size, int(point.x), int(point.y), surfaceScreenName(shell->active()));
+  Serial.printf("[lvgl] event=%s target=%s x=%d y=%d screen=%s\n", label, named->name, int(point.x),
+                int(point.y), surfaceScreenName(shell->active()));
 }
 void onModelSlider(lv_event_t* e) {
   auto* object = static_cast<lv_obj_t*>(lv_event_get_target(e));
@@ -226,15 +216,16 @@ lv_obj_t* button(lv_obj_t* parent, const UiRect& r, const char* text, Named* ent
   lv_obj_center(text_);
   return object;
 }
-// A model slider: the accepted thin track between x=52 and x=316 with a large
+// A model slider: the accepted track between x=52 and x=316 with a large
 // touch area, press-locked so a drag keeps it wherever the finger wanders.
-lv_obj_t* slider(lv_obj_t* parent, int y, int32_t maximum, Named* entry) {
+lv_obj_t* slider(lv_obj_t* parent, int y, int32_t maximum, Named* entry, int height = 6,
+                 int extra = 16) {
   auto* object = named(lv_slider_create(parent), entry);
   lv_obj_set_pos(object, waveshareLayout::sliderLeft, y);
-  lv_obj_set_size(object, waveshareLayout::sliderRight - waveshareLayout::sliderLeft, 6);
+  lv_obj_set_size(object, waveshareLayout::sliderRight - waveshareLayout::sliderLeft, height);
   lv_slider_set_range(object, 0, maximum);
   lv_slider_set_value(object, 0, LV_ANIM_OFF);
-  lv_obj_set_ext_click_area(object, 16);
+  lv_obj_set_ext_click_area(object, extra);
   lv_obj_add_flag(object, LV_OBJ_FLAG_PRESS_LOCK);
   lv_obj_set_style_bg_color(object, tile(), LV_PART_MAIN);
   lv_obj_set_style_bg_color(object, accent(), LV_PART_INDICATOR);
@@ -284,6 +275,26 @@ std::string timeText(std::optional<uint32_t> ms) {
     return "--:--";
   const auto sec = *ms / 1000;
   return std::to_string(sec / 60) + ":" + (sec % 60 < 10 ? "0" : "") + std::to_string(sec % 60);
+}
+// Tenths for the lab clock, which follows the projection several times a second.
+std::string tenthsText(std::optional<uint32_t> ms) {
+  return ms ? timeText(ms) + "." + std::to_string(*ms / 100 % 10) : "--:--";
+}
+// Who owns a visible value: a finger (amber), a pending mutation (accent), or Sonos.
+lv_color_t authorityColor(FieldAuthority authority) {
+  return authority == FieldAuthority::Interaction ? amber()
+         : authority == FieldAuthority::Pending   ? accent()
+         : authority == FieldAuthority::Observed  ? white()
+                                                  : muted();
+}
+// Slider units for a position; `quantumMs` bounds how often a playing clock
+// moves the knob (and therefore repaints).
+int32_t seekValue(std::optional<uint32_t> position, std::optional<uint32_t> duration,
+                  uint32_t quantumMs) {
+  if (!position || !duration || !*duration)
+    return 0;
+  const uint64_t shown = std::min(*position / quantumMs * quantumMs, *duration);
+  return int32_t(shown * waveshareLayout::seekResolution / *duration);
 }
 
 void buildListView(ListView& v, lv_obj_t* parent, const char* title) {
@@ -409,95 +420,67 @@ void buildGrouping(lv_obj_t* s) {
   lv_obj_set_style_text_align(next, LV_TEXT_ALIGN_CENTER, 0);
   label(s, 32, 396, "BOOT: next screen", nullptr, muted());
 }
-lv_obj_t* squareButton(lv_obj_t* parent, int x, int y, int size, const char* text, Named* entry) {
-  auto* object = named(lv_button_create(parent), entry);
-  lv_obj_set_pos(object, x, y);
-  lv_obj_set_size(object, size, size);
-  lv_obj_set_style_pad_all(object, 0, 0);
-  lv_obj_set_style_radius(object, 6, 0);
-  lv_obj_set_style_shadow_width(object, 0, 0);
-  auto* text_ = lv_label_create(object);
-  lv_label_set_text(text_, text);
-  lv_obj_center(text_);
-  return object;
+lv_obj_t* labCell(lv_obj_t* parent, int x, int y, int width, const char* text = "") {
+  return label(parent, x, y, text, nullptr, muted(), width);
 }
-void onPlaySlider(lv_event_t* e) {
-  const auto value = lv_slider_get_value(static_cast<lv_obj_t*>(lv_event_get_target(e)));
-  lv_label_set_text_fmt(sliderValue, "%d", int(value));
-  const auto point = activePoint();
-  Serial.printf("[lvgl] slider value=%d x=%d y=%d\n", int(value), int(point.x), int(point.y));
-}
-void onPad(lv_event_t* e) {
-  const auto code = lv_event_get_code(e);
-  if (code != LV_EVENT_PRESSED && code != LV_EVENT_PRESSING)
-    return;
-  const auto point = activePoint();
-  lv_area_t area;
-  lv_obj_get_coords(pad, &area);
-  lv_obj_set_pos(cursor, point.x - area.x1 - 10, point.y - area.y1 - 10);
-  lv_label_set_text_fmt(cursorLabel, "%d,%d", int(point.x), int(point.y));
-}
-// Development screen: the interaction experiments, laid out inside the
-// reachable area and corner mask so they measure the real product
-// constraints. Nothing here reaches the model or Sonos.
+// Development screen: the state-model lab. Its seek slider and play/pause
+// button are real controls on the shared interaction model (release-to-submit,
+// admission, read_only, policy); the rest shows each authority for the fields
+// they exercise. Laid out inside the reachable area and corner mask.
 void buildPlayground(lv_obj_t* s) {
-  label(s, 32, 28, "PLAYGROUND", &lv_font_montserrat_20, accent());
-  for (int i = 0; i < 4; ++i) {
-    char text[12];
-    snprintf(text, sizeof text, "large-%d", i + 1);
-    squareButton(s, 32 + i * 86, 60, 44, "L", name(text, WaveshareControl::None, 44, 0));
-  }
-  for (int i = 0; i < 5; ++i) {
-    char text[12];
-    snprintf(text, sizeof text, "medium-%d", i + 1);
-    squareButton(s, 32 + i * 66, 112, 32, "M", name(text, WaveshareControl::None, 32, 1));
-  }
-  for (int i = 0; i < 6; ++i) {
-    char text[12];
-    snprintf(text, sizeof text, "small-%d", i + 1);
-    squareButton(s, 32 + i * 56, 152, 24, "s", name(text, WaveshareControl::None, 24, 2));
-  }
-  countLabel = label(s, 32, 184, "", nullptr, muted());
-  refreshCounts();
-  playSlider = named(lv_slider_create(s), name("slider", WaveshareControl::None, 264));
-  lv_obj_set_pos(playSlider, waveshareLayout::sliderLeft, 212);
-  lv_obj_set_size(playSlider, waveshareLayout::sliderRight - waveshareLayout::sliderLeft, 20);
-  lv_slider_set_range(playSlider, 0, 100);
-  lv_slider_set_value(playSlider, 50, LV_ANIM_OFF);
-  lv_obj_set_ext_click_area(playSlider, 14);
-  lv_obj_add_flag(playSlider, LV_OBJ_FLAG_PRESS_LOCK);
-  lv_obj_add_event_cb(playSlider, onPlaySlider, LV_EVENT_VALUE_CHANGED, nullptr);
-  sliderValue = label(s, 32, 240, "50", &lv_font_montserrat_20);
-  pad = named(lv_obj_create(s), name("pad", WaveshareControl::None, 304));
-  lv_obj_set_pos(pad, 32, 268);
-  lv_obj_set_size(pad, 304, 64);
-  lv_obj_set_style_pad_all(pad, 0, 0);
-  lv_obj_remove_flag(pad, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_add_event_cb(pad, onPad, LV_EVENT_ALL, nullptr);
-  cursorLabel = label(pad, 6, 4, "track finger");
-  cursor = lv_obj_create(pad);
-  lv_obj_set_size(cursor, 20, 20);
-  lv_obj_set_style_radius(cursor, LV_RADIUS_CIRCLE, 0);
-  lv_obj_set_style_bg_color(cursor, amber(), 0);
-  lv_obj_set_style_border_width(cursor, 0, 0);
-  lv_obj_remove_flag(cursor, lv_obj_flag_t(LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE));
-  lv_obj_set_pos(cursor, 142, 22);
-  auto* list = named(lv_obj_create(s), name("list", WaveshareControl::None, 304));
-  lv_obj_set_pos(list, 32, 340);
-  lv_obj_set_size(list, 304, 76);
-  lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
-  lv_obj_set_style_pad_row(list, 4, 0);
-  for (int i = 1; i <= 24; ++i) {
-    char text[24];
-    snprintf(text, sizeof text, "Scroll row %d", i);
-    auto* row = label(list, 0, 0, text);
-    lv_obj_set_width(row, lv_pct(100));
+  using namespace waveshareLayout;
+  label(s, 32, 28, "STATE MODEL LAB", &lv_font_montserrat_20, accent());
+  labRoom = labCell(s, 32, 56, 304);
+  labObserved = labCell(s, 32, 78, 304);
+  labVisible = label(s, 32, 98, "", &lv_font_montserrat_20, white(), 304);
+  labDetail = labCell(s, 32, 124, 304);
+  labSeek = slider(s, 160, seekResolution, name("lab-seek", WaveshareControl::Seek), 20, 20);
+  lv_obj_set_style_pad_all(labSeek, 10, LV_PART_KNOB);
+  labPosition = labCell(s, 52, 194, 120);
+  labDuration = labCell(s, 216, 194, 100);
+  lv_obj_set_style_text_align(labDuration, LV_TEXT_ALIGN_RIGHT, 0);
+  auto* play = button(s, {104, 218, 160, 56}, "Play", name("lab-play", WaveshareControl::Play),
+                      &lv_font_montserrat_20);
+  labPlay = caption(play);
+  labStatus = label(s, 32, 282, "", nullptr, amber(), 304);
+  static const char* const heads[] = {"field", "observed", "pending", "touch", "visible"};
+  static const int columns[] = {32, 92, 160, 224, 280};
+  static const int widths[] = {58, 66, 62, 54, 56};
+  for (unsigned c = 0; c < 5; ++c)
+    labCell(s, columns[c], 306, widths[c], heads[c]);
+  static const char* const fields[] = {"transport", "position", "volume"};
+  for (unsigned r = 0; r < 3; ++r) {
+    const int y = 330 + int(r) * 24;
+    label(s, columns[0], y, fields[r], nullptr, muted(), widths[0]);
+    labRows[r] = {labCell(s, columns[1], y, widths[1]), labCell(s, columns[2], y, widths[2]),
+                  labCell(s, columns[3], y, widths[3]), labCell(s, columns[4], y, widths[4])};
+    setColor(labRows[r].observed, white());
   }
 }
 Screen screens[surfaceScreenCount] = {
     {buildNowPlaying, syncView}, {buildGrouping, nullptr}, {buildPlayground, nullptr}};
 
-void syncNowPlaying() {
+// Position is the one field that changes without a new state copy: the local
+// projection. Whole seconds on Now Playing, so a playing clock repaints the
+// label and bar at most once a second.
+void syncNowProgress(const ViewModel& view) {
+  const auto& ui = shell->nowPlaying;
+  const auto& o = ui.state.observed;
+  const auto authority = view.positionMs.authority;
+  // A slider under a finger belongs to LVGL; otherwise it follows the view.
+  if (authority != FieldAuthority::Interaction)
+    lv_slider_set_value(seekSlider, seekValue(view.positionMs.value, view.durationMs, 1000),
+                        LV_ANIM_OFF);
+  setEnabled(seekSlider, ui.canSeek());
+  setText(positionLabel, timeText(view.positionMs.value));
+  setColor(positionLabel,
+           authority == FieldAuthority::Observed ? muted() : authorityColor(authority));
+  setText(durationLabel,
+          o.source == PlaybackSource::Live || o.source == PlaybackSource::AppleMusicStation
+              ? "LIVE"
+              : timeText(view.durationMs));
+}
+void syncNowPlaying(const ViewModel& view) {
   const auto& ui = shell->nowPlaying;
   const auto& o = ui.state.observed;
   const auto& c = ui.context;
@@ -514,53 +497,106 @@ void syncNowPlaying() {
   setText(titleLabel, o.title.empty() ? sourceTitle : o.title.c_str());
   setText(artistLabel, o.artist.empty() ? "Artist unavailable" : o.artist);
   setText(albumLabel, o.album);
-  const std::string status = !ui.toast.empty()                ? ui.toast
-                             : c.busy || c.backgroundActive   ? "Updating..."
+  const auto transport = view.transport.value.value_or(PlaybackStatus::Unknown);
+  const std::string status = !ui.toast.empty()                               ? ui.toast
+                             : c.busy || c.backgroundActive || view.updating ? "Updating..."
                              : ui.state.recoveryRequired      ? "Check room; recovery needed"
                              : !ui.state.refreshError.empty() ? "Room unavailable - retry"
                              : !c.online                      ? "Wi-Fi offline"
-                                                              : playbackLabel(o.transport);
+                                                              : playbackLabel(transport);
   setText(statusLabel, status);
   setColor(statusLabel, !ui.toast.empty() || !ui.state.refreshError.empty() ? amber() : muted());
-  // A slider mid-drag belongs to LVGL; only an idle slider follows observation.
-  if (!ui.seekPreview) {
-    const auto duration = o.durationMs.value_or(0);
-    const auto position = std::min(o.positionMs.value_or(0), duration);
-    lv_slider_set_value(
-        seekSlider,
-        duration ? int32_t(uint64_t(position) * waveshareLayout::seekResolution / duration) : 0,
-        LV_ANIM_OFF);
-  }
-  setEnabled(seekSlider, ui.canSeek());
-  setText(positionLabel, timeText(ui.seekPreview ? ui.seekPreview : o.positionMs));
-  setColor(positionLabel, ui.seekPreview ? amber() : muted());
-  setText(durationLabel,
-          o.source == PlaybackSource::Live || o.source == PlaybackSource::AppleMusicStation
-              ? "LIVE"
-              : timeText(o.durationMs));
+  syncNowProgress(view);
   look(previousButton, ui.fresh());
-  setText(caption(playButton), o.transport == PlaybackStatus::Playing ? "Pause" : "Play");
+  setText(caption(playButton), transport == PlaybackStatus::Playing ? "Pause" : "Play");
   look(playButton, ui.canPlay(), ui.canPlay());
   look(nextButton, ui.fresh());
-  setText(volumeLabel, "Volume " +
-                           (ui.volumePreview ? std::to_string(*ui.volumePreview)
-                            : o.volume       ? std::to_string(*o.volume)
-                                             : "--") +
+  const auto& volume = view.volume;
+  setText(volumeLabel, "Volume " + (volume.value ? std::to_string(*volume.value) : "--") +
                            (o.mute == true ? " (muted)" : ""));
-  setColor(volumeLabel, ui.volumePreview ? amber() : muted());
-  if (!ui.volumePreview)
-    lv_slider_set_value(volumeSlider, int32_t(std::min<uint32_t>(o.volume.value_or(0), 100)),
+  setColor(volumeLabel, volume.authority == FieldAuthority::Observed
+                            ? muted()
+                            : authorityColor(volume.authority));
+  if (volume.authority != FieldAuthority::Interaction)
+    lv_slider_set_value(volumeSlider, int32_t(std::clamp(volume.value.value_or(0), 0, 100)),
                         LV_ANIM_OFF);
   setEnabled(volumeSlider, ui.fresh() && o.volume.has_value());
+  const auto shuffle = view.shuffle.value;
   setText(caption(shuffleButton),
-          "Shuffle " + std::string(o.shuffle ? (*o.shuffle ? "On" : "Off") : "--"));
+          "Shuffle " + std::string(shuffle ? (*shuffle ? "On" : "Off") : "--"));
   look(shuffleButton, ui.activeQueue() && o.shuffle.has_value());
-  setText(caption(repeatButton), "Repeat " + std::string(o.repeat ? repeatLabel(*o.repeat) : "--"));
+  const auto repeat = view.repeat.value;
+  setText(caption(repeatButton), "Repeat " + std::string(repeat ? repeatLabel(*repeat) : "--"));
   look(repeatButton, ui.activeQueue() && o.repeat.has_value());
-  setText(hintLabel, ui.seekPreview || ui.volumePreview ? "Preview - lift to submit"
+  setText(hintLabel, ui.interaction.active()        ? "Preview - lift to submit"
                      : o.queueIndex && o.queueTotal ? "Track " + std::to_string(*o.queueIndex + 1) +
                                                           " of " + std::to_string(*o.queueTotal)
                                                     : "Tap room name to switch");
+}
+// The lab: every value derives from the same model as Now Playing. Its clock
+// follows the projection in quarter seconds; other labels change with state.
+void syncPlayground(const ViewModel& view, uint64_t now) {
+  const auto& ui = shell->nowPlaying;
+  const auto& o = ui.state.observed;
+  const auto& pending = ui.state.pending;
+  const auto quarter = [](std::optional<uint32_t> ms) {
+    return ms ? std::optional<uint32_t>(*ms / 250 * 250) : std::nullopt;
+  };
+  setText(labRoom, (o.room.empty() ? std::string("No room") : o.room) + " - " +
+                       (o.title.empty() ? std::string("no title") : o.title));
+  const auto age = o.positionMs && now >= o.positionObservedAtMs
+                       ? std::to_string((now - o.positionObservedAtMs) / 1000) + "s ago"
+                       : std::string("-");
+  setText(labObserved, "observed " + tenthsText(o.positionMs) + "  anchor " + age);
+  const auto& position = view.positionMs;
+  setText(labVisible, "visible " + tenthsText(quarter(position.value)) + "  " +
+                          fieldAuthorityName(position.authority));
+  setColor(labVisible, authorityColor(position.authority));
+  setText(labDetail,
+          std::string(playbackLabel(view.transport.value.value_or(PlaybackStatus::Unknown))) +
+              (view.stale ? "  stale" : "  fresh") + "  duration " + timeText(view.durationMs));
+  if (position.authority != FieldAuthority::Interaction)
+    lv_slider_set_value(labSeek, seekValue(position.value, view.durationMs, 250), LV_ANIM_OFF);
+  setEnabled(labSeek, ui.canSeek());
+  setText(labPosition, timeText(position.value));
+  setText(labDuration, timeText(view.durationMs));
+  setText(labPlay, view.transport.value == PlaybackStatus::Playing ? "Pause" : "Play");
+  setText(labStatus, !ui.toast.empty() ? ui.toast
+                     : view.updating   ? "pending job " + std::to_string(pending.jobId)
+                     : ui.context.busy ? std::string("busy")
+                                       : std::string());
+  const auto cells = [](const LabRow& row, const std::string& observed,
+                        const std::string& pendingValue, const std::string& touch,
+                        const std::string& visible, FieldAuthority authority) {
+    setText(row.observed, observed);
+    setText(row.pending, pendingValue);
+    setText(row.interaction, touch);
+    setText(row.visible, visible);
+    setColor(row.visible, authorityColor(authority));
+  };
+  const auto transportText = [](std::optional<PlaybackStatus> value) {
+    return value ? std::string(playbackLabel(*value)) : std::string("-");
+  };
+  const bool owned = view.updating;
+  const bool touching = ui.interaction.targetId == o.targetId;
+  cells(labRows[0],
+        transportText(o.transport == PlaybackStatus::Unknown
+                          ? std::nullopt
+                          : std::optional<PlaybackStatus>(o.transport)),
+        transportText(owned ? pending.transport : std::nullopt), "-",
+        transportText(view.transport.value), view.transport.authority);
+  const auto seconds = [](std::optional<uint32_t> ms) {
+    return ms ? timeText(ms) : std::string("-");
+  };
+  cells(labRows[1], seconds(o.positionMs), seconds(owned ? pending.positionMs : std::nullopt),
+        seconds(touching ? ui.interaction.positionMs : std::nullopt), seconds(position.value),
+        position.authority);
+  const auto level = [](std::optional<int> value) {
+    return value ? std::to_string(*value) : std::string("-");
+  };
+  cells(labRows[2], level(o.volume), level(owned ? pending.volume : std::nullopt),
+        level(touching ? ui.interaction.volume : std::nullopt), level(view.volume.value),
+        view.volume.authority);
 }
 void syncStatus(const ListView& v) {
   const auto& ui = shell->nowPlaying;
@@ -782,17 +818,20 @@ void service(uint32_t now, uint32_t& pollGapMax) {
     return;
   pollGap = &pollGapMax;
   handlerStart = now;
+  // The main-loop gap since the last flushed frame, before this refresh resets it.
+  totals.pollGapMax = std::max(totals.pollGapMax, pollGapMax);
   lv_timer_handler();
   pollGap = nullptr;
   static uint32_t lastStats = 0;
   if (now - lastStats >= 5000) {
     lastStats = now;
     Serial.printf("[lvgl] stats frames=%lu render-ms=%lu flush-ms=%lu px=%lu touch-frames=%lu "
-                  "touch-avg=%lu touch-max=%lu screen=%s heap=%lu psram-free=%lu stack-free=%u\n",
+                  "touch-avg=%lu touch-max=%lu poll-gap-max=%lu screen=%s heap=%lu psram-free=%lu "
+                  "stack-free=%u\n",
                   totals.frames, totals.renderMs, totals.flushMs, totals.pixels, totals.touchFrames,
                   totals.touchFrames ? totals.touchMs / totals.touchFrames : 0, totals.touchMaxMs,
-                  surfaceScreenName(shell->active()), ESP.getFreeHeap(), ESP.getFreePsram(),
-                  unsigned(uxTaskGetStackHighWaterMark(nullptr)));
+                  totals.pollGapMax, surfaceScreenName(shell->active()), ESP.getFreeHeap(),
+                  ESP.getFreePsram(), unsigned(uxTaskGetStackHighWaterMark(nullptr)));
     totals = {};
   }
 }
@@ -811,21 +850,36 @@ void render(const uint16_t* artwork, bool artworkChanged, uint32_t) {
     setHidden(placeholder, artwork != nullptr);
   }
   auto& ui = shell->nowPlaying;
-  if (!ui.dirty)
+  const auto now = monotonicMs();
+  const auto view = ui.view(now);
+  if (!ui.dirty) {
+    // No new state: only the local position clock can change, and only the
+    // visible screen's widgets follow it.
+    if (shell->active() == SurfaceScreen::Playground)
+      syncPlayground(view, now);
+    else if (shell->active() == SurfaceScreen::NowPlaying &&
+             ui.screen == WaveshareScreen::NowPlaying)
+      syncNowProgress(view);
     return;
+  }
   ui.dirty = false;
   syncView();
-  syncNowPlaying();
+  syncNowPlaying(view);
   syncRooms();
   syncQueue();
+  syncPlayground(view, now);
   const auto& o = ui.state.observed;
-  Serial.printf("[ui] frame screen=%s view=%s room=%s title=%s transport=%s volume=%d "
-                "position=%lu duration=%lu seek=%d queue-start=%lu readonly=%d busy=%d heap=%lu "
-                "psram-free=%lu\n",
+  Serial.printf("[ui] frame screen=%s view=%s room=%s title=%s transport=%s/%s volume=%d/%s "
+                "position=%lu/%s duration=%lu seek=%d pending-job=%llu queue-start=%lu "
+                "readonly=%d busy=%d heap=%lu psram-free=%lu\n",
                 surfaceScreenName(shell->active()), waveshareScreenName(ui.screen), o.room.c_str(),
-                o.title.c_str(), playbackLabel(o.transport), o.volume.value_or(-1),
-                o.positionMs.value_or(0), o.durationMs.value_or(0), ui.canSeek(), ui.queueStart,
-                ui.context.readOnly, ui.context.busy, ESP.getFreeHeap(), ESP.getFreePsram());
+                o.title.c_str(),
+                playbackLabel(view.transport.value.value_or(PlaybackStatus::Unknown)),
+                fieldAuthorityName(view.transport.authority), view.volume.value.value_or(-1),
+                fieldAuthorityName(view.volume.authority), view.positionMs.value.value_or(0),
+                fieldAuthorityName(view.positionMs.authority), view.durationMs.value_or(0),
+                ui.canSeek(), ui.state.pending.jobId, ui.queueStart, ui.context.readOnly,
+                ui.context.busy, ESP.getFreeHeap(), ESP.getFreePsram());
 }
 uint32_t load() {
   if (!display)
@@ -858,13 +912,8 @@ const char* hitName(int x, int y) {
   return "none";
 }
 nlohmann::json stateJson(bool held, unsigned injectPending, bool injectOpen) {
-  auto state = waveshareStateJson(*shell, held, injectPending, injectOpen);
+  auto state = waveshareStateJson(*shell, held, injectPending, injectOpen, monotonicMs());
   state["lvgl"] = true;
-  state["slider"] = playSlider ? int(lv_slider_get_value(playSlider)) : -1;
-  auto& counts = state["clicks"];
-  counts["large"] = clicks[0];
-  counts["medium"] = clicks[1];
-  counts["small"] = clicks[2];
   auto& touch = state["touch"];
   touch["pressed"] = sample.pressed;
   touch["x"] = sample.x;

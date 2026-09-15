@@ -631,12 +631,12 @@ static BoardEvent pollInput() {
   lvgl::touch(point.x, point.y, true, millis());
   const auto event = shell.touch(point.x, point.y, fingers, millis());
   // One loud line per delivered injection, mirroring the hardware sample log
-  // and carrying the preview the sample produced.
+  // and carrying the interaction the sample produced.
   if (injecting)
-    Serial.printf("[ui] inject touch x=%d y=%d fingers=%u hit=%s volume-preview=%d "
-                  "seek-preview=%ld\n",
-                  point.x, point.y, fingers, hit, ui.volumePreview ? int(*ui.volumePreview) : -1,
-                  ui.seekPreview ? long(*ui.seekPreview) : -1L);
+    Serial.printf("[ui] inject touch x=%d y=%d fingers=%u hit=%s interaction-volume=%d "
+                  "interaction-position=%ld\n",
+                  point.x, point.y, fingers, hit, ui.interaction.volume.value_or(-1),
+                  ui.interaction.positionMs ? long(*ui.interaction.positionMs) : -1L);
   return event;
 #endif
 }
